@@ -138,10 +138,15 @@ class Parser:
                 items.append(self._type_decl(self._derive_list()))
             elif self._at(TokenKind.KW_MACRO):
                 items.append(self._macro())
+            elif self._at(TokenKind.KW_TRAIT):
+                items.append(self._trait_decl())
+            elif self._at(TokenKind.KW_IMPL):
+                items.append(self._impl_decl())
             else:
                 tok = self._peek()
                 raise self._error(
-                    f"expected a function, test, type, or macro, found {self._describe(tok)}",
+                    f"expected a function, test, type, macro, trait, or impl, "
+                    f"found {self._describe(tok)}",
                     tok.span,
                 )
         end = self._peek().span
@@ -156,6 +161,7 @@ class Parser:
     def _fn(self) -> ast.FnDecl:
         start = self._advance().span  # `fn`
         name = self._expect(TokenKind.IDENT, "a function name").text
+        type_params = self._opt_fn_type_params()
         self._expect(TokenKind.LPAREN, "'('")
         params: list[ast.Param] = []
         if not self._at(TokenKind.RPAREN):
@@ -170,7 +176,66 @@ class Parser:
         effects = self._uses_clause()
         self._expect(TokenKind.EQ, "'='")
         body = self._block_or_expr_body()
-        return ast.FnDecl(name, params, return_type, effects, body, start.to(body.span))
+        span = start.to(body.span)
+        return ast.FnDecl(name, params, return_type, effects, body, span, type_params)
+
+    def _opt_fn_type_params(self) -> list[ast.TypeParam]:
+        params: list[ast.TypeParam] = []
+        if self._eat(TokenKind.LT):
+            params.append(self._type_param())
+            while self._eat(TokenKind.COMMA):
+                params.append(self._type_param())
+            self._expect(TokenKind.GT, "'>'")
+        return params
+
+    def _type_param(self) -> ast.TypeParam:
+        tok = self._expect(TokenKind.IDENT, "a type parameter")
+        bounds: list[str] = []
+        if self._eat(TokenKind.COLON):
+            bounds.append(self._expect(TokenKind.IDENT, "a trait bound").text)
+            while self._eat(TokenKind.PLUS):
+                bounds.append(self._expect(TokenKind.IDENT, "a trait bound").text)
+        return ast.TypeParam(tok.text, bounds, tok.span)
+
+    def _trait_decl(self) -> ast.TraitDecl:
+        start = self._advance().span  # `trait`
+        name = self._expect(TokenKind.IDENT, "a trait name").text
+        self._expect(TokenKind.EQ, "'='")
+        self._expect(TokenKind.LBRACE, "'{'")
+        methods: list[ast.TraitMethod] = []
+        while self._at(TokenKind.KW_FN):
+            methods.append(self._trait_method())
+        end = self._expect(TokenKind.RBRACE, "'}'").span
+        return ast.TraitDecl(name, methods, start.to(end))
+
+    def _trait_method(self) -> ast.TraitMethod:
+        start = self._advance().span  # `fn`
+        name = self._expect(TokenKind.IDENT, "a method name").text
+        self._expect(TokenKind.LPAREN, "'('")
+        params: list[ast.Param] = []
+        if not self._at(TokenKind.RPAREN):
+            params.append(self._param())
+            while self._eat(TokenKind.COMMA):
+                params.append(self._param())
+        end = self._expect(TokenKind.RPAREN, "')'").span
+        return_type: ast.TypeExpr | None = None
+        if self._eat(TokenKind.ARROW):
+            return_type = self._type()
+            end = return_type.span or end
+        return ast.TraitMethod(name, params, return_type, start.to(end))
+
+    def _impl_decl(self) -> ast.ImplDecl:
+        start = self._advance().span  # `impl`
+        trait = self._expect(TokenKind.IDENT, "a trait name").text
+        self._expect(TokenKind.KW_FOR, "'for'")
+        type_name = self._expect(TokenKind.IDENT, "a type name").text
+        self._expect(TokenKind.EQ, "'='")
+        self._expect(TokenKind.LBRACE, "'{'")
+        methods: list[ast.FnDecl] = []
+        while self._at(TokenKind.KW_FN):
+            methods.append(self._fn())
+        end = self._expect(TokenKind.RBRACE, "'}'").span
+        return ast.ImplDecl(trait, type_name, methods, start.to(end))
 
     def _param(self) -> ast.Param:
         name_tok = self._expect(TokenKind.IDENT, "a parameter name")

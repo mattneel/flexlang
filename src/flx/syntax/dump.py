@@ -23,8 +23,21 @@ def _dump_item(item: ast.Item, depth: int, out: list[str]) -> None:
         params = ", ".join(f"{p.name}: {_type(p.type)}" for p in item.params)
         ret = _type(item.return_type) if item.return_type else "Unit"
         uses = f" uses {{{', '.join(item.effects)}}}" if item.effects else ""
-        out.append(f"{_indent(depth)}Fn {item.name}({params}) -> {ret}{uses}")
+        tps = ""
+        if item.type_params:
+            tps = "<" + ", ".join(_type_param(tp) for tp in item.type_params) + ">"
+        out.append(f"{_indent(depth)}Fn {item.name}{tps}({params}) -> {ret}{uses}")
         _dump_block(item.body, depth + 1, out)
+    elif isinstance(item, ast.TraitDecl):
+        out.append(f"{_indent(depth)}Trait {item.name}")
+        for sig in item.methods:
+            mp = ", ".join(f"{p.name}: {_type(p.type)}" for p in sig.params)
+            mr = _type(sig.return_type) if sig.return_type else "Unit"
+            out.append(f"{_indent(depth + 1)}fn {sig.name}({mp}) -> {mr}")
+    elif isinstance(item, ast.ImplDecl):
+        out.append(f"{_indent(depth)}Impl {item.trait} for {item.type_name}")
+        for method in item.methods:
+            _dump_item(method, depth + 1, out)
     elif isinstance(item, ast.TestDecl):
         uses = f" uses {{{', '.join(item.effects)}}}" if item.effects else ""
         out.append(f"{_indent(depth)}Test {item.name!r}{uses}")
@@ -51,6 +64,10 @@ def _type(t: ast.TypeExpr) -> str:
     if t.args:
         return f"{t.name}<{', '.join(_type(a) for a in t.args)}>"
     return t.name
+
+
+def _type_param(tp: ast.TypeParam) -> str:
+    return f"{tp.name}: {' + '.join(tp.bounds)}" if tp.bounds else tp.name
 
 
 def _dump_block(block: ast.Block, depth: int, out: list[str]) -> None:

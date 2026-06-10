@@ -40,6 +40,8 @@ class TokenKind(Enum):
     KW_DERIVE = auto()
     KW_FOR = auto()
     KW_IN = auto()
+    KW_TRAIT = auto()
+    KW_IMPL = auto()
 
     # delimiters
     LPAREN = auto()
@@ -105,6 +107,8 @@ KEYWORDS: dict[str, TokenKind] = {
     "derive": TokenKind.KW_DERIVE,
     "for": TokenKind.KW_FOR,
     "in": TokenKind.KW_IN,
+    "trait": TokenKind.KW_TRAIT,
+    "impl": TokenKind.KW_IMPL,
 }
 
 

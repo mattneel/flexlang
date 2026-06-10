@@ -288,6 +288,13 @@ class Item:
 
 
 @dataclass(frozen=True)
+class TypeParam:
+    name: str
+    bounds: list[str]  # trait names this parameter must satisfy
+    span: Span
+
+
+@dataclass(frozen=True)
 class FnDecl(Item):
     name: str
     params: list[Param]
@@ -295,6 +302,7 @@ class FnDecl(Item):
     effects: list[str]
     body: Block
     span: Span
+    type_params: list[TypeParam] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -346,6 +354,29 @@ class MacroDecl(Item):
 
 
 @dataclass(frozen=True)
+class TraitMethod:
+    name: str
+    params: list[Param]
+    return_type: TypeExpr | None
+    span: Span
+
+
+@dataclass(frozen=True)
+class TraitDecl(Item):
+    name: str
+    methods: list[TraitMethod]
+    span: Span
+
+
+@dataclass(frozen=True)
+class ImplDecl(Item):
+    trait: str
+    type_name: str
+    methods: list[FnDecl]
+    span: Span
+
+
+@dataclass(frozen=True)
 class Module:
     name: str
     imports: list[str]
@@ -371,3 +402,11 @@ class Module:
     @property
     def macros(self) -> list[MacroDecl]:
         return [it for it in self.items if isinstance(it, MacroDecl)]
+
+    @property
+    def traits(self) -> list[TraitDecl]:
+        return [it for it in self.items if isinstance(it, TraitDecl)]
+
+    @property
+    def impls(self) -> list[ImplDecl]:
+        return [it for it in self.items if isinstance(it, ImplDecl)]
