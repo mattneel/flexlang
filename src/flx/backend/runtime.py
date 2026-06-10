@@ -14,7 +14,13 @@ void __flx_match_fail(void) {
     fputs("flex: non-exhaustive match reached\\n", stderr);
     abort();
 }
+void flx_log(const char *p, long long n) {
+    fwrite(p, 1, (size_t)n, stdout);
+    fputc('\\n', stdout);
+}
 """
 
 # MLIR external declarations matching BASE_RUNTIME_C, prepended to every module.
-BASE_RUNTIME_DECLS = "func.func private @__flx_match_fail()\n"
+BASE_RUNTIME_DECLS = (
+    "func.func private @__flx_match_fail()\nfunc.func private @flx_log(!llvm.ptr, i64)\n"
+)

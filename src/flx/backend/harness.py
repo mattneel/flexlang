@@ -8,14 +8,12 @@ report described in ``docs/MVP.md`` §3.3 / §5.6.
 
 from __future__ import annotations
 
-# Runtime assertion-failure reporters, called from compiled test code.
-_RUNTIME = r"""#include <stdio.h>
-#include <stdlib.h>
+from flx.backend.runtime import BASE_RUNTIME_C
 
-void __flx_match_fail(void) {
-    fputs("flex: non-exhaustive match reached\n", stderr);
-    abort();
-}
+# Test-only assertion-failure reporters (the shared runtime — flx_log,
+# __flx_match_fail — comes from BASE_RUNTIME_C, prepended below).
+_RUNTIME = r"""#include <stdio.h>
+
 void __flx_assert_fail(void) {
     printf("  assertion failed\n");
 }
@@ -27,6 +25,11 @@ void __flx_assert_ne_fail(long long a, long long b) {
 }
 void __flx_explicit_fail(void) {
     printf("  explicit failure\n");
+}
+void __flx_fail_msg(const char *p, long long n) {
+    printf("  ");
+    fwrite(p, 1, (size_t)n, stdout);
+    printf("\n");
 }
 """
 
@@ -57,7 +60,7 @@ def generate_harness(module_name: str, tests: list[tuple[int, str]]) -> str:
     its name, so filtering stays aligned with the emitted ``@flx_test_<i>``."""
     n = len(tests)
     plural = "" if n == 1 else "s"
-    lines = [_RUNTIME]
+    lines = [BASE_RUNTIME_C, _RUNTIME]
     for i, _ in tests:
         lines.append(f"extern int flx_test_{i}(void);")
     lines.append("")

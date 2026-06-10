@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from flx.backend.runtime import BASE_RUNTIME_DECLS
 from flx.sema.check import CheckResult
 from flx.syntax import ast
-from flx.types import BOOL, I64, UNIT, AdtType, FnType, RecordType, Type
+from flx.types import BOOL, I64, STRING, UNIT, AdtType, FnType, RecordType, Type
 
 _ARITH_OP = {"+": "addi", "-": "subi", "*": "muli", "/": "divsi", "%": "remsi"}
 _CMP_PRED = {"<": "slt", "<=": "sle", ">": "sgt", ">=": "sge", "==": "eq", "!=": "ne"}
@@ -32,6 +32,7 @@ _RUNTIME_DECLS = (
     "func.func private @__flx_assert_eq_fail(i64, i64)\n"
     "func.func private @__flx_assert_ne_fail(i64, i64)\n"
     "func.func private @__flx_explicit_fail()\n"
+    "func.func private @__flx_fail_msg(!llvm.ptr, i64)\n"
 )
 
 
@@ -40,6 +41,8 @@ def mlir_type(ty: Type) -> str:
         return "i64"
     if ty is BOOL:
         return "i1"
+    if ty is STRING:
+        return "!llvm.struct<(ptr, i64)>"
     if isinstance(ty, RecordType):
         fields = ", ".join(mlir_type(t) for _, t in ty.fields)
         return f"!llvm.struct<({fields})>"
@@ -77,6 +80,8 @@ class FunctionLowerer:
         self.types = checked.expr_types
         self.functions = checked.functions
         self.constructors = checked.constructors
+        self.globals: list[str] = []  # module-level string constants (not reset)
+        self._str_count = 0
         self.lines: list[str] = []
         self._n = 0
         self._b = 0
@@ -253,6 +258,8 @@ class FunctionLowerer:
             return self._const(str(expr.value), "i64")
         if isinstance(expr, ast.BoolLit):
             return self._const("1" if expr.value else "0", "i1")
+        if isinstance(expr, ast.StringLit):
+            return self._lower_string(expr)
         if isinstance(expr, ast.NameExpr):
             return self._lower_name(expr)
         if isinstance(expr, ast.UnaryExpr):
@@ -283,6 +290,41 @@ class FunctionLowerer:
         out = self._fresh()
         self._emit(f"{out} = arith.constant {literal} : {mty}")
         return out
+
+    # --- strings: {ptr, i64 length} backed by a module-level global -----------
+
+    def _lower_string(self, expr: ast.StringLit) -> str:
+        data = expr.value.encode("utf-8")
+        name = f"@flx_str_{self._str_count}"
+        self._str_count += 1
+        escaped = "".join(
+            chr(b) if 0x20 <= b < 0x7F and b not in (0x22, 0x5C) else f"\\{b:02X}"
+            for b in data + b"\x00"
+        )
+        self.globals.append(
+            f'llvm.mlir.global private constant {name}("{escaped}") '
+            f"{{addr_space = 0 : i32}} : !llvm.array<{len(data) + 1} x i8>"
+        )
+        mty = "!llvm.struct<(ptr, i64)>"
+        ptr = self._fresh()
+        self._emit(f"{ptr} = llvm.mlir.addressof {name} : !llvm.ptr")
+        length = self._const(str(len(data)), "i64")
+        undef = self._fresh()
+        self._emit(f"{undef} = llvm.mlir.undef : {mty}")
+        with_ptr = self._fresh()
+        self._emit(f"{with_ptr} = llvm.insertvalue {ptr}, {undef}[0] : {mty}")
+        out = self._fresh()
+        self._emit(f"{out} = llvm.insertvalue {length}, {with_ptr}[1] : {mty}")
+        return out
+
+    def _string_parts(self, value: str) -> tuple[str, str]:
+        """Lower a String expression to its (ptr, length) SSA values."""
+        mty = "!llvm.struct<(ptr, i64)>"
+        ptr = self._fresh()
+        self._emit(f"{ptr} = llvm.extractvalue {value}[0] : {mty}")
+        length = self._fresh()
+        self._emit(f"{length} = llvm.extractvalue {value}[1] : {mty}")
+        return ptr, length
 
     # --- slots: memref for scalars, llvm.alloca for aggregates ----------------
 
@@ -569,10 +611,15 @@ class FunctionLowerer:
         return out
 
     def _lower_call(self, expr: ast.CallExpr) -> str | None:
-        # Effectful intrinsics (e.g. Log.info) are validated by the checker;
-        # the MVP lowers them to a no-op at runtime (string I/O lands with
-        # runtime-backed strings).
+        # Effectful intrinsics (validated by the checker). Log.* prints its
+        # message; other intrinsics are MVP no-ops at runtime.
         if isinstance(expr.callee, ast.MemberExpr):
+            obj = expr.callee.obj
+            if isinstance(obj, ast.NameExpr) and obj.name == "Log" and expr.args:
+                value = self.lower_expr(expr.args[0])
+                assert value is not None
+                ptr, length = self._string_parts(value)
+                self._emit(f"func.call @flx_log({ptr}, {length}) : (!llvm.ptr, i64) -> ()")
             return None
         if not isinstance(expr.callee, ast.NameExpr):
             raise BackendError("only direct function calls are supported")
@@ -618,8 +665,14 @@ class FunctionLowerer:
                 b64 = self._to_i64(right, operand_ty)
                 sym = "@__flx_assert_eq_fail" if name == "assert_eq" else "@__flx_assert_ne_fail"
                 self._assert_branch(ok_cond, sym, f"{a64}, {b64}", "i64, i64")
-        else:  # fail / panic always fail
-            self._emit("func.call @__flx_explicit_fail() : () -> ()")
+        else:  # fail(msg) / panic(msg) always fail the test
+            if call.args:
+                value = self.lower_expr(call.args[0])
+                assert value is not None
+                ptr, length = self._string_parts(value)
+                self._emit(f"func.call @__flx_fail_msg({ptr}, {length}) : (!llvm.ptr, i64) -> ()")
+            else:
+                self._emit("func.call @__flx_explicit_fail() : () -> ()")
             one = self._const("1", "i32")
             self._terminator(f"func.return {one} : i32")
         return None
@@ -750,7 +803,8 @@ def emit_program(checked: CheckResult, *, with_tests: bool) -> str:
             parts.append(lowerer.lower_test(test, i))
     body = "\n".join(parts) + "\n"
     decls = BASE_RUNTIME_DECLS + (_RUNTIME_DECLS if with_tests else "")
-    return decls + body
+    globals_text = "".join(g + "\n" for g in lowerer.globals)
+    return decls + globals_text + body
 
 
 def emit_module(checked: CheckResult) -> str:
