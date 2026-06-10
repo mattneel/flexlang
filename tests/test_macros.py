@@ -118,10 +118,10 @@ def test_reflect_for_splice_generates_per_field() -> None:
 # --- derive (check + native) --------------------------------------------------
 
 
-def test_derive_eq_show_generates_functions() -> None:
+def test_derive_eq_show_generates_impls() -> None:
     dump = _expand("derive(Eq, Show) type P = { x: I64 }")
-    assert "Fn eq_P" in dump
-    assert "Fn show_P" in dump
+    assert "Impl Eq for P" in dump
+    assert "Impl Show for P" in dump
 
 
 def test_derive_generic_rejected() -> None:
@@ -138,7 +138,7 @@ def test_macros_example_runs_and_tests() -> None:
 def test_derive_show_prints(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
     src = (
         "derive(Show) type Point = { x: I64, y: I64 }\n"
-        'test "t" uses { Log } { Log.info(show_Point({ x = 1, y = 2 }))\n assert(true) }'
+        'test "t" uses { Log } { let p = { x = 1, y = 2 }\n Log.info(p.show())\n assert(true) }'
     )
     flx = tmp_path / "s.flx"
     flx.write_text(src, encoding="utf-8")

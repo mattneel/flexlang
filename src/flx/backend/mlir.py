@@ -80,6 +80,7 @@ class FunctionLowerer:
         self.types = checked.expr_types
         self.functions = checked.functions
         self.constructors = checked.constructors
+        self.method_targets = checked.method_targets
         self.globals: list[str] = []  # module-level string constants (not reset)
         self._str_count = 0
         self.lines: list[str] = []
@@ -640,6 +641,14 @@ class FunctionLowerer:
         return out
 
     def _lower_call(self, expr: ast.CallExpr) -> str | None:
+        # Trait method call (p.show()) -> direct call to the resolved impl symbol.
+        if isinstance(expr.callee, ast.MemberExpr):
+            symbol = self.method_targets.get(id(expr))
+            if symbol is not None:
+                method_ty = self.functions[symbol]
+                recv = self.lower_expr(expr.callee.obj)
+                args = [recv, *(self.lower_expr(a) for a in expr.args)]
+                return self._emit_call(f"flx_{symbol}", args, method_ty)
         # Effectful intrinsics (validated by the checker). Log.* prints its
         # message; other intrinsics are MVP no-ops at runtime.
         if isinstance(expr.callee, ast.MemberExpr):

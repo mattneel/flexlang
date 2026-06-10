@@ -32,8 +32,9 @@ test "comptime and macros" {
 
 test "derived Eq and Show" uses { Log } {
   let p = { x = 3, y = 4 }
-  Log.info(show_Point(p))
-  Log.info(show_Shape(Circle(7)))
-  assert(eq_Point(p, p))
-  assert(!eq_Point(p, { x = 3, y = 9 }))
+  let s = Circle(7)
+  Log.info(p.show())
+  Log.info(s.show())
+  assert(p.eq(p))
+  assert(!p.eq({ x = 3, y = 9 }))
 }

@@ -8,9 +8,9 @@ records, ADTs/match (with exhaustiveness), generic instantiation (monomorphic),
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
-from flx.diagnostics import Diagnostic, FlexError, Span
+from flx.diagnostics import Diagnostic, FlexError, Pos, Span
 from flx.syntax import ast
 from flx.types import (
     BOOL,
@@ -22,6 +22,7 @@ from flx.types import (
     UNIT,
     AdtType,
     FnType,
+    PrimType,
     RecordType,
     Type,
     VariantDef,
@@ -35,6 +36,25 @@ _BUILTIN_ADTS: dict[str, tuple[list[str], list[tuple[str, list[ast.TypeExpr]]]]]
     "Option": (["T"], [("None", []), ("Some", [_TE("T")])]),
 }
 
+# Builtin traits: name -> [(method, [param TypeExprs incl self], return)].
+_BUILTIN_TRAITS: dict[str, list[tuple[str, list[ast.TypeExpr], ast.TypeExpr]]] = {
+    "Show": [("show", [_TE("Self")], _TE("String"))],
+    "Eq": [("eq", [_TE("Self"), _TE("Self")], _TE("Bool"))],
+}
+
+
+def _type_key(ty: Type) -> str:
+    """Nominal head used as the impl-table key and in symbol mangling."""
+    if isinstance(ty, (PrimType, RecordType, AdtType)):
+        return ty.name
+    return "?"
+
+
+def _mangle(trait: str, key: str, method: str) -> str:
+    # `$` is illegal in source identifiers, so this can't collide with user code.
+    return f"{trait}${key}${method}"
+
+
 # name -> (arity or None for variadic-ish, checker). Builtins are checked ad hoc.
 _BUILTINS = {"assert", "assert_eq", "assert_ne", "fail", "panic"}
 
@@ -47,6 +67,7 @@ _EQUALITY = {"==", "!="}
 _BOOLEAN = {"&&", "||"}
 
 _I64_MAX = 2**63 - 1
+_NO_SPAN = Span("<builtin>", Pos(0, 0, 0), Pos(0, 0, 0))
 
 # (module, method) -> (effect, param types, return type).
 _INTRINSICS: dict[tuple[str, str], tuple[str, tuple[Type, ...], Type]] = {
@@ -68,6 +89,7 @@ class CheckResult:
     expr_types: dict[int, Type]
     functions: dict[str, FnType]
     constructors: set[str]
+    method_targets: dict[int, str]  # id(CallExpr) -> resolved impl symbol
 
 
 @dataclass
@@ -106,6 +128,13 @@ class Checker:
         self.adt_templates: dict[str, tuple[list[str], list[tuple[str, list[ast.TypeExpr]]]]] = {}
         self.ctors: dict[str, tuple[str, int]] = {}  # variant name -> (adt name, index)
         self._subst: dict[str, Type] = {}  # active type-parameter substitution
+        # traits / impls
+        self.traits: dict[str, dict[str, ast.TraitMethod]] = {}
+        self.method_index: dict[str, set[str]] = {}  # method -> declaring traits
+        self.impls: dict[tuple[str, str], dict[str, str]] = {}  # (trait,key) -> method->symbol
+        self.method_targets: dict[int, str] = {}  # id(CallExpr) -> impl symbol
+        self._impl_fns: list[ast.FnDecl] = []  # renamed impl methods, emitted as functions
+        self._self_type: Type | None = None
 
     # --- entry ----------------------------------------------------------------
 
@@ -133,6 +162,8 @@ class Checker:
             fields = tuple((f.name, self._resolve_type(f.type)) for f in record.fields)
             self.record_types[record.name] = RecordType(record.name, fields)
 
+        self._register_traits()
+
         for fn in self.module.functions:
             if fn.name in self.functions:
                 self._err("TYPE002", f"function {fn.name!r} is already defined", fn.span)
@@ -141,14 +172,142 @@ class Checker:
             self.functions[fn.name] = FnType(params, ret)
             self.fn_effects[fn.name] = set(fn.effects)
 
+        self._register_impls()
+
         for fn in self.module.functions:
             self._check_fn(fn)
+        for impl_fn in self._impl_fns:
+            self._check_fn(impl_fn)
         for test in self.module.tests:
             self._check_test(test)
 
         if self.diags:
             raise FlexError(self.diags)
-        return CheckResult(self.module, self.expr_types, self.functions, set(self.ctors))
+        # Emit impl methods as ordinary (mangled) functions for the backend.
+        items = [*self.module.items, *self._impl_fns]
+        module = replace(self.module, items=items)
+        return CheckResult(
+            module, self.expr_types, self.functions, set(self.ctors), self.method_targets
+        )
+
+    # --- traits / impls -------------------------------------------------------
+
+    def _register_traits(self) -> None:
+        for tname, sigs in _BUILTIN_TRAITS.items():
+            self.traits[tname] = {
+                m: ast.TraitMethod(
+                    m,
+                    [ast.Param(f"a{i}", pe, _NO_SPAN) for i, pe in enumerate(ps)],
+                    ret,
+                    _NO_SPAN,
+                )
+                for m, ps, ret in sigs
+            }
+        for trait in self.module.traits:
+            if trait.name in self.traits and trait.name not in _BUILTIN_TRAITS:
+                self._err("TRAIT001", f"trait {trait.name!r} is already defined", trait.span)
+            seen: dict[str, ast.TraitMethod] = {}
+            for method in trait.methods:
+                if method.name in seen:
+                    self._err("TRAIT002", f"duplicate method {method.name!r}", method.span)
+                seen[method.name] = method
+            self.traits[trait.name] = seen
+        for tname, methods in self.traits.items():
+            for mname in methods:
+                self.method_index.setdefault(mname, set()).add(tname)
+
+    def _register_impls(self) -> None:
+        for impl in self.module.impls:
+            if impl.trait not in self.traits:
+                self._err("IMPL001", f"unknown trait {impl.trait!r}", impl.span)
+                continue
+            impl_ty = self._resolve_type(ast.TypeExpr(impl.type_name, [], impl.span))
+            if impl_ty is ERROR:
+                continue
+            key = _type_key(impl_ty)
+            if (impl.trait, key) in self.impls:
+                self._err(
+                    "IMPL006", f"conflicting impl {impl.trait} for {impl.type_name}", impl.span
+                )
+            table: dict[str, str] = {}
+            self.impls[(impl.trait, key)] = table
+            trait_methods = self.traits[impl.trait]
+            provided = {m.name for m in impl.methods}
+            for mname in trait_methods:
+                if mname not in provided:
+                    self._err("IMPL003", f"impl is missing method {mname!r}", impl.span)
+            for method in impl.methods:
+                sig = trait_methods.get(method.name)
+                if sig is None:
+                    self._err(
+                        "IMPL004",
+                        f"{method.name!r} is not a method of {impl.trait}",
+                        method.span,
+                    )
+                    continue
+                self._check_impl_conformance(method, sig, impl_ty)
+                symbol = _mangle(impl.trait, key, method.name)
+                self._self_type = impl_ty
+                params = tuple(self._resolve_type(p.type) for p in method.params)
+                ret = self._resolve_type(method.return_type) if method.return_type else UNIT
+                self._self_type = None
+                self.functions[symbol] = FnType(params, ret)
+                self.fn_effects[symbol] = set(method.effects)
+                table[method.name] = symbol
+                self._impl_fns.append(replace(method, name=symbol))
+
+    def _check_impl_conformance(
+        self, method: ast.FnDecl, sig: ast.TraitMethod, impl_ty: Type
+    ) -> None:
+        self._self_type = impl_ty
+        want_params = tuple(self._resolve_type(p.type) for p in sig.params)
+        want_ret = self._resolve_type(sig.return_type) if sig.return_type else UNIT
+        self._self_type = None
+        got_params = tuple(self._resolve_type(p.type) for p in method.params)
+        got_ret = self._resolve_type(method.return_type) if method.return_type else UNIT
+        if want_params != got_params or not _same(want_ret, got_ret):
+            self._err(
+                "IMPL005",
+                f"method {method.name!r} does not match the trait signature",
+                method.span,
+            )
+
+    def _is_method_call(self, recv_ty: Type, name: str) -> bool:
+        if isinstance(recv_ty, RecordType) and any(f == name for f, _ in recv_ty.fields):
+            return False  # field access takes priority over methods
+        return name in self.method_index
+
+    def _infer_method_call(self, callee: ast.MemberExpr, recv_ty: Type, call: ast.CallExpr) -> Type:
+        key = _type_key(recv_ty)
+        candidates = [
+            trait
+            for trait in self.method_index.get(callee.name, set())
+            if callee.name in self.impls.get((trait, key), {})
+        ]
+        if not candidates:
+            for arg in call.args:
+                self._check_expr(arg)
+            self._err(
+                "DISP001", f"no impl provides method {callee.name!r} for {recv_ty}", call.span
+            )
+            return ERROR
+        if len(candidates) > 1:
+            self._err("DISP003", f"ambiguous method {callee.name!r} for {recv_ty}", call.span)
+        symbol = self.impls[(candidates[0], key)][callee.name]
+        fn_ty = self.functions[symbol]
+        self._expect(fn_ty.params[0], recv_ty, callee.obj.span, "receiver")
+        rest = fn_ty.params[1:]
+        if len(call.args) != len(rest):
+            self._err(
+                "TYPE005",
+                f"method {callee.name!r} expects {len(rest)} argument(s), got {len(call.args)}",
+                call.span,
+            )
+        for arg, exp in zip(call.args, rest, strict=False):
+            self._expect(exp, self._check_expr(arg, exp), arg.span, "argument")
+        self._require_effects(self.fn_effects.get(symbol, set()), call.span)
+        self.method_targets[id(call)] = symbol
+        return fn_ty.ret
 
     # --- declarations ---------------------------------------------------------
 
@@ -433,6 +592,10 @@ class Checker:
             if callee.obj.name in self.adt_templates and callee.name in self.ctors:
                 # Qualified constructor with payload, e.g. E.Code(x).
                 return self._infer_ctor(callee.name, expr.args, expected, expr.span)
+        if isinstance(callee, ast.MemberExpr):
+            recv_ty = self._check_expr(callee.obj)
+            if self._is_method_call(recv_ty, callee.name):
+                return self._infer_method_call(callee, recv_ty, expr)
         callee_ty = self._check_expr(callee)
         if isinstance(callee_ty, FnType):
             self._check_args("call", callee_ty, expr)
@@ -673,6 +836,11 @@ class Checker:
     # --- helpers --------------------------------------------------------------
 
     def _resolve_type(self, type_expr: ast.TypeExpr) -> Type:
+        if type_expr.name == "Self" and not type_expr.args:
+            if self._self_type is not None:
+                return self._self_type
+            self._err("TRAIT008", "`Self` is only valid in a trait or impl method", type_expr.span)
+            return ERROR
         if type_expr.name in self._subst and not type_expr.args:
             return self._subst[type_expr.name]
         if type_expr.name in PRIMITIVES and not type_expr.args:

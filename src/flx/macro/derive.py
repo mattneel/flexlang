@@ -18,32 +18,26 @@ if TYPE_CHECKING:
 _SUPPORTED = {"Eq", "Show"}
 
 
-def run_derives(module: ast.Module, exp: Expander) -> list[ast.FnDecl]:
-    out: list[ast.FnDecl] = []
-    existing = {f.name for f in module.functions}
+def run_derives(module: ast.Module, exp: Expander) -> list[ast.Item]:
+    out: list[ast.Item] = []
     for record in module.records:
         out.extend(_derive_type(record.name, record.type_params, record.span, record.derives, exp))
     for adt in module.adts:
         out.extend(_derive_type(adt.name, adt.type_params, adt.span, adt.derives, exp))
-    for fn in out:
-        if fn.name in existing:
-            raise _err("DER002", f"derive would redefine existing function {fn.name!r}", fn.span)
     return out
 
 
 def _derive_type(
     name: str, type_params: list[str], span: Span, derives: list[str], exp: Expander
-) -> list[ast.FnDecl]:
-    out: list[ast.FnDecl] = []
+) -> list[ast.ImplDecl]:
+    out: list[ast.ImplDecl] = []
     for trait in derives:
         if trait not in _SUPPORTED:
             raise _err("DER001", f"cannot derive {trait!r} (only Eq, Show)", span)
         if type_params:
             raise _err("DER004", f"cannot derive {trait!r} on a generic type yet", span)
-        if trait == "Eq":
-            out.append(_derive_eq(name, span, exp))
-        else:
-            out.append(_derive_show(name, span, exp))
+        method = _derive_eq(name, span, exp) if trait == "Eq" else _derive_show(name, span, exp)
+        out.append(ast.ImplDecl(trait, name, [method], span))
     return out
 
 
@@ -87,8 +81,8 @@ def _derive_eq(type_name: str, sp: Span, exp: Expander) -> ast.FnDecl:
     if _string_field_names(type_name, exp):
         raise _err("DER001", f"cannot derive Eq for {type_name!r}: it contains a String", sp)
     # Delegate to structural equality, which the backend already lowers.
-    body = ast.BinaryExpr("==", _name("a", sp), _name("b", sp), sp)
-    return _fn(f"eq_{type_name}", [("a", type_name), ("b", type_name)], "Bool", body, sp)
+    body = ast.BinaryExpr("==", _name("self", sp), _name("other", sp), sp)
+    return _fn("eq", [("self", type_name), ("other", type_name)], "Bool", body, sp)
 
 
 # --- Show ---------------------------------------------------------------------
@@ -124,7 +118,7 @@ def _show_record(record: ast.RecordDecl, sp: Span) -> ast.FnDecl:
         parts.append(ast.StringLit(prefix, sp))
         parts.append(_render(access, fld.type.name, sp))
     parts.append(ast.StringLit(" }", sp))
-    return _fn(f"show_{record.name}", [("self", record.name)], "String", _concat(parts, sp), sp)
+    return _fn("show", [("self", record.name)], "String", _concat(parts, sp), sp)
 
 
 def _show_adt(adt: ast.AdtDecl, sp: Span) -> ast.FnDecl:
@@ -148,7 +142,7 @@ def _show_adt(adt: ast.AdtDecl, sp: Span) -> ast.FnDecl:
             body = ast.StringLit(variant.name, sp)
         arms.append(ast.MatchArm(bind, body, sp))
     match = ast.MatchExpr(_name("self", sp), arms, sp)
-    return _fn(f"show_{adt.name}", [("self", adt.name)], "String", match, sp)
+    return _fn("show", [("self", adt.name)], "String", match, sp)
 
 
 def _err(code: str, message: str, span: Span) -> FlexError:
