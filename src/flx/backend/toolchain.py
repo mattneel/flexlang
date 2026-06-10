@@ -32,6 +32,11 @@ def find_tool(name: str) -> str | None:
     return candidate if os.path.exists(candidate) else None
 
 
+def available() -> bool:
+    """Whether the full native backend toolchain is resolvable."""
+    return all(find_tool(t) is not None for t in REQUIRED_TOOLS)
+
+
 def _tool(name: str) -> str:
     resolved = find_tool(name)
     if resolved is None:

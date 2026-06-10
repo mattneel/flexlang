@@ -10,12 +10,34 @@ from __future__ import annotations
 BASE_RUNTIME_C = """#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 typedef struct { const char *ptr; long long len; } FlxStr;
 
 void __flx_match_fail(void) {
     fputs("flex: non-exhaustive match reached\\n", stderr);
     abort();
+}
+// Guarded signed division/remainder. Raw LLVM sdiv/srem are undefined on a zero
+// divisor and on INT64_MIN / -1; we trap the former (matching the interpreter's
+// message + exit code) and define the latter as the 64-bit wrapping result.
+long long flx_idiv(long long a, long long b) {
+    if (b == 0) {
+        fflush(stdout);
+        fputs("flx: runtime error: division by zero\\n", stderr);
+        exit(1);
+    }
+    if (b == -1 && a == INT64_MIN) return INT64_MIN;
+    return a / b;
+}
+long long flx_imod(long long a, long long b) {
+    if (b == 0) {
+        fflush(stdout);
+        fputs("flx: runtime error: division by zero\\n", stderr);
+        exit(1);
+    }
+    if (b == -1) return 0;
+    return a % b;
 }
 void flx_log(const char *p, long long n) {
     fwrite(p, 1, (size_t)n, stdout);
@@ -39,6 +61,8 @@ void flx_str_concat(const char *p1, long long n1, const char *p2, long long n2, 
 # MLIR external declarations matching BASE_RUNTIME_C, prepended to every module.
 BASE_RUNTIME_DECLS = (
     "func.func private @__flx_match_fail()\n"
+    "func.func private @flx_idiv(i64, i64) -> i64\n"
+    "func.func private @flx_imod(i64, i64) -> i64\n"
     "func.func private @flx_log(!llvm.ptr, i64)\n"
     "func.func private @flx_int_to_str(i64, !llvm.ptr)\n"
     "func.func private @flx_str_concat(!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr)\n"

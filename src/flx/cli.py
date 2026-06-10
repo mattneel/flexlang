@@ -43,10 +43,21 @@ def _build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("path", help="path to a .flx source file")
         if name == "build":
             cmd.add_argument("-o", "--output", help="output executable path")
+        if name == "run":
+            cmd.add_argument(
+                "--interpret",
+                action="store_true",
+                help="run with the pure-Python interpreter instead of native codegen",
+            )
 
     test_cmd = sub.add_parser("test", help="Discover, compile, and run tests")
     test_cmd.add_argument("path", nargs="?", help="optional .flx file or directory")
     test_cmd.add_argument("--filter", dest="filter", help="only run tests matching a substring")
+    test_cmd.add_argument(
+        "--interpret",
+        action="store_true",
+        help="run tests with the pure-Python interpreter instead of native codegen",
+    )
     test_cmd.add_argument(
         "--format",
         choices=["pretty", "json", "junit"],
@@ -114,7 +125,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "emit-mlir":
         return driver.cmd_emit_mlir(args.path)
     if args.command == "run":
-        return driver.cmd_run(args.path)
+        return driver.cmd_run(args.path, args.interpret)
     if args.command == "build":
         return driver.cmd_build(args.path, args.output)
     if args.command == "test":
@@ -124,7 +135,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        return driver.cmd_test(args.path, args.filter)
+        return driver.cmd_test(args.path, args.filter, args.interpret)
 
     print(f"flx {args.command}: not yet implemented", file=sys.stderr)
     return 2

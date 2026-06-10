@@ -22,7 +22,10 @@ from flx.sema.check import CheckResult
 from flx.syntax import ast
 from flx.types import BOOL, I64, STRING, UNIT, AdtType, FnType, RecordType, Type
 
-_ARITH_OP = {"+": "addi", "-": "subi", "*": "muli", "/": "divsi", "%": "remsi"}
+_ARITH_OP = {"+": "addi", "-": "subi", "*": "muli"}
+# `/` and `%` go through guarded runtime calls (see runtime.py): raw arith.divsi /
+# arith.remsi are UB on a zero divisor and on INT64_MIN / -1.
+_DIV_OP = {"/": "@flx_idiv", "%": "@flx_imod"}
 _CMP_PRED = {"<": "slt", "<=": "sle", ">": "sgt", ">=": "sge", "==": "eq", "!=": "ne"}
 _BUILTINS = {"assert", "assert_eq", "assert_ne", "fail", "panic"}
 
@@ -600,7 +603,9 @@ class FunctionLowerer:
             self._emit(f"{out} = arith.xori {equal}, {one} : i1")
             return out
         out = self._fresh()
-        if op in _ARITH_OP:
+        if op in _DIV_OP:
+            self._emit(f"{out} = func.call {_DIV_OP[op]}({left}, {right}) : (i64, i64) -> i64")
+        elif op in _ARITH_OP:
             self._emit(f"{out} = arith.{_ARITH_OP[op]} {left}, {right} : i64")
         elif op in _CMP_PRED:
             operand_ty = mlir_type(self._ty_of(expr.left))

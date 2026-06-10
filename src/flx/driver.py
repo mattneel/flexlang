@@ -9,6 +9,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from flx import interp
+from flx.backend import toolchain
 from flx.backend.harness import generate_harness
 from flx.backend.mlir import BackendError, emit_module, emit_program
 from flx.backend.runtime import BASE_RUNTIME_C
@@ -34,6 +36,20 @@ def _report(err: FlexError, source: str) -> None:
     for diag in err.diagnostics:
         print(diag.render(source), file=sys.stderr)
         print(file=sys.stderr)
+
+
+def _interpreting(forced: bool) -> bool:
+    """Decide whether to interpret rather than compile natively: when forced
+    (`--interpret`), or automatically when the native toolchain is unavailable."""
+    if forced:
+        return True
+    if toolchain.available():
+        return False
+    print(
+        "flx: no native toolchain found — using the interpreter (`flx doctor` for native)",
+        file=sys.stderr,
+    )
+    return True
 
 
 def cmd_parse(path: str) -> int:
@@ -117,7 +133,7 @@ def cmd_emit_mlir(path: str) -> int:
     return 0
 
 
-def cmd_run(path: str) -> int:
+def cmd_run(path: str, interpret: bool = False) -> int:
     source = _read(path)
     if source is None:
         return 1
@@ -134,6 +150,14 @@ def cmd_run(path: str) -> int:
         print("flx: `main` must take no arguments", file=sys.stderr)
         return 1
 
+    if _interpreting(interpret):
+        try:
+            return interp.run_main(result)
+        except interp.FlexRuntimeError as exc:
+            sys.stdout.flush()  # emit buffered output before the error (match native)
+            print(f"flx: runtime error: {exc}", file=sys.stderr)
+            return 1
+
     try:
         mlir_text = emit_module(result)
         shim = _run_shim(main.ret)
@@ -148,7 +172,7 @@ def cmd_run(path: str) -> int:
         return 1
 
 
-def cmd_test(path: str, test_filter: str | None = None) -> int:
+def cmd_test(path: str, test_filter: str | None = None, interpret: bool = False) -> int:
     source = _read(path)
     if source is None:
         return 1
@@ -156,6 +180,14 @@ def cmd_test(path: str, test_filter: str | None = None) -> int:
     if isinstance(result, FlexError):
         _report(result, source)
         return 1
+
+    if _interpreting(interpret):
+        try:
+            return interp.run_tests(result, test_filter)
+        except interp.FlexRuntimeError as exc:
+            sys.stdout.flush()  # emit buffered output before the error (match native)
+            print(f"flx: runtime error: {exc}", file=sys.stderr)
+            return 1
 
     module = result.module
     selected = [
