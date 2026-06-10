@@ -239,6 +239,10 @@ class FunctionLowerer:
             return self._lower_call(expr)
         if isinstance(expr, ast.IfExpr):
             return self._lower_if(expr)
+        if isinstance(expr, ast.RegionExpr):
+            # Shallow MVP: a region just evaluates its body inline (no real
+            # scoped allocation for scalar values).
+            return self.lower_block(expr.body)
         raise BackendError(f"cannot lower expression {type(expr).__name__}")
 
     def _const(self, literal: str, mty: str) -> str:

@@ -39,6 +39,7 @@ I64 = PrimType("I64")
 BOOL = PrimType("Bool")
 UNIT = PrimType("Unit")
 STRING = PrimType("String")
+REGION = PrimType("Region")
 ERROR = ErrorType()
 
 # Type names usable in annotations for the MVP.
@@ -47,4 +48,5 @@ PRIMITIVES: dict[str, Type] = {
     "Bool": BOOL,
     "Unit": UNIT,
     "String": STRING,
+    "Region": REGION,
 }

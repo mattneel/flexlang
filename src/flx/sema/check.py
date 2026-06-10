@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from flx.diagnostics import Diagnostic, FlexError, Span
 from flx.syntax import ast
-from flx.types import BOOL, ERROR, I64, PRIMITIVES, STRING, UNIT, FnType, Type
+from flx.types import BOOL, ERROR, I64, PRIMITIVES, REGION, STRING, UNIT, FnType, Type
 
 # name -> (arity or None for variadic-ish, checker). Builtins are checked ad hoc.
 _BUILTINS = {"assert", "assert_eq", "assert_ne", "fail", "panic"}
@@ -214,10 +214,22 @@ class Checker:
             return self._infer_call(expr)
         if isinstance(expr, ast.IfExpr):
             return self._infer_if(expr)
+        if isinstance(expr, ast.RegionExpr):
+            return self._infer_region(expr)
         if isinstance(expr, ast.MemberExpr):
             self._err("TYPE010", "module-qualified calls are not supported yet", expr.span)
             return ERROR
         return ERROR
+
+    def _infer_region(self, expr: ast.RegionExpr) -> Type:
+        # Shallow MVP regions: the name binds a Region capability in the body and
+        # the block's value is the region expression's value. Escape analysis is
+        # deferred (scalars are copied out, so nothing can dangle yet).
+        self.scope.push()
+        self.scope.define(expr.name, _Binding(REGION, mutable=False))
+        ty = self._check_block(expr.body)
+        self.scope.pop()
+        return ty
 
     def _infer_name(self, expr: ast.NameExpr) -> Type:
         binding = self.scope.lookup(expr.name)

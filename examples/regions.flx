@@ -1,0 +1,19 @@
+module Main
+
+fn main() -> I64 =
+{
+  region scratch {
+    let x = 40
+    let y = 2
+    x + y
+  }
+}
+
+test "region block returns value" {
+  let answer =
+    region scratch {
+      40 + 2
+    }
+
+  assert_eq(answer, 42)
+}
