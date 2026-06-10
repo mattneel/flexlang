@@ -27,7 +27,24 @@ void __flx_explicit_fail(void) {
 
 
 def _c_string(text: str) -> str:
-    return text.replace("\\", "\\\\").replace('"', '\\"')
+    """Escape ``text`` for use inside a C double-quoted string literal."""
+    out = []
+    for ch in text:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\{ord(ch):03o}")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def generate_harness(module_name: str, tests: list[tuple[int, str]]) -> str:
@@ -43,12 +60,14 @@ def generate_harness(module_name: str, tests: list[tuple[int, str]]) -> str:
     lines.append(f'    printf("running {n} test{plural}\\n\\n");')
     lines.append("    int passed = 0, failed = 0;")
     for i, name in tests:
+        # Pass the label as a printf ARGUMENT (not in the format string), so any
+        # '%' in a test name is inert rather than a conversion specifier.
         label = _c_string(f"{module_name} / {name}")
         lines.append(f"    if (flx_test_{i}() == 0) {{")
-        lines.append(f'        printf("ok {label}\\n");')
+        lines.append(f'        printf("ok %s\\n", "{label}");')
         lines.append("        passed++;")
         lines.append("    } else {")
-        lines.append(f'        printf("fail {label}\\n");')
+        lines.append(f'        printf("fail %s\\n", "{label}");')
         lines.append("        failed++;")
         lines.append("    }")
     lines.append('    printf("\\n%d passed, %d failed\\n", passed, failed);')

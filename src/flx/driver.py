@@ -42,6 +42,9 @@ def cmd_parse(path: str) -> int:
     except FlexError as err:
         _report(err, source)
         return 1
+    except RecursionError:
+        print("flx: input is too deeply nested to parse", file=sys.stderr)
+        return 1
     print(dump_module(module))
     return 0
 
@@ -52,6 +55,8 @@ def _parse_and_check(path: str, source: str) -> CheckResult | FlexError:
         return check(module)
     except FlexError as err:
         return err
+    except RecursionError:
+        return FlexError([Diagnostic("PAR003", "input is too deeply nested to parse")])
 
 
 def cmd_check(path: str) -> int:

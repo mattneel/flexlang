@@ -32,7 +32,16 @@ def test_harness_header_singular() -> None:
     c = generate_harness("Main", [(0, "add works")])
     assert 'printf("running 1 test\\n\\n")' in c
     assert "extern int flx_test_0(void);" in c
-    assert 'printf("ok Main / add works\\n")' in c
+    # Name is passed as a printf argument (not in the format string) for safety.
+    assert 'printf("ok %s\\n", "Main / add works")' in c
+
+
+def test_harness_passes_name_as_arg_and_escapes() -> None:
+    # `%` stays literal (passed as an arg, not in the format) and a real newline
+    # is escaped so the C string literal stays valid.
+    c = generate_harness("M", [(0, "pct%here\nnl")])
+    assert 'printf("ok %s\\n", "M / pct%here\\nnl");' in c
+    assert 'printf("fail %s\\n", "M / pct%here\\nnl");' in c
 
 
 def test_harness_header_plural_and_indices() -> None:

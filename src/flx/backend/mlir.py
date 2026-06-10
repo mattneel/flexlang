@@ -23,7 +23,6 @@ from flx.types import BOOL, I64, UNIT, FnType, Type
 
 _ARITH_OP = {"+": "addi", "-": "subi", "*": "muli", "/": "divsi", "%": "remsi"}
 _CMP_PRED = {"<": "slt", "<=": "sle", ">": "sgt", ">=": "sge", "==": "eq", "!=": "ne"}
-_BOOL_OP = {"&&": "andi", "||": "ori"}
 _BUILTINS = {"assert", "assert_eq", "assert_ne", "fail", "panic"}
 
 # External runtime declarations, prepended when tests are emitted.
@@ -144,9 +143,14 @@ class FunctionLowerer:
         if not self.terminated:
             if ret is UNIT:
                 self._terminator("func.return")
-            else:
-                assert tail is not None
+            elif tail is not None:
                 self._terminator(f"func.return {tail} : {mlir_type(ret)}")
+            else:
+                # Reachable only at an unreachable join (e.g. if/else where both
+                # branches return). The checker guarantees the function diverges;
+                # emit a default return so the MLIR stays well-formed.
+                dummy = self._const("0", mlir_type(ret))
+                self._terminator(f"func.return {dummy} : {mlir_type(ret)}")
 
         header = f"func.func @{symbol}({sig}){ret_str} {{"
         return "\n".join([header, *self.lines, "}"])
@@ -262,19 +266,50 @@ class FunctionLowerer:
         return out
 
     def _lower_binary(self, expr: ast.BinaryExpr) -> str:
+        op = expr.op
+        if op in ("&&", "||"):
+            return self._lower_short_circuit(expr)
         left = self.lower_expr(expr.left)
         right = self.lower_expr(expr.right)
         out = self._fresh()
-        op = expr.op
         if op in _ARITH_OP:
             self._emit(f"{out} = arith.{_ARITH_OP[op]} {left}, {right} : i64")
-        elif op in _BOOL_OP:
-            self._emit(f"{out} = arith.{_BOOL_OP[op]} {left}, {right} : i1")
         elif op in _CMP_PRED:
             operand_ty = mlir_type(self._ty_of(expr.left))
             self._emit(f"{out} = arith.cmpi {_CMP_PRED[op]}, {left}, {right} : {operand_ty}")
         else:
             raise BackendError(f"unknown operator {op!r}")
+        return out
+
+    def _lower_short_circuit(self, expr: ast.BinaryExpr) -> str:
+        """Lower `&&` / `||` with proper short-circuit evaluation of the RHS."""
+        left = self.lower_expr(expr.left)
+        assert left is not None
+        slot = self._fresh()
+        self._emit(f"{slot} = memref.alloca() : memref<i1>")
+        rhs_lbl, short_lbl, join_lbl = self._label(), self._label(), self._label()
+        # `&&`: if left, evaluate RHS, else store false. `||`: if left, store true, else RHS.
+        if expr.op == "&&":
+            self._terminator(f"cf.cond_br {left}, {rhs_lbl}, {short_lbl}")
+            short_value = "0"
+        else:
+            self._terminator(f"cf.cond_br {left}, {short_lbl}, {rhs_lbl}")
+            short_value = "1"
+
+        self._start_block(rhs_lbl)
+        right = self.lower_expr(expr.right)
+        assert right is not None
+        self._emit(f"memref.store {right}, {slot}[] : memref<i1>")
+        self._terminator(f"cf.br {join_lbl}")
+
+        self._start_block(short_lbl)
+        constant = self._const(short_value, "i1")
+        self._emit(f"memref.store {constant}, {slot}[] : memref<i1>")
+        self._terminator(f"cf.br {join_lbl}")
+
+        self._start_block(join_lbl)
+        out = self._fresh()
+        self._emit(f"{out} = memref.load {slot}[] : memref<i1>")
         return out
 
     def _lower_call(self, expr: ast.CallExpr) -> str | None:
@@ -346,10 +381,13 @@ class FunctionLowerer:
         result_ty = self._ty_of(expr)
         has_value = result_ty is not UNIT and expr.else_block is not None
         slot: str | None = None
+        mty = mlir_type(result_ty) if has_value else ""
         if has_value:
-            mty = mlir_type(result_ty)
             slot = self._fresh()
             self._emit(f"{slot} = memref.alloca() : memref<{mty}>")
+
+        def store(value: str) -> None:
+            self._emit(f"memref.store {value}, {slot}[] : memref<{mty}>")
 
         cond = self.lower_expr(expr.cond)
         then_lbl = self._label()
@@ -357,18 +395,32 @@ class FunctionLowerer:
         else_lbl = self._label() if expr.else_block is not None else join_lbl
         self._terminator(f"cf.cond_br {cond}, {then_lbl}, {else_lbl}")
 
+        # Track whether control can actually fall through to the join block. A
+        # branch that returns (diverges) does not reach the join; if no edge
+        # reaches it we must not emit it (an unreachable block with func.return
+        # breaks --convert-to-llvm).
+        join_reachable = expr.else_block is None  # the false edge falls through
+
         self._start_block(then_lbl)
         then_val = self.lower_block(expr.then_block)
-        if slot is not None and then_val is not None:
-            self._emit(f"memref.store {then_val}, {slot}[] : memref<{mlir_type(result_ty)}>")
-        self._terminator(f"cf.br {join_lbl}")
+        if not self.terminated:
+            if slot is not None and then_val is not None:
+                store(then_val)
+            self._terminator(f"cf.br {join_lbl}")
+            join_reachable = True
 
         if expr.else_block is not None:
             self._start_block(else_lbl)
             else_val = self.lower_block(expr.else_block)
-            if slot is not None and else_val is not None:
-                self._emit(f"memref.store {else_val}, {slot}[] : memref<{mlir_type(result_ty)}>")
-            self._terminator(f"cf.br {join_lbl}")
+            if not self.terminated:
+                if slot is not None and else_val is not None:
+                    store(else_val)
+                self._terminator(f"cf.br {join_lbl}")
+                join_reachable = True
+
+        if not join_reachable:
+            self.terminated = True
+            return None
 
         self._start_block(join_lbl)
         if slot is not None:

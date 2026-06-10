@@ -21,6 +21,8 @@ _COMPARE = {"<", "<=", ">", ">="}
 _EQUALITY = {"==", "!="}
 _BOOLEAN = {"&&", "||"}
 
+_I64_MAX = 2**63 - 1
+
 
 @dataclass
 class _Binding:
@@ -63,6 +65,7 @@ class Checker:
         self.functions: dict[str, FnType] = {}
         self.scope = _Scope()
         self.return_type: Type = UNIT
+        self.in_test = False
 
     # --- entry ----------------------------------------------------------------
 
@@ -87,16 +90,31 @@ class Checker:
 
     def _check_fn(self, fn: ast.FnDecl) -> None:
         self.scope = _Scope()
+        self.in_test = False
         fn_ty = self.functions[fn.name]
+        seen: set[str] = set()
         for param, ptype in zip(fn.params, fn_ty.params, strict=True):
+            if param.name in seen:
+                self._err("NAME002", f"duplicate parameter name {param.name!r}", param.span)
+            seen.add(param.name)
             self.scope.define(param.name, _Binding(ptype, mutable=False))
         self.return_type = fn_ty.ret
         body_ty = self._check_block(fn.body)
-        if fn.return_type is not None and fn.body.tail is not None:
-            self._expect(fn_ty.ret, body_ty, fn.body.tail.span, "return value")
+        # A body that's guaranteed to `return` needs no tail value; its returns
+        # are type-checked individually.
+        if fn_ty.ret is not UNIT and not _diverges(fn.body):
+            if fn.body.tail is not None:
+                self._expect(fn_ty.ret, body_ty, fn.body.tail.span, "return value")
+            else:
+                self._err(
+                    "TYPE009",
+                    f"function {fn.name!r} must return {fn_ty.ret} but its body has no value",
+                    fn.span,
+                )
 
     def _check_test(self, test: ast.TestDecl) -> None:
         self.scope = _Scope()
+        self.in_test = True
         self.return_type = UNIT
         self._check_block(test.body)
 
@@ -160,6 +178,12 @@ class Checker:
 
     def _infer(self, expr: ast.Expr) -> Type:
         if isinstance(expr, ast.IntLit):
+            if expr.value > _I64_MAX:
+                self._err(
+                    "TYPE011",
+                    f"integer literal {expr.value} is out of range for I64 (max {_I64_MAX})",
+                    expr.span,
+                )
             return I64
         if isinstance(expr, ast.BoolLit):
             return BOOL
@@ -252,6 +276,13 @@ class Checker:
             self._check_expr(extra)
 
     def _check_builtin(self, name: str, call: ast.CallExpr) -> Type:
+        if not self.in_test:
+            self._err(
+                "TEST001",
+                f"{name}() can only be used inside a test block",
+                call.span,
+                help='move this into a `test "..." { ... }` block',
+            )
         for arg in call.args:
             self._check_expr(arg)
         if name in ("assert",):
@@ -313,6 +344,23 @@ class Checker:
 
 def _same(a: Type, b: Type) -> bool:
     return a is ERROR or b is ERROR or a == b
+
+
+def _diverges(block: ast.Block) -> bool:
+    """Whether the block is guaranteed to return (so it needs no tail value)."""
+    if not block.stmts:
+        return False
+    last = block.stmts[-1]
+    if isinstance(last, ast.ReturnStmt):
+        return True
+    if isinstance(last, ast.ExprStmt) and isinstance(last.expr, ast.IfExpr):
+        branch = last.expr
+        return (
+            branch.else_block is not None
+            and _diverges(branch.then_block)
+            and _diverges(branch.else_block)
+        )
+    return False
 
 
 def check(module: ast.Module) -> CheckResult:

@@ -33,6 +33,9 @@ _INFIX_BP: dict[TokenKind, int] = {
 _UNARY_BP = 8
 _POSTFIX_BP = 9
 
+# Guard against runaway recursion on adversarial deeply-nested input.
+_MAX_DEPTH = 200
+
 _OP_TEXT: dict[TokenKind, str] = {
     TokenKind.PIPE_PIPE: "||",
     TokenKind.AMP_AMP: "&&",
@@ -68,6 +71,7 @@ class Parser:
         self.tokens = tokens
         self.file = file
         self.pos = 0
+        self._depth = 0
 
     # --- token helpers --------------------------------------------------------
 
@@ -247,7 +251,8 @@ class Parser:
     def _return(self) -> ast.Stmt:
         start = self._advance().span  # `return`
         value: ast.Expr | None = None
-        if self._peek().kind in _EXPR_START:
+        # Only treat what follows as the return value if it's on the same line.
+        if self._peek().kind in _EXPR_START and self._peek().span.start.line == start.end.line:
             value = self._expr()
         end = value.span if value is not None else start
         return ast.ReturnStmt(value, start.to(end))
@@ -255,13 +260,27 @@ class Parser:
     # --- expressions (Pratt) --------------------------------------------------
 
     def _expr(self, min_bp: int = 0) -> ast.Expr:
+        self._depth += 1
+        if self._depth > _MAX_DEPTH:
+            raise self._error("expression nests too deeply", self._peek().span)
+        try:
+            return self._expr_bp(min_bp)
+        finally:
+            self._depth -= 1
+
+    def _expr_bp(self, min_bp: int) -> ast.Expr:
         lhs = self._prefix()
         while True:
-            kind = self._peek().kind
-            if kind is TokenKind.LPAREN and min_bp < _POSTFIX_BP:
+            tok = self._peek()
+            kind = tok.kind
+            # A postfix `(` (call) or `.` (member) only continues the current
+            # expression when it's on the same line, so a new statement that
+            # starts with `(`/`.` is not glued onto the previous one.
+            same_line = tok.span.start.line == lhs.span.end.line
+            if kind is TokenKind.LPAREN and min_bp < _POSTFIX_BP and same_line:
                 lhs = self._finish_call(lhs)
                 continue
-            if kind is TokenKind.DOT and min_bp < _POSTFIX_BP:
+            if kind is TokenKind.DOT and min_bp < _POSTFIX_BP and same_line:
                 self._advance()
                 name_tok = self._expect(TokenKind.IDENT, "a member name")
                 lhs = ast.MemberExpr(lhs, name_tok.text, lhs.span.to(name_tok.span))
