@@ -24,3 +24,13 @@ Run and test it:
 flx run  examples/add.flx
 flx test examples/add.flx
 ```
+
+## Traits, impls, and generics
+
+A trait, two impls, a bounded generic, an unconstrained generic, and a derived
+`Show` — all dispatched statically and monomorphized. See
+[Traits and Generics](traits.md) for the guide.
+
+```flex
+{{#include ../examples/traits.flx}}
+```

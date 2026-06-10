@@ -37,6 +37,8 @@ runtime, no hidden GC.
 This book covers:
 
 - the **[Specification](MVP.md)** — the full language design and MVP plan;
+- **[Traits and Generics](traits.md)** — traits, impls, `derive`, and bounded
+  generic functions, all statically dispatched and monomorphized;
 - the **[Command-Line Interface](cli.md)** — the `flx` tool;
 - **[Syntax Highlighting](highlighting.md)** — the Flex Pygments lexer that
   colors every example in this book;

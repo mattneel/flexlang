@@ -1,0 +1,59 @@
+module Main
+
+// A trait is a set of method signatures. `Self` is the implementing type.
+trait Show =
+{
+  fn show(self: Self) -> String
+}
+
+type Point = { x: I64, y: I64 }
+
+// An impl provides the methods for one concrete type. Method calls like
+// `p.show()` dispatch statically to this impl — no vtables, no runtime cost.
+impl Show for Point =
+{
+  fn show(self: Point) -> String = { "(" ++ to_str(self.x) ++ ", " ++ to_str(self.y) ++ ")" }
+}
+
+impl Show for I64 =
+{
+  fn show(self: I64) -> String = { to_str(self) }
+}
+
+// A bounded generic: `T` may be any type that has an `impl Show`. The compiler
+// monomorphizes one specialized copy per concrete `T` it is called with.
+fn announce<T: Show>(label: String, value: T) -> String uses { Log } =
+{
+  let line = label ++ ": " ++ value.show()
+  Log.info(line)
+  line
+}
+
+// An unconstrained generic works for any type.
+fn first<A, B>(a: A, b: B) -> A = { a }
+
+// `derive` writes the `Show` impl for you (see `flx expand`).
+derive(Show) type Color =
+  | Red
+  | Green
+  | Blue
+
+// `main` must itself declare the `Log` effect that `announce` requires —
+// effects propagate up through generic calls, just like ordinary ones.
+fn main() -> I64 uses { Log } =
+{
+  let p = { x = 3, y = 4 }
+  announce("point", p)
+  announce("count", 7)
+  let kept = first(p, Blue)
+  kept.x + kept.y
+}
+
+test "trait dispatch and generics" uses { Log } {
+  let p = { x = 1, y = 2 }
+  // `announce` is the same generic specialized at `Point` and at `I64`.
+  Log.info(announce("p", p))
+  Log.info(announce("n", 9))
+  Log.info(Green.show())
+  assert_eq(first(40, Blue) + 2, 42)
+}
