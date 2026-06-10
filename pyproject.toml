@@ -1,5 +1,5 @@
 [project]
-name = "flx"
+name = "flexlang"
 version = "0.0.1"
 description = "Flex — a native functional systems language (prototype compiler)."
 readme = "README.md"
@@ -7,10 +7,12 @@ requires-python = ">=3.14"
 license = { text = "MIT" }
 authors = [{ name = "Matt Neel", email = "matt@threephasetechnology.com" }]
 keywords = ["compiler", "mlir", "llvm", "functional", "systems-language"]
-# Core install is pure-Python and toolchain-free: `uvx flx` gives you
-# parse/check/expand/highlight (+ `flx doctor`) with no LLVM. The native backend
-# (run/test/emit-mlir/build) shells out to a system MLIR/LLVM 22 toolchain that
-# `flx doctor` detects — it is deliberately NOT a Python dependency.
+# Core install is pure-Python and toolchain-free: `uvx --from flexlang flx` gives
+# you parse/check/expand/highlight (+ `flx doctor`) with no LLVM. (The PyPI
+# distribution is `flexlang` — `flx` is too close to an existing name — but the
+# command stays `flx`.) The native backend (run/test/emit-mlir/build) shells out
+# to a system MLIR/LLVM 22 toolchain that `flx doctor` detects — deliberately NOT
+# a Python dependency.
 dependencies = [
     "pygments>=2.19",
 ]
