@@ -17,6 +17,9 @@ dist/
 flx-out/
 /tmp-build/
 
+# mdBook output
+/book/
+
 # OS
 .DS_Store
 

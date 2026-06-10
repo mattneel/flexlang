@@ -94,14 +94,47 @@ pygmentize examples/add.flx            # picks Flex by the .flx extension
 > sets a higher priority so extension-based lookup resolves to Flex. Use the
 > `flex` alias (not `flx`) for unambiguous explicit selection.
 
+## Documentation
+
+The docs are an [mdBook](https://rust-lang.github.io/mdBook/) under `docs/`,
+published to GitHub Pages at **<https://mattneel.github.io/flexlang/>** by the
+`Deploy docs` workflow. Every Flex code block in the book is highlighted by the
+project's own Pygments lexer via the `flx-mdbook` preprocessor.
+
+```sh
+mise run docs          # build to book/
+mise run docs-serve    # live-reload preview
+```
+
+> First-time Pages setup: in the GitHub repo, **Settings → Pages → Build and
+> deployment → Source: GitHub Actions**.
+
+## Continuous integration
+
+Two workflows in `.github/workflows/`:
+
+- **CI** (`ci.yml`) — on push/PR: `ruff check`, `ruff format --check`, `mypy`,
+  `pytest`, and an mdBook build.
+- **Deploy docs** (`docs.yml`) — on push to the default branch: build the book
+  and deploy to Pages.
+
+Run them locally with [`act`](https://github.com/nektos/act):
+
+```sh
+act -j check -P ubuntu-latest=catthehacker/ubuntu:act-latest
+act -j docs  -P ubuntu-latest=catthehacker/ubuntu:act-latest
+```
+
 ## Layout
 
 ```
-docs/MVP.md          language spec + MVP plan
+book.toml            mdBook config (src = docs/, flex preprocessor)
+docs/                mdBook sources (SUMMARY.md, MVP.md spec, chapters)
 mise.toml            tool pins, env, tasks
 pyproject.toml       package metadata, deps, ruff/mypy/pytest config
 scripts/             LLVM install + toolchain inspection
-src/flx/             compiler package (cli today; pipeline grows here)
+src/flx/             compiler package: cli, highlight/ lexer, mdbook preprocessor
 tests/               pytest suite
 examples/            sample .flx programs
+.github/workflows/   CI + Pages deploy
 ```

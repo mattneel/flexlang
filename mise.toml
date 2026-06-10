@@ -8,6 +8,7 @@
 # .venv, and puts the LLVM/MLIR 22 toolchain ahead of the system LLVM 18.
 
 [tools]
+mdbook = "latest"
 python = "3.14.2"
 uv = "0.9.24"
 
@@ -52,3 +53,11 @@ depends = ["lint", "typecheck", "test"]
 [tasks.toolchain]
 description = "Print the active LLVM/MLIR toolchain"
 run = "bash scripts/toolchain-info.sh"
+
+[tasks.docs]
+description = "Build the documentation book (book/)"
+run = "mdbook build"
+
+[tasks.docs-serve]
+description = "Serve the docs with live reload"
+run = "mdbook serve --open"

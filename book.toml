@@ -1,0 +1,26 @@
+[book]
+title = "Flex"
+description = "Flex — a native functional systems language. Language spec, MVP plan, and tooling."
+authors = ["Matt Neel"]
+src = "docs"
+language = "en"
+
+[build]
+build-dir = "book"
+
+# Highlight Flex (```flex / ```flx) code blocks with the project's own Pygments
+# lexer. Runs after `links` so {{#include}}d source files are highlighted too.
+[preprocessor.flex]
+command = "flx-mdbook"
+after = ["links"]
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "ayu"
+site-url = "/flexlang/"
+git-repository-url = "https://github.com/mattneel/flexlang"
+edit-url-template = "https://github.com/mattneel/flexlang/edit/main/{path}"
+
+[output.html.fold]
+enable = true
+level = 1

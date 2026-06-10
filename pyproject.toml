@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 flx = "flx.cli:main"
+flx-mdbook = "flx.mdbook:main"
 
 # Register the Flex lexer with Pygments so `pygmentize -l flex`, Rich, and
 # Sphinx/mkdocs can highlight .flx out of the box.
