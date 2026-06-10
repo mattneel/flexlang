@@ -50,30 +50,53 @@ def _type_key(ty: Type) -> str:
     return "?"
 
 
-def _mono_key(ty: Type) -> str:
-    """Structural key for a monomorphization: distinguishes `Option<I64>` from
-    `Option<Bool>`, unlike the nominal `_type_key` used for impl lookup.
+def _type_enc(ty: Type) -> str:
+    """Self-delimiting, injective encoding of a type, used inside mangled symbols
+    and monomorphization keys.
 
-    Type arguments are joined with `$`, which is illegal in source identifiers, so
-    a generic instantiation's key can never collide with a user type's name (a
-    user type literally named `Option_I64` keys to `Option_I64`, while `Option<I64>`
-    keys to `Option$I64`). The encoding is prefix-notation over fixed-arity type
-    heads, so distinct types always produce distinct keys."""
+    Prefix notation with an explicit arity in front of every type head, so a
+    concatenation of encodings is unambiguously decodable and distinct types
+    always encode differently: `I64` -> ``0$I64``, `Option<I64>` -> ``1$Option$0$I64``,
+    `Pair<I64, Bool>` -> ``2$Pair$0$I64$0$Bool``. Crucially the nesting is
+    recoverable — `h<Pair<I64, Bool>>` (one arg) and a hypothetical `h<Pair, I64,
+    Bool>` (three args) encode to different argument lists rather than collapsing
+    to one ``$``-joined string. `$` is illegal in source identifiers, so the name
+    tokens never clash with the numeric arity tokens."""
     if isinstance(ty, AdtType) and ty.type_args:
-        return ty.name + "".join("$" + _mono_key(a) for a in ty.type_args)
+        inner = "$".join(_type_enc(a) for a in ty.type_args)
+        return f"{len(ty.type_args)}${ty.name}${inner}"
     if isinstance(ty, (PrimType, RecordType, AdtType)):
-        return ty.name
-    return "?"
+        return f"0${ty.name}"
+    return "0$?"
+
+
+def _mono_key(ty: Type) -> str:
+    """Monomorphization dedup key for a concrete type argument — the injective
+    `_type_enc`, so two distinct instantiations never share a key/symbol."""
+    return _type_enc(ty)
+
+
+# Every backend symbol that is not a plain user function carries a reserved
+# leading kind tag (`t$` trait-impl method, `g$` generic spec, and `f$` reserved
+# for module-qualified functions once modules land). Plain user functions stay
+# tag-free and, since `$` is illegal in source identifiers, contain no `$` at all
+# — so the four namespaces are provably disjoint and a module prefix can be added
+# later without making any of them collide.
 
 
 def _mangle(trait: str, key: str, method: str) -> str:
-    # `$` is illegal in source identifiers, so this can't collide with user code.
-    return f"{trait}${key}${method}"
+    """Backend symbol for a trait-impl method (`key` is the impl type's nominal
+    name). Tagged `t$` and self-delimiting (the type is arity-framed `0$<key>`),
+    so it cannot collide with a generic spec, a module function, or a plain one."""
+    return f"t${trait}$0${key}${method}"
 
 
 def spec_symbol(name: str, key_tuple: tuple[str, ...]) -> str:
-    """Backend symbol for a monomorphized generic-function instantiation."""
-    return name + "$" + "$".join(key_tuple)
+    """Backend symbol for a monomorphized generic instantiation. Tagged `g$` with
+    an explicit type-argument count, so the number and nesting of type arguments
+    is recoverable and distinct instantiations always get distinct symbols."""
+    inner = "$".join(key_tuple)
+    return f"g${name}${len(key_tuple)}" + (f"${inner}" if key_tuple else "")
 
 
 # name -> (arity or None for variadic-ish, checker). Builtins are checked ad hoc.
