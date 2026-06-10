@@ -1,0 +1,58 @@
+[project]
+name = "flexlang"
+version = "0.0.1"
+description = "Flex — a native functional systems language (prototype compiler)."
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "MIT" }
+authors = [{ name = "Matt Neel", email = "matt@threephasetechnology.com" }]
+keywords = ["compiler", "mlir", "llvm", "functional", "systems-language"]
+dependencies = [
+    "lark>=1.3.1",
+    "xdsl>=0.66.0",
+]
+
+[project.scripts]
+flx = "flx.cli:main"
+
+[project.optional-dependencies]
+# Optional direct-LLVM-IR builder backend. Bundles its own LLVM, so it is
+# independent of (and may lag) the system MLIR/LLVM 22 toolchain.
+llvmlite = ["llvmlite>=0.47.0"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4",
+    "ruff>=0.6",
+    "mypy>=1.18",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/flx"]
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+strict = true
+files = ["src"]
+
+[[tool.mypy.overrides]]
+module = ["lark.*", "xdsl.*", "llvmlite.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

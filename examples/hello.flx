@@ -1,0 +1,6 @@
+module Main
+
+fn main() -> I64 =
+{
+  42
+}

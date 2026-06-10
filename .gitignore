@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Flex / compiler build output
+*.ll
+*.o
+flx-out/
+/tmp-build/
+
+# OS
+.DS_Store
+
+# Note: uv.lock IS committed for reproducible installs.

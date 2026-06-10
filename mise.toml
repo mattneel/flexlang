@@ -1,0 +1,54 @@
+# Reproducible toolchain + dev environment for the Flex compiler.
+#
+#   mise install          # install pinned Python + uv
+#   mise run bootstrap     # install LLVM/MLIR 22 (sudo) + uv sync
+#   mise run check         # lint + typecheck + test
+#
+# On entering this directory mise pins Python/uv, activates the uv-managed
+# .venv, and puts the LLVM/MLIR 22 toolchain ahead of the system LLVM 18.
+
+[tools]
+python = "3.14.2"
+uv = "0.9.24"
+
+[env]
+# uv-managed virtualenv, auto-created and auto-activated by mise.
+_.python.venv = { path = ".venv", create = true }
+# Prefer the project's LLVM/MLIR 22 toolchain over the system LLVM 18.
+_.path = ["/usr/lib/llvm-22/bin"]
+# Resolve Python from mise rather than letting uv download its own.
+UV_PYTHON_PREFERENCE = "only-system"
+# Consumed by scripts/install-llvm.sh and the compiler backend.
+FLX_LLVM_VERSION = "22"
+
+[tasks.bootstrap]
+description = "Install the LLVM/MLIR 22 toolchain (sudo) and sync Python deps"
+run = ["bash scripts/install-llvm.sh", "uv sync"]
+
+[tasks.sync]
+description = "Create/refresh the uv virtualenv from the lockfile"
+run = "uv sync"
+
+[tasks.test]
+description = "Run the pytest suite"
+run = "uv run pytest"
+
+[tasks.lint]
+description = "Lint with ruff"
+run = "uv run ruff check ."
+
+[tasks.fmt]
+description = "Format with ruff"
+run = "uv run ruff format ."
+
+[tasks.typecheck]
+description = "Type-check with mypy"
+run = "uv run mypy"
+
+[tasks.check]
+description = "Lint, type-check, and test"
+depends = ["lint", "typecheck", "test"]
+
+[tasks.toolchain]
+description = "Print the active LLVM/MLIR toolchain"
+run = "bash scripts/toolchain-info.sh"

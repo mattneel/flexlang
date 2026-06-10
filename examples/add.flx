@@ -1,0 +1,15 @@
+module Main
+
+fn add(a: I64, b: I64) -> I64 =
+{
+  a + b
+}
+
+fn main() -> I64 =
+{
+  add(20, 22)
+}
+
+test "add works" {
+  assert_eq(add(20, 22), 42)
+}
