@@ -16,19 +16,35 @@ from pathlib import Path
 
 from flx.diagnostics import Diagnostic, FlexError
 
-_LLVM_BIN = "/usr/lib/llvm-22/bin"
+LLVM_BIN = "/usr/lib/llvm-22/bin"
+
+# Tools the native backend (run/test/emit-mlir/build) shells out to. `flx doctor`
+# reports on exactly these; pure-Python commands need none of them.
+REQUIRED_TOOLS = ("mlir-opt", "mlir-translate", "clang")
 
 
-def _tool(name: str) -> str:
+def find_tool(name: str) -> str | None:
+    """Resolve a backend tool on PATH or in the pinned LLVM dir, or None."""
     found = shutil.which(name)
     if found:
         return found
-    candidate = os.path.join(_LLVM_BIN, name)
-    if os.path.exists(candidate):
-        return candidate
-    raise FlexError(
-        [Diagnostic("TOOL000", f"required tool {name!r} not found on PATH or in {_LLVM_BIN}")]
-    )
+    candidate = os.path.join(LLVM_BIN, name)
+    return candidate if os.path.exists(candidate) else None
+
+
+def _tool(name: str) -> str:
+    resolved = find_tool(name)
+    if resolved is None:
+        raise FlexError(
+            [
+                Diagnostic(
+                    "TOOL000",
+                    f"required tool {name!r} not found on PATH or in {LLVM_BIN}",
+                    help="run `flx doctor` to check your native toolchain setup",
+                )
+            ]
+        )
+    return resolved
 
 
 def _run(cmd: list[str]) -> None:

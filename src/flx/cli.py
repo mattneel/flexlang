@@ -54,6 +54,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="test output format",
     )
 
+    sub.add_parser("doctor", help="Check the optional native backend toolchain (LLVM/MLIR)")
+
     hl = sub.add_parser("highlight", help="Syntax-highlight a .flx file")
     hl.add_argument("path", help="path to a .flx source file")
     hl.add_argument(
@@ -101,6 +103,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from flx import driver
 
+    if args.command == "doctor":
+        return driver.cmd_doctor()
     if args.command == "parse":
         return driver.cmd_parse(args.path)
     if args.command == "expand":

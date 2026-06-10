@@ -180,3 +180,52 @@ def cmd_test(path: str, test_filter: str | None = None) -> int:
     except FlexError as err:
         _report(err, source)
         return 1
+
+
+def cmd_doctor() -> int:
+    """Report whether the optional native backend toolchain is available.
+
+    Pure-Python commands (parse/check/expand/highlight) never need these tools;
+    only run/test/emit-mlir/build do. Exit 0 iff the native backend is ready.
+    """
+    import subprocess
+
+    from flx.backend.toolchain import LLVM_BIN, REQUIRED_TOOLS, find_tool
+
+    print("flx doctor — native backend toolchain\n")
+    missing: list[str] = []
+    for name in REQUIRED_TOOLS:
+        resolved = find_tool(name)
+        if resolved is None:
+            missing.append(name)
+            print(f"  [x] {name:<16} not found")
+            continue
+        version = ""
+        try:
+            out = subprocess.run(
+                [resolved, "--version"], capture_output=True, text=True, timeout=10
+            )
+            version = (
+                (out.stdout or out.stderr).splitlines()[0].strip()
+                if out.stdout or out.stderr
+                else ""
+            )
+        except (OSError, subprocess.SubprocessError):
+            version = ""
+        print(f"  [ok] {name:<16} {resolved}")
+        if version:
+            print(f"       {version}")
+
+    print()
+    if not missing:
+        print("Native backend ready: `flx run` / `test` / `emit-mlir` / `build` will work.")
+        return 0
+    print(f"Missing: {', '.join(missing)}")
+    print(
+        "The native backend needs an MLIR/LLVM 22 toolchain on PATH or in "
+        f"{LLVM_BIN}.\n"
+        "  Debian/Ubuntu: see https://apt.llvm.org (install clang-22, llvm-22, mlir-22).\n"
+        "Pure-Python commands work without it: "
+        "`flx parse|check|expand|highlight` (and `flx doctor`)."
+    )
+    return 1
