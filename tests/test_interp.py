@@ -55,7 +55,7 @@ def test_interpret_tests_pass(name: str) -> None:
 @pytest.mark.parametrize("name", EXAMPLES)
 def test_run_matches_native(name: str, capfd: pytest.CaptureFixture[str]) -> None:
     path = f"examples/{name}.flx"
-    native_code = driver.cmd_run(path)
+    native_code = driver.cmd_run(path, native=True)
     native_out = capfd.readouterr().out
     interp_code = driver.cmd_run(path, interpret=True)
     interp_out = capfd.readouterr().out
@@ -66,7 +66,7 @@ def test_run_matches_native(name: str, capfd: pytest.CaptureFixture[str]) -> Non
 @pytest.mark.parametrize("name", EXAMPLES)
 def test_tests_match_native(name: str, capfd: pytest.CaptureFixture[str]) -> None:
     path = f"examples/{name}.flx"
-    native_code = driver.cmd_test(path)
+    native_code = driver.cmd_test(path, native=True)
     native_out = capfd.readouterr().out
     interp_code = driver.cmd_test(path, interpret=True)
     interp_out = capfd.readouterr().out
@@ -85,6 +85,25 @@ def test_failing_assert_reports_and_exits_nonzero(
     out = capfd.readouterr().out
     assert "assert_eq failed: actual 2, expected 3" in out
     assert "fail" in out
+    assert "0 passed, 1 failed" in out
+
+
+def test_question_propagation_fails_test(
+    tmp_path: object, capfd: pytest.CaptureFixture[str]
+) -> None:
+    from pathlib import Path
+
+    # `?` propagating an Err out of a test body fails the test (matching native).
+    src = (
+        "fn div(a: I64, b: I64) -> Result<I64, I64> = "
+        "{ if b == 0 { Err(1) } else { Ok(a / b) } }\n"
+        'test "q" { let x = div(1, 0)?\n assert_eq(x, 0) }\n'
+    )
+    flx = Path(str(tmp_path)) / "q.flx"
+    flx.write_text(src, encoding="utf-8")
+    assert driver.cmd_test(str(flx)) == 1
+    out = capfd.readouterr().out
+    assert "explicit failure" in out
     assert "0 passed, 1 failed" in out
 
 
@@ -132,7 +151,7 @@ def test_division_edge_cases_match_native(tmp_path: object, name: str) -> None:
     body, _ = _DIV_CASES[name]
     flx = Path(str(tmp_path)) / f"{name}.flx"
     flx.write_text(f"fn main() -> I64 = {{ {body} }}\n", encoding="utf-8")
-    assert driver.cmd_run(str(flx)) == driver.cmd_run(str(flx), interpret=True)
+    assert driver.cmd_run(str(flx), native=True) == driver.cmd_run(str(flx), interpret=True)
 
 
 @native
@@ -144,7 +163,7 @@ def test_native_division_by_zero_traps(tmp_path: object, capfd: pytest.CaptureFi
     src = 'fn main() -> I64 uses { Log } = { Log.info("before")\n 10 / (0 - 0) }\n'
     flx = Path(str(tmp_path)) / "trap.flx"
     flx.write_text(src, encoding="utf-8")
-    assert driver.cmd_run(str(flx)) == 1
+    assert driver.cmd_run(str(flx), native=True) == 1
     captured = capfd.readouterr()
     assert "before" in captured.out
     assert "division by zero" in captured.err

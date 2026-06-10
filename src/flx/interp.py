@@ -148,6 +148,12 @@ class Interpreter:
                     print(fail.reason)
                 print(f"fail {module_name} / {test.name}")
                 failed += 1
+            except _Return:
+                # a `?` propagated an Err/None out of the test body: native lowers
+                # this to an explicit-failure call, so match its output exactly.
+                print("  explicit failure")
+                print(f"fail {module_name} / {test.name}")
+                failed += 1
             finally:
                 self.in_test = False
         print(f"\n{passed} passed, {failed} failed")

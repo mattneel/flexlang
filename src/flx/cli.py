@@ -45,18 +45,28 @@ def _build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("-o", "--output", help="output executable path")
         if name == "run":
             cmd.add_argument(
+                "--native",
+                action="store_true",
+                help="compile and run through the native LLVM backend (needs MLIR/LLVM 22)",
+            )
+            cmd.add_argument(
                 "--interpret",
                 action="store_true",
-                help="run with the pure-Python interpreter instead of native codegen",
+                help="force the pure-Python interpreter (the default backend)",
             )
 
     test_cmd = sub.add_parser("test", help="Discover, compile, and run tests")
     test_cmd.add_argument("path", nargs="?", help="optional .flx file or directory")
     test_cmd.add_argument("--filter", dest="filter", help="only run tests matching a substring")
     test_cmd.add_argument(
+        "--native",
+        action="store_true",
+        help="run tests through the native LLVM backend (needs MLIR/LLVM 22)",
+    )
+    test_cmd.add_argument(
         "--interpret",
         action="store_true",
-        help="run tests with the pure-Python interpreter instead of native codegen",
+        help="force the pure-Python interpreter (the default backend)",
     )
     test_cmd.add_argument(
         "--format",
@@ -125,7 +135,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "emit-mlir":
         return driver.cmd_emit_mlir(args.path)
     if args.command == "run":
-        return driver.cmd_run(args.path, args.interpret)
+        # The CLI is interpreter-first: default to the interpreter unless --native.
+        return driver.cmd_run(args.path, interpret=not args.native, native=args.native)
     if args.command == "build":
         return driver.cmd_build(args.path, args.output)
     if args.command == "test":
@@ -135,7 +146,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        return driver.cmd_test(args.path, args.filter, args.interpret)
+        return driver.cmd_test(
+            args.path, args.filter, interpret=not args.native, native=args.native
+        )
 
     print(f"flx {args.command}: not yet implemented", file=sys.stderr)
     return 2

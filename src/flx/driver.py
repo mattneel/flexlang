@@ -71,18 +71,20 @@ def _frontend(path: str) -> tuple[CheckResult | FlexError, dict[str, str]]:
         return FlexError([Diagnostic("PAR003", "input is too deeply nested")]), loaded.sources
 
 
-def _interpreting(forced: bool) -> bool:
-    """Decide whether to interpret rather than compile natively: when forced
-    (`--interpret`), or automatically when the native toolchain is unavailable."""
-    if forced:
-        return True
-    if toolchain.available():
-        return False
-    print(
-        "flx: no native toolchain found — using the interpreter (`flx doctor` for native)",
-        file=sys.stderr,
-    )
-    return True
+def _use_native(interpret: bool, native: bool) -> bool | None:
+    """Choose a backend: explicit `--native` (errors if the toolchain is missing),
+    explicit `--interpret`, or — the default — native when the toolchain is present
+    and the interpreter otherwise. Returns None if `--native` was requested but the
+    toolchain is unavailable (after printing guidance). The `flx` CLI defaults to
+    the interpreter; this auto-default keeps `cmd_run`/`cmd_test` native-backed for
+    the test suite when LLVM is present."""
+    if native and not toolchain.available():
+        print(
+            "flx: --native requires an MLIR/LLVM 22 toolchain (run `flx doctor`)",
+            file=sys.stderr,
+        )
+        return None
+    return native or (toolchain.available() and not interpret)
 
 
 def cmd_parse(path: str) -> int:
@@ -151,7 +153,7 @@ def cmd_emit_mlir(path: str) -> int:
     return 0
 
 
-def cmd_run(path: str, interpret: bool = False) -> int:
+def cmd_run(path: str, interpret: bool = False, native: bool = False) -> int:
     result, sources = _frontend(path)
     if isinstance(result, FlexError):
         _report(result, sources)
@@ -165,7 +167,10 @@ def cmd_run(path: str, interpret: bool = False) -> int:
         print("flx: `main` must take no arguments", file=sys.stderr)
         return 1
 
-    if _interpreting(interpret):
+    choice = _use_native(interpret, native)
+    if choice is None:
+        return 1
+    if not choice:
         try:
             return interp.run_main(result)
         except interp.FlexRuntimeError as exc:
@@ -187,13 +192,18 @@ def cmd_run(path: str, interpret: bool = False) -> int:
         return 1
 
 
-def cmd_test(path: str, test_filter: str | None = None, interpret: bool = False) -> int:
+def cmd_test(
+    path: str, test_filter: str | None = None, interpret: bool = False, native: bool = False
+) -> int:
     result, sources = _frontend(path)
     if isinstance(result, FlexError):
         _report(result, sources)
         return 1
 
-    if _interpreting(interpret):
+    choice = _use_native(interpret, native)
+    if choice is None:
+        return 1
+    if not choice:
         try:
             return interp.run_tests(result, test_filter)
         except interp.FlexRuntimeError as exc:

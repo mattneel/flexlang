@@ -2,30 +2,39 @@
 
 **Flex** is a native functional programming language for explicit systems
 programming — F#/Elm-style syntax, Elixir-style pipes, explicit `Result`
-failure, explicit effects, region-based allocation, and first-class tests,
-compiled through MLIR/LLVM to native code.
+failure, explicit effects, region-based allocation, hygienic comptime macros,
+traits/generics, and first-class tests.
 
-The full language spec and MVP plan live in [`docs/MVP.md`](docs/MVP.md).
+The prototype is **working end-to-end**: it can parse, typecheck, expand macros,
+**run programs through a pure-Python interpreter**, emit MLIR, and compile native
+binaries through LLVM/MLIR 22. It is not just a syntax highlighter — it runs.
 
-This repository hosts the **prototype compiler**, written in Python. It emits
-textual MLIR and shells out to the LLVM/MLIR 22 toolchain to lower to native
-binaries.
+The canonical language spec and MVP plan live in [`docs/MVP.md`](docs/MVP.md).
 
 ## Install
 
-The compiler ships on PyPI as **`flexlang`**; the command it installs is `flx`.
-The fastest way to try it — no clone, no setup — is with
-[uv](https://docs.astral.sh/uv/):
+The compiler ships on PyPI as **`flexlang`** (the command it installs is `flx`).
+Because the core is **pure Python**, you can check, expand, **run, and test**
+Flex with no LLVM at all — the fastest way to try it is with
+[uv](https://docs.astral.sh/uv/). No clone, no setup, no toolchain:
 
 ```sh
-uvx --from flexlang flx -- check     examples/macros.flx
-uvx --from flexlang flx -- expand    examples/macros.flx
-uvx --from flexlang flx -- highlight examples/macros.flx
+echo 'fn main() -> I64 = { 40 + 2 }' > hello.flx
+uvx --from flexlang flx run   hello.flx     # interpreter — exits 42
+uvx --from flexlang flx check hello.flx
 ```
 
-The core install is **pure Python** (one dependency, `pygments`), so those
-commands — `parse`, `check`, `expand`, `highlight`, and `doctor` — work
-everywhere with nothing else installed. To keep `flx` around:
+Cloned this repo? The bundled examples show the rest:
+
+```sh
+uvx --from flexlang flx test      examples/macros.flx
+uvx --from flexlang flx expand    examples/macros.flx
+uvx --from flexlang flx highlight examples/traits.flx
+```
+
+`parse`, `check`, `expand`, `highlight`, `run`, `test`, and `doctor` all work
+from the bare install (one dependency, `pygments`) — `run` and `test` execute on
+a tree-walking interpreter. To keep `flx` around:
 
 ```sh
 uv tool install --from flexlang flx     # then just `flx <command>`
@@ -36,11 +45,15 @@ uv tool install --from flexlang flx     # then just `flx <command>`
 
 ### Native backend (optional)
 
-Compiling and running native code — `flx run`, `test`, `emit-mlir`, `build` —
-needs a system **MLIR/LLVM 22** toolchain (`mlir-opt`, `mlir-translate`,
-`clang`). It is deliberately **not** a Python dependency, so the base install
-stays light. Check what you have with `flx doctor`; on Debian/Ubuntu,
+The native LLVM backend is an **optimizing path, not a requirement**. It needs a
+system **MLIR/LLVM 22** toolchain (`mlir-opt`, `mlir-translate`, `clang`) and is
+used only for `flx build`, `flx run --native`, `flx test --native`, and
+`flx emit-mlir`. It is deliberately **not** a Python dependency, so the base
+install stays light. Check what you have with `flx doctor`; on Debian/Ubuntu,
 `scripts/install-llvm.sh` (or [apt.llvm.org](https://apt.llvm.org)) installs it.
+
+The interpreter and the native backend are differential-tested to produce
+identical output, so `--native` only changes performance, not behavior.
 
 ## Toolchain
 
@@ -91,15 +104,15 @@ flx --version
 | `mise run typecheck` | `mypy`                             |
 | `mise run check`   | lint + typecheck + test              |
 
-The MVP compiler is **working end-to-end** — it lexes, parses, type-checks,
-emits MLIR, lowers through LLVM 22, and produces native binaries:
+Run a program two ways — the interpreter (default, no LLVM) or native code:
 
 ```sh
 flx parse     examples/add.flx     # AST
 flx check     examples/add.flx     # type + name checking
 flx emit-mlir examples/add.flx     # textual MLIR (func/arith/cf/memref)
-flx run       examples/add.flx     # compile to native and run (exit code 42)
-flx test      examples/add.flx     # compile + run first-class tests
+flx run       examples/add.flx     # interpret and run (exit code 42)
+flx run --native examples/add.flx  # compile through LLVM 22 and run
+flx test      examples/add.flx     # run first-class tests
 ```
 
 ```console
@@ -111,28 +124,41 @@ ok Main / add works
 1 passed, 0 failed
 ```
 
-The full §3.1 MVP feature set is implemented and lowers to native code:
+### Implemented (runs on both the interpreter and native LLVM)
 
-- integer/bool literals, `let`/`mut`, arithmetic, comparisons, short-circuit
-  boolean ops, `if`/`else`, `while`, functions, calls, and the pipe operator;
+- integer/bool literals, `let`/`mut`, arithmetic (64-bit wrapping; guarded
+  div/mod), comparisons, short-circuit boolean ops, `if`/`else`, `while`,
+  functions, calls, and the pipe operator;
 - **records** (`type T = { … }`, construction, field access, `{ r with f = v }`);
 - **ADTs** + generic `Result<T,E>`/`Option<T>` (monomorphized), **`match`** with
   exhaustiveness checking, and the **`?`** operator;
-- **effects** — `uses { … }` is checked across the call graph;
-- **regions** — `region name { … }` (shallow);
+- **traits & generics** — `trait`/`impl` with static method dispatch, `derive`d
+  impls, and bounded generic functions (`fn f<T: Show>(…)`) by monomorphization
+  (see [Traits and Generics](https://mattneel.github.io/flexlang/traits.html));
+- **effects** — `uses { … }` checked across the call graph;
 - runtime-backed **string** literals (`++` concat, `to_str`);
-- first-class `test` blocks with `assert`/`assert_eq`/`assert_ne`/`fail`;
+- first-class `test` blocks (`assert`/`assert_eq`/`assert_ne`/`fail`);
 - **compile-time metaprogramming** (`docs/MVP.md` §10): `comptime { }` folding,
   hygienic `quote`/`unquote` **macros**, `reflect.fields` + comptime `for` +
-  `unquote_splice`, and `derive(Eq, Show)` — all viewable with `flx expand`;
-- **traits & generics** — `trait`/`impl` with static method dispatch, `derive`d
-  impls, and bounded generic functions (`fn f<T: Show>(…)`) compiled by
-  monomorphization (see [Traits and Generics](https://mattneel.github.io/flexlang/traits.html)).
+  `unquote_splice`, and `derive(Eq, Show)` — viewable with `flx expand`;
+- **multi-file modules** — `import A.B` (path-resolved) with `pub`/private
+  visibility, merged into one program.
+
+### Prototype / partial
+
+- **regions** — `region name { … }` parses and checks, but lifetime/escape
+  analysis is shallow (scalars copy out, so nothing dangles yet);
+- **native ADT payloads** — variants carrying a record or `String` payload run on
+  the interpreter but are not lowered by the native backend yet.
+
+### Planned
+
+- a package manager and `build.flx`, a standard library, the borrow checker, and
+  the `emit-hir`/`emit-mir`/`explain-*` subcommands (still stubs) — see
+  `docs/MVP.md` §3.2.
 
 See `examples/` for `add`, `result`, `records`, `effects`, `regions`, `macros`,
-and `traits`. The `emit-hir`/`emit-mir`/`explain-*` subcommands are still
-scaffolded stubs; a module/package system, the borrow checker, and a standard
-library remain future work (`docs/MVP.md` §3.2).
+and `traits`.
 
 ## Syntax highlighting
 
