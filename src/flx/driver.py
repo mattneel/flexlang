@@ -59,7 +59,7 @@ def _parse_and_check(path: str, source: str) -> CheckResult | FlexError:
     except FlexError as err:
         return err
     except RecursionError:
-        return FlexError([Diagnostic("PAR003", "input is too deeply nested to parse")])
+        return FlexError([Diagnostic("PAR003", "input is too deeply nested")])
 
 
 def cmd_expand(path: str) -> int:

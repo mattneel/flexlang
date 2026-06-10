@@ -89,13 +89,16 @@ The full §3.1 MVP feature set is implemented and lowers to native code:
   exhaustiveness checking, and the **`?`** operator;
 - **effects** — `uses { … }` is checked across the call graph;
 - **regions** — `region name { … }` (shallow);
-- runtime-backed **string** literals (so `Log.info`/`fail` print);
-- first-class `test` blocks with `assert`/`assert_eq`/`assert_ne`/`fail`.
+- runtime-backed **string** literals (`++` concat, `to_str`);
+- first-class `test` blocks with `assert`/`assert_eq`/`assert_ne`/`fail`;
+- **compile-time metaprogramming** (`docs/MVP.md` §10): `comptime { }` folding,
+  hygienic `quote`/`unquote` **macros**, `reflect.fields` + comptime `for` +
+  `unquote_splice`, and `derive(Eq, Show)` — all viewable with `flx expand`.
 
-See `examples/` for `add`, `result`, `records`, `effects`, and `regions`.
-The remaining `flx` subcommands (`build`, `emit-hir`, `emit-mir`, `expand`,
-`explain-*`) are still scaffolded stubs; macros/comptime, the borrow checker,
-and a standard library remain future work (`docs/MVP.md` §3.2).
+See `examples/` for `add`, `result`, `records`, `effects`, `regions`, and
+`macros`. The remaining `flx` subcommands (`build`, `emit-hir`, `emit-mir`,
+`explain-*`) are still scaffolded stubs; traits/`impl`, the borrow checker, and
+a standard library remain future work (`docs/MVP.md` §3.2).
 
 ## Syntax highlighting
 

@@ -69,11 +69,9 @@ class Expander:
     def expand_stmt(self, stmt: ast.Stmt) -> list[ast.Stmt]:
         # A macro call in statement position may splice in several statements.
         if isinstance(stmt, ast.ExprStmt) and self._macro_call(stmt.expr):
-            fragment = self._expand_macro_fragment(stmt.expr)  # type: ignore[arg-type]
-            out: list[ast.Stmt] = []
-            for inner in fragment.stmts:
-                out.extend(self.expand_stmt(inner))
-            return out
+            assert isinstance(stmt.expr, ast.CallExpr)
+            fragment = self._expand_macro_fragment(stmt.expr)  # already re-expanded
+            return list(fragment.stmts)
         rebuilt = map_children(
             stmt, self.expand_expr, self.expand_stmt, self.expand_block, _identity
         )
@@ -86,17 +84,18 @@ class Expander:
             raise self._error(
                 "MAC004", f"`{_kw(expr)}` is only valid inside a macro body", expr.span
             )
+        # Fold comptime before recursing into children, so the interpreter (not
+        # a premature inner fold with an empty env) handles nested comptime.
+        if isinstance(expr, ast.ComptimeExpr):
+            return self._fold_comptime(expr)
         node = cast(
             ast.Expr,
             map_children(expr, self.expand_expr, self.expand_stmt, self.expand_block, _identity),
         )
-        if isinstance(node, ast.ComptimeExpr):
-            return self._fold_comptime(node)
         if self._macro_call(node):
             assert isinstance(node, ast.CallExpr)
             fragment = self._expand_macro_fragment(node)
-            value = _block_to_expr(fragment, node.span, self)
-            return self.expand_expr(value)
+            return _block_to_expr(fragment, node.span, self)
         return node
 
     def _macro_call(self, expr: ast.Expr) -> bool:
@@ -118,19 +117,23 @@ class Expander:
             )
         self.depth += 1
         if self.depth > _EXPAND_DEPTH_LIMIT:
-            raise self._error("MAC003", "macro expansion too deep", call.span)
+            raise self._error("MAC003", "macro expansion too deep (recursive macro?)", call.span)
         self.trace.append((macro.name, call.span))
-        env = dict(zip(macro.params, call.args, strict=True))
-        interp = Interp(self.ctx)
         try:
-            result = interp.eval_expr(macro.body, env)
-        except ComptimeError as err:
-            raise self._from_comptime(err) from err
-        fragment = _coerce_block(result, call.span, self)
-        fragment = cast(ast.Block, hygiene.rename(fragment, interp.sealed, self.gensym))
-        self.trace.pop()
-        self.depth -= 1
-        return fragment
+            env = dict(zip(macro.params, call.args, strict=True))
+            interp = Interp(self.ctx)
+            try:
+                result = interp.eval_expr(macro.body, env)
+            except ComptimeError as err:
+                raise self._from_comptime(err) from err
+            fragment = _coerce_block(result, call.span, self)
+            fragment = cast(ast.Block, hygiene.rename(fragment, interp.sealed, self.gensym))
+            # Re-expand the produced fragment while the depth guard is still
+            # raised, so nested/recursive macros accumulate depth (MAC003).
+            return self.expand_block(fragment)
+        finally:
+            self.trace.pop()
+            self.depth -= 1
 
     def _fold_comptime(self, node: ast.ComptimeExpr) -> ast.Expr:
         interp = Interp(self.ctx)

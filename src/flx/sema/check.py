@@ -111,6 +111,14 @@ class Checker:
 
     def check(self) -> CheckResult:
         for adt in self.module.adts:
+            for variant in adt.variants:
+                if len(variant.payload) > 1:
+                    self._err(
+                        "TYPE022",
+                        f"variant {variant.name!r} has a multi-field payload, "
+                        "which is not supported yet",
+                        variant.span,
+                    )
             self.adt_templates[adt.name] = (
                 adt.type_params,
                 [(v.name, v.payload) for v in adt.variants],

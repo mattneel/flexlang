@@ -41,10 +41,20 @@ def _derive_type(
         if type_params:
             raise _err("DER004", f"cannot derive {trait!r} on a generic type yet", span)
         if trait == "Eq":
-            out.append(_derive_eq(name, span))
+            out.append(_derive_eq(name, span, exp))
         else:
             out.append(_derive_show(name, span, exp))
     return out
+
+
+def _string_field_names(name: str, exp: Expander) -> bool:
+    record = exp.ctx.records.get(name)
+    if record is not None:
+        return any(f.type.name == "String" for f in record.fields)
+    adt = exp.ctx.adts.get(name)
+    if adt is not None:
+        return any(p.name == "String" for v in adt.variants for p in v.payload)
+    return False
 
 
 # --- AST builders -------------------------------------------------------------
@@ -73,7 +83,9 @@ def _concat(parts: list[ast.Expr], sp: Span) -> ast.Expr:
 # --- Eq -----------------------------------------------------------------------
 
 
-def _derive_eq(type_name: str, sp: Span) -> ast.FnDecl:
+def _derive_eq(type_name: str, sp: Span, exp: Expander) -> ast.FnDecl:
+    if _string_field_names(type_name, exp):
+        raise _err("DER001", f"cannot derive Eq for {type_name!r}: it contains a String", sp)
     # Delegate to structural equality, which the backend already lowers.
     body = ast.BinaryExpr("==", _name("a", sp), _name("b", sp), sp)
     return _fn(f"eq_{type_name}", [("a", type_name), ("b", type_name)], "Bool", body, sp)
@@ -118,6 +130,13 @@ def _show_record(record: ast.RecordDecl, sp: Span) -> ast.FnDecl:
 def _show_adt(adt: ast.AdtDecl, sp: Span) -> ast.FnDecl:
     arms: list[ast.MatchArm] = []
     for variant in adt.variants:
+        if len(variant.payload) > 1:
+            raise _err(
+                "DER001",
+                f"cannot derive Show for {adt.name!r}: variant {variant.name!r} "
+                "has a multi-field payload",
+                sp,
+            )
         if variant.payload:
             bind = ast.CtorPattern(variant.name, [ast.BindPattern("x", sp)], sp)
             rendered = _render(_name("x", sp), variant.payload[0].name, sp)

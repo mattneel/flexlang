@@ -159,8 +159,12 @@ class Interp:
         if op in ("/", "%"):
             if right == 0:
                 raise ComptimeError("CT003", "comptime division by zero", expr.span)
-            result = left // right if op == "/" else left - (left // right) * right
-            return self._int(int(result), expr.span)
+            # Truncate toward zero to match the backend's arith.divsi / remsi.
+            q = abs(left) // abs(right)
+            if (left < 0) != (right < 0):
+                q = -q
+            result = q if op == "/" else left - q * right
+            return self._int(result, expr.span)
         if op in _INT_BINOPS:
             return self._int(_INT_BINOPS[op](left, right), expr.span)
         if op in _CMP_BINOPS:

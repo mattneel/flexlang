@@ -11,11 +11,11 @@ subcommands are scaffolded today and implemented incrementally.
 | `flx emit-mlir <file>` | Emit MLIR text | ✅ |
 | `flx run <file>` | Compile to native and run | ✅ |
 | `flx test [path]` | Discover, compile, and run tests | ✅ |
+| `flx expand <file>` | Show comptime/macro/derive expansion | ✅ |
 | `flx highlight <file>` | Syntax-highlight `.flx` | ✅ |
 | `flx build <file> -o <bin>` | Build a native executable | stub |
 | `flx emit-hir <file>` | Emit typed HIR | stub |
 | `flx emit-mir <file>` | Emit MIR | stub |
-| `flx expand <file>` | Show desugar/macro expansion | stub |
 | `flx explain-effects <file>` | Explain effects | stub |
 | `flx explain-cost <file>` | Explain allocation/cost | stub |
 
