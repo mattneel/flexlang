@@ -29,6 +29,17 @@ def _dump_item(item: ast.Item, depth: int, out: list[str]) -> None:
         uses = f" uses {{{', '.join(item.effects)}}}" if item.effects else ""
         out.append(f"{_indent(depth)}Test {item.name!r}{uses}")
         _dump_block(item.body, depth + 1, out)
+    elif isinstance(item, ast.RecordDecl):
+        params = f"<{', '.join(item.type_params)}>" if item.type_params else ""
+        fields = ", ".join(f"{f.name}: {_type(f.type)}" for f in item.fields)
+        out.append(f"{_indent(depth)}Record {item.name}{params} {{{fields}}}")
+    elif isinstance(item, ast.AdtDecl):
+        params = f"<{', '.join(item.type_params)}>" if item.type_params else ""
+        variants = " | ".join(
+            v.name + (f"({', '.join(_type(t) for t in v.payload)})" if v.payload else "")
+            for v in item.variants
+        )
+        out.append(f"{_indent(depth)}Adt {item.name}{params} = {variants}")
 
 
 def _type(t: ast.TypeExpr) -> str:
@@ -81,4 +92,28 @@ def _expr(expr: ast.Expr) -> str:
     if isinstance(expr, ast.IfExpr):
         base = f"if {_expr(expr.cond)} {{...}}"
         return base + " else {...}" if expr.else_block else base
+    if isinstance(expr, ast.RecordExpr):
+        return "{" + ", ".join(f"{f.name} = {_expr(f.value)}" for f in expr.fields) + "}"
+    if isinstance(expr, ast.RecordUpdateExpr):
+        fields = ", ".join(f"{f.name} = {_expr(f.value)}" for f in expr.fields)
+        return f"{{{_expr(expr.base)} with {fields}}}"
+    if isinstance(expr, ast.TryExpr):
+        return f"{_expr(expr.expr)}?"
+    if isinstance(expr, ast.RegionExpr):
+        return f"region {expr.name} {{...}}"
+    if isinstance(expr, ast.MatchExpr):
+        arms = " ".join(f"{_pattern(a.pattern)} => {_expr(a.body)}" for a in expr.arms)
+        return f"match {_expr(expr.scrutinee)} {{ {arms} }}"
     return "<expr>"
+
+
+def _pattern(pat: ast.Pattern) -> str:
+    if isinstance(pat, ast.WildcardPattern):
+        return "_"
+    if isinstance(pat, ast.BindPattern):
+        return pat.name
+    if isinstance(pat, ast.CtorPattern):
+        if pat.args:
+            return f"{pat.name}({', '.join(_pattern(a) for a in pat.args)})"
+        return pat.name
+    return "<pat>"

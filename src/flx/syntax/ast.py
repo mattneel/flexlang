@@ -91,6 +91,82 @@ class IfExpr(Expr):
     span: Span
 
 
+@dataclass(frozen=True)
+class FieldInit:
+    name: str
+    value: Expr
+    span: Span
+
+
+@dataclass(frozen=True)
+class RecordExpr(Expr):
+    fields: list[FieldInit]
+    span: Span
+
+
+@dataclass(frozen=True)
+class RecordUpdateExpr(Expr):
+    base: Expr
+    fields: list[FieldInit]
+    span: Span
+
+
+@dataclass(frozen=True)
+class RegionExpr(Expr):
+    name: str
+    body: Block
+    span: Span
+
+
+@dataclass(frozen=True)
+class TryExpr(Expr):
+    """The `?` result-propagation operator."""
+
+    expr: Expr
+    span: Span
+
+
+# --- patterns -----------------------------------------------------------------
+
+
+class Pattern:
+    """Marker base for match patterns."""
+
+    span: Span
+
+
+@dataclass(frozen=True)
+class WildcardPattern(Pattern):
+    span: Span
+
+
+@dataclass(frozen=True)
+class BindPattern(Pattern):
+    name: str
+    span: Span
+
+
+@dataclass(frozen=True)
+class CtorPattern(Pattern):
+    name: str
+    args: list[Pattern]
+    span: Span
+
+
+@dataclass(frozen=True)
+class MatchArm:
+    pattern: Pattern
+    body: Expr
+    span: Span
+
+
+@dataclass(frozen=True)
+class MatchExpr(Expr):
+    scrutinee: Expr
+    arms: list[MatchArm]
+    span: Span
+
+
 # --- statements ---------------------------------------------------------------
 
 
@@ -188,6 +264,36 @@ class TestDecl(Item):
 
 
 @dataclass(frozen=True)
+class RecordField:
+    name: str
+    type: TypeExpr
+    span: Span
+
+
+@dataclass(frozen=True)
+class RecordDecl(Item):
+    name: str
+    type_params: list[str]
+    fields: list[RecordField]
+    span: Span
+
+
+@dataclass(frozen=True)
+class Variant:
+    name: str
+    payload: list[TypeExpr]
+    span: Span
+
+
+@dataclass(frozen=True)
+class AdtDecl(Item):
+    name: str
+    type_params: list[str]
+    variants: list[Variant]
+    span: Span
+
+
+@dataclass(frozen=True)
 class Module:
     name: str
     imports: list[str]
@@ -201,3 +307,11 @@ class Module:
     @property
     def tests(self) -> list[TestDecl]:
         return [it for it in self.items if isinstance(it, TestDecl)]
+
+    @property
+    def records(self) -> list[RecordDecl]:
+        return [it for it in self.items if isinstance(it, RecordDecl)]
+
+    @property
+    def adts(self) -> list[AdtDecl]:
+        return [it for it in self.items if isinstance(it, AdtDecl)]

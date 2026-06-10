@@ -28,6 +28,10 @@ class TokenKind(Enum):
     KW_USES = auto()
     KW_TRUE = auto()
     KW_FALSE = auto()
+    KW_TYPE = auto()
+    KW_MATCH = auto()
+    KW_REGION = auto()
+    KW_WITH = auto()
 
     # delimiters
     LPAREN = auto()
@@ -80,6 +84,10 @@ KEYWORDS: dict[str, TokenKind] = {
     "uses": TokenKind.KW_USES,
     "true": TokenKind.KW_TRUE,
     "false": TokenKind.KW_FALSE,
+    "type": TokenKind.KW_TYPE,
+    "match": TokenKind.KW_MATCH,
+    "region": TokenKind.KW_REGION,
+    "with": TokenKind.KW_WITH,
 }
 
 

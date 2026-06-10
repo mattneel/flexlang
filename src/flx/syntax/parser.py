@@ -78,6 +78,10 @@ class Parser:
     def _peek(self) -> Token:
         return self.tokens[self.pos]
 
+    def _peek_at(self, offset: int) -> Token:
+        i = min(self.pos + offset, len(self.tokens) - 1)
+        return self.tokens[i]
+
     def _at(self, kind: TokenKind) -> bool:
         return self._peek().kind is kind
 
@@ -126,10 +130,12 @@ class Parser:
                 items.append(self._fn())
             elif self._at(TokenKind.KW_TEST):
                 items.append(self._test())
+            elif self._at(TokenKind.KW_TYPE):
+                items.append(self._type_decl())
             else:
                 tok = self._peek()
                 raise self._error(
-                    f"expected a function or test, found {self._describe(tok)}", tok.span
+                    f"expected a function, test, or type, found {self._describe(tok)}", tok.span
                 )
         end = self._peek().span
         return ast.Module(name, imports, items, start.to(end))
@@ -197,13 +203,74 @@ class Parser:
         body = self._block()
         return ast.TestDecl(name, effects, body, start.to(body.span))
 
+    def _type_decl(self) -> ast.Item:
+        start = self._advance().span  # `type`
+        name = self._expect(TokenKind.IDENT, "a type name").text
+        type_params = self._opt_type_params()
+        self._expect(TokenKind.EQ, "'='")
+        if self._at(TokenKind.LBRACE):
+            return self._record_decl(start, name, type_params)
+        return self._adt_decl(start, name, type_params)
+
+    def _opt_type_params(self) -> list[str]:
+        params: list[str] = []
+        if self._eat(TokenKind.LT):
+            params.append(self._expect(TokenKind.IDENT, "a type parameter").text)
+            while self._eat(TokenKind.COMMA):
+                params.append(self._expect(TokenKind.IDENT, "a type parameter").text)
+            self._expect(TokenKind.GT, "'>'")
+        return params
+
+    def _record_decl(self, start: Span, name: str, type_params: list[str]) -> ast.RecordDecl:
+        self._expect(TokenKind.LBRACE, "'{'")
+        fields: list[ast.RecordField] = []
+        while not self._at(TokenKind.RBRACE) and not self._at(TokenKind.EOF):
+            fname = self._expect(TokenKind.IDENT, "a field name")
+            self._expect(TokenKind.COLON, "':'")
+            ftype = self._type()
+            fields.append(ast.RecordField(fname.text, ftype, fname.span))
+            self._eat(TokenKind.COMMA)
+        end = self._expect(TokenKind.RBRACE, "'}'").span
+        return ast.RecordDecl(name, type_params, fields, start.to(end))
+
+    def _adt_decl(self, start: Span, name: str, type_params: list[str]) -> ast.AdtDecl:
+        variants: list[ast.Variant] = []
+        self._eat(TokenKind.PIPE)  # optional leading `|`
+        variants.append(self._variant())
+        while self._eat(TokenKind.PIPE):
+            variants.append(self._variant())
+        end = variants[-1].span
+        return ast.AdtDecl(name, type_params, variants, start.to(end))
+
+    def _variant(self) -> ast.Variant:
+        name_tok = self._expect(TokenKind.IDENT, "a variant name")
+        payload: list[ast.TypeExpr] = []
+        end = name_tok.span
+        if self._at(TokenKind.LPAREN):
+            self._advance()
+            payload.append(self._type())
+            while self._eat(TokenKind.COMMA):
+                payload.append(self._type())
+            end = self._expect(TokenKind.RPAREN, "')'").span
+        return ast.Variant(name_tok.text, payload, name_tok.span.to(end))
+
     # --- blocks / statements --------------------------------------------------
 
     def _block_or_expr_body(self) -> ast.Block:
-        if self._at(TokenKind.LBRACE):
+        if self._at(TokenKind.LBRACE) and not self._record_ahead():
             return self._block()
         expr = self._expr()
         return ast.Block([ast.ExprStmt(expr, expr.span)], expr.span)
+
+    def _record_ahead(self) -> bool:
+        """At a `{`, whether it begins a record literal rather than a block."""
+        nxt = self._peek_at(1)
+        if nxt.kind is TokenKind.RBRACE:
+            return True
+        return nxt.kind is TokenKind.IDENT and self._peek_at(2).kind in (
+            TokenKind.EQ,
+            TokenKind.KW_WITH,
+        )
 
     def _block(self) -> ast.Block:
         start = self._expect(TokenKind.LBRACE, "'{'").span
@@ -285,6 +352,10 @@ class Parser:
                 name_tok = self._expect(TokenKind.IDENT, "a member name")
                 lhs = ast.MemberExpr(lhs, name_tok.text, lhs.span.to(name_tok.span))
                 continue
+            if kind is TokenKind.QUESTION and min_bp < _POSTFIX_BP:
+                self._advance()
+                lhs = ast.TryExpr(lhs, lhs.span.to(tok.span))
+                continue
             bp = _INFIX_BP.get(kind)
             if bp is None or bp <= min_bp:
                 break
@@ -338,7 +409,73 @@ class Parser:
             return inner
         if tok.kind is TokenKind.KW_IF:
             return self._if()
+        if tok.kind is TokenKind.KW_MATCH:
+            return self._match()
+        if tok.kind is TokenKind.KW_REGION:
+            return self._region()
+        if tok.kind is TokenKind.LBRACE:
+            return self._record_expr()
         raise self._error(f"expected an expression, found {self._describe(tok)}", tok.span)
+
+    def _record_expr(self) -> ast.Expr:
+        start = self._expect(TokenKind.LBRACE, "'{'").span
+        # `{ field = v, ... }` (construction) vs `{ base with field = v, ... }`.
+        if self._at(TokenKind.IDENT) and self._peek_at(1).kind is TokenKind.EQ:
+            fields, end = self._field_inits()
+            return ast.RecordExpr(fields, start.to(end))
+        if self._at(TokenKind.RBRACE):
+            end = self._advance().span
+            return ast.RecordExpr([], start.to(end))
+        base = self._expr()
+        self._expect(TokenKind.KW_WITH, "'with'")
+        fields, end = self._field_inits()
+        return ast.RecordUpdateExpr(base, fields, start.to(end))
+
+    def _field_inits(self) -> tuple[list[ast.FieldInit], Span]:
+        fields: list[ast.FieldInit] = []
+        while not self._at(TokenKind.RBRACE) and not self._at(TokenKind.EOF):
+            fname = self._expect(TokenKind.IDENT, "a field name")
+            self._expect(TokenKind.EQ, "'='")
+            value = self._expr()
+            fields.append(ast.FieldInit(fname.text, value, fname.span.to(value.span)))
+            self._eat(TokenKind.COMMA)
+        end = self._expect(TokenKind.RBRACE, "'}'").span
+        return fields, end
+
+    def _match(self) -> ast.Expr:
+        start = self._advance().span  # `match`
+        scrutinee = self._expr()
+        self._expect(TokenKind.LBRACE, "'{'")
+        arms: list[ast.MatchArm] = []
+        while not self._at(TokenKind.RBRACE) and not self._at(TokenKind.EOF):
+            pattern = self._pattern()
+            self._expect(TokenKind.FAT_ARROW, "'=>'")
+            body = self._expr()
+            arms.append(ast.MatchArm(pattern, body, pattern.span.to(body.span)))
+        end = self._expect(TokenKind.RBRACE, "'}'").span
+        return ast.MatchExpr(scrutinee, arms, start.to(end))
+
+    def _pattern(self) -> ast.Pattern:
+        tok = self._expect(TokenKind.IDENT, "a pattern")
+        if tok.text == "_":
+            return ast.WildcardPattern(tok.span)
+        if not tok.text[0].isupper():
+            return ast.BindPattern(tok.text, tok.span)
+        args: list[ast.Pattern] = []
+        end = tok.span
+        if self._at(TokenKind.LPAREN):
+            self._advance()
+            args.append(self._pattern())
+            while self._eat(TokenKind.COMMA):
+                args.append(self._pattern())
+            end = self._expect(TokenKind.RPAREN, "')'").span
+        return ast.CtorPattern(tok.text, args, tok.span.to(end))
+
+    def _region(self) -> ast.Expr:
+        start = self._advance().span  # `region`
+        name = self._expect(TokenKind.IDENT, "a region name").text
+        body = self._block()
+        return ast.RegionExpr(name, body, start.to(body.span))
 
     def _if(self) -> ast.Expr:
         start = self._advance().span  # `if`
