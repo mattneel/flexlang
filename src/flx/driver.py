@@ -243,7 +243,7 @@ def cmd_doctor() -> int:
                 if out.stdout or out.stderr
                 else ""
             )
-        except (OSError, subprocess.SubprocessError):
+        except OSError, subprocess.SubprocessError:
             version = ""
         print(f"  [ok] {name:<16} {resolved}")
         if version:

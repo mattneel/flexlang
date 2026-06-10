@@ -35,8 +35,8 @@ description = "Run the pytest suite"
 run = "uv run pytest"
 
 [tasks.lint]
-description = "Lint with ruff"
-run = "uv run ruff check ."
+description = "Lint and format-check with ruff (mirrors CI)"
+run = ["uv run ruff check .", "uv run ruff format --check ."]
 
 [tasks.fmt]
 description = "Format with ruff"
