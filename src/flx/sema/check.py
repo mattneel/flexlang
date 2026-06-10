@@ -52,9 +52,15 @@ def _type_key(ty: Type) -> str:
 
 def _mono_key(ty: Type) -> str:
     """Structural key for a monomorphization: distinguishes `Option<I64>` from
-    `Option<Bool>`, unlike the nominal `_type_key` used for impl lookup."""
+    `Option<Bool>`, unlike the nominal `_type_key` used for impl lookup.
+
+    Type arguments are joined with `$`, which is illegal in source identifiers, so
+    a generic instantiation's key can never collide with a user type's name (a
+    user type literally named `Option_I64` keys to `Option_I64`, while `Option<I64>`
+    keys to `Option$I64`). The encoding is prefix-notation over fixed-arity type
+    heads, so distinct types always produce distinct keys."""
     if isinstance(ty, AdtType) and ty.type_args:
-        return ty.name + "".join("_" + _mono_key(a) for a in ty.type_args)
+        return ty.name + "".join("$" + _mono_key(a) for a in ty.type_args)
     if isinstance(ty, (PrimType, RecordType, AdtType)):
         return ty.name
     return "?"

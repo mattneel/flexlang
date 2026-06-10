@@ -174,3 +174,20 @@ def test_two_instantiations_are_distinct(tmp_path: Path) -> None:
     flx = tmp_path / "id.flx"
     flx.write_text(src, encoding="utf-8")
     assert driver.cmd_run(str(flx)) == 42
+
+
+@native
+def test_mono_key_does_not_collide_with_user_type_name(tmp_path: Path) -> None:
+    # `Option<I64>` keys to `Option$I64`; a user type literally named `Option_I64`
+    # keys to `Option_I64`. These must stay distinct specializations (the `$`
+    # separator is illegal in source identifiers, so they can never coincide).
+    src = (
+        "type Option_I64 = { v: I64 }\n"
+        "fn id<T>(x: T) -> T = { x }\n"
+        "fn main() -> I64 = { let a = id(Some(7))\n"
+        "  let b = id({ v = 5 })\n"
+        "  (match a { Some(x) => x  None => 0 }) + b.v }"
+    )
+    flx = tmp_path / "collide.flx"
+    flx.write_text(src, encoding="utf-8")
+    assert driver.cmd_run(str(flx)) == 12
