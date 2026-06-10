@@ -6,9 +6,13 @@ concatenated into a single :class:`~flx.syntax.ast.Module`, which then flows
 through the existing expand -> check -> monomorphize -> backend pipeline unchanged.
 
 Merging at the AST level *before* macro expansion means one expander (so gensyms
-never collide across files) and cross-file macros/derives resolve for free. Each
-definition's origin module and visibility are recorded in :class:`ProgramInfo` so
-the checker can enforce `pub`/private without a separate name-resolution pass.
+never collide across files) and cross-file macros/derives resolve for free.
+
+Module identity is validated, not trusted: an imported file's ``module`` header
+must equal its import path (MOD002), and no two files may declare the same module
+name (MOD003) — so a file cannot inject definitions into another module. Each
+definition's origin module (by name AND by file) and its visibility are recorded
+in :class:`ProgramInfo` so the checker can enforce `pub`/private.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ class ProgramInfo:
     sources: dict[str, str]  # file path -> source text, for diagnostics
     decl_module: dict[str, str] = field(default_factory=dict)  # top-level name -> module
     public: set[str] = field(default_factory=set)  # names declared `pub`
+    file_module: dict[str, str] = field(default_factory=dict)  # file path -> module name
 
 
 def _decl_name(item: ast.Item) -> str | None:
@@ -40,8 +45,10 @@ def load_program(entry_path: str) -> ProgramInfo:
     sources: dict[str, str] = {}
     order: list[ast.Module] = []
     seen: set[Path] = set()
+    file_module: dict[str, str] = {}
+    module_file: dict[str, str] = {}  # declared module name -> file (MOD003)
 
-    def visit(path: Path, import_span: Span | None) -> None:
+    def visit(path: Path, expected_name: str | None, import_span: Span | None) -> None:
         resolved = path.resolve()
         if resolved in seen:
             return  # already loaded (also breaks import cycles)
@@ -54,12 +61,37 @@ def load_program(entry_path: str) -> ProgramInfo:
         key = str(resolved)
         sources[key] = src
         mod = parse(src, key)
+        if expected_name is not None and mod.name != expected_name:
+            raise FlexError(
+                [
+                    Diagnostic(
+                        "MOD002",
+                        f"{path} declares module {mod.name!r} but is imported as {expected_name!r}",
+                        import_span,
+                        help=f"add `module {expected_name}` at the top of {path.name}",
+                    )
+                ]
+            )
+        other = module_file.get(mod.name)
+        if other is not None:
+            raise FlexError(
+                [
+                    Diagnostic(
+                        "MOD003",
+                        f"module {mod.name!r} is declared by both {other} and {key}",
+                        import_span,
+                    )
+                ]
+            )
+        module_file[mod.name] = key
+        file_module[key] = mod.name
         order.append(mod)
-        for imp in mod.imports:
+        spans = list(mod.import_spans) + [mod.span] * len(mod.imports)  # tolerate missing spans
+        for imp, span in zip(mod.imports, spans, strict=False):
             child = root / Path(*imp.split(".")).with_suffix(".flx")
-            visit(child, mod.span)
+            visit(child, imp, span)
 
-    visit(Path(entry_path), None)
+    visit(Path(entry_path), None, None)
 
     decl_module: dict[str, str] = {}
     public: set[str] = set()
@@ -73,5 +105,5 @@ def load_program(entry_path: str) -> ProgramInfo:
                 if getattr(item, "pub", False):
                     public.add(name)
 
-    merged = replace(order[0], imports=[], items=merged_items)
-    return ProgramInfo(merged, sources, decl_module, public)
+    merged = replace(order[0], imports=[], items=merged_items, import_spans=[])
+    return ProgramInfo(merged, sources, decl_module, public, file_module)

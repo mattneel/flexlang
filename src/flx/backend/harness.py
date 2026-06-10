@@ -55,9 +55,11 @@ def _c_string(text: str) -> str:
     return "".join(out)
 
 
-def generate_harness(module_name: str, tests: list[tuple[int, str]]) -> str:
+def generate_harness(tests: list[tuple[int, str]]) -> str:
     """Build the C harness. ``tests`` pairs each selected test's MLIR index with
-    its name, so filtering stays aligned with the emitted ``@flx_test_<i>``."""
+    its full report label (``Module / test name``), so filtering stays aligned
+    with the emitted ``@flx_test_<i>`` and imported tests report under their own
+    module."""
     n = len(tests)
     plural = "" if n == 1 else "s"
     lines = [BASE_RUNTIME_C, _RUNTIME]
@@ -67,10 +69,10 @@ def generate_harness(module_name: str, tests: list[tuple[int, str]]) -> str:
     lines.append("int main(void) {")
     lines.append(f'    printf("running {n} test{plural}\\n\\n");')
     lines.append("    int passed = 0, failed = 0;")
-    for i, name in tests:
+    for i, full_label in tests:
         # Pass the label as a printf ARGUMENT (not in the format string), so any
         # '%' in a test name is inert rather than a conversion specifier.
-        label = _c_string(f"{module_name} / {name}")
+        label = _c_string(full_label)
         lines.append(f"    if (flx_test_{i}() == 0) {{")
         lines.append(f'        printf("ok %s\\n", "{label}");')
         lines.append("        passed++;")

@@ -37,9 +37,9 @@ def _project(tmp_path: Path, files: dict[str, str]) -> str:
 
 def _check_codes(tmp_path: Path, files: dict[str, str]) -> list[str]:
     entry = _project(tmp_path, files)
-    info = load_program(entry)
     with pytest.raises(FlexError) as exc:
-        check_and_monomorphize(expand(info.module), info.decl_module, info.public)
+        info = load_program(entry)
+        check_and_monomorphize(expand(info.module), info.decl_module, info.public, info.file_module)
     return [d.code for d in exc.value.diagnostics]
 
 
@@ -139,6 +139,156 @@ def test_missing_import_is_reported(tmp_path: Path) -> None:
         tmp_path, {"main.flx": "module Main\nimport Lib.Nope\nfn main() -> I64 = { 0 }\n"}
     )
     assert driver.cmd_check(entry) == 1  # MOD001, rendered to stderr
+
+
+# --- holes found and closed by the adversarial module review -------------------
+
+
+def test_record_literal_cannot_construct_foreign_private(tmp_path: Path) -> None:
+    # A bare record literal must not resolve to another module's private record
+    # type (that would construct it); with the type invisible, nothing matches.
+    codes = _check_codes(
+        tmp_path,
+        {
+            "Lib/S.flx": (
+                "module Lib.S\ntype Secret = { code: I64 }\n"
+                "pub fn reveal(s: Secret) -> I64 = { s.code }\n"
+            ),
+            "main.flx": (
+                "module Main\nimport Lib.S\n"
+                "fn main() -> I64 = { let s = { code = 5 }\n  reveal(s) }\n"
+            ),
+        },
+    )
+    assert "TYPE014" in codes
+
+
+def test_private_ctor_hidden_in_match_patterns(tmp_path: Path) -> None:
+    # Naming a private constructor in a PATTERN is as much a reference as in an
+    # expression — even when a pub function hands you the scrutinee.
+    codes = _check_codes(
+        tmp_path,
+        {
+            "Lib/C.flx": (
+                "module Lib.C\ntype Color = | Red | Green\npub fn make() -> Color = { Red }\n"
+            ),
+            "main.flx": (
+                "module Main\nimport Lib.C\n"
+                "fn main() -> I64 = { match make() { Red => 1  Green => 2 } }\n"
+            ),
+        },
+    )
+    assert "VIS001" in codes
+
+
+def test_generic_body_visibility_enforced(tmp_path: Path) -> None:
+    # Monomorphized specializations inherit their template's module (via spans),
+    # so a generic body cannot call another module's private function.
+    codes = _check_codes(
+        tmp_path,
+        {
+            "Lib/Sec.flx": "module Lib.Sec\nfn secret() -> I64 = { 77 }\n",
+            "main.flx": (
+                "module Main\nimport Lib.Sec\n"
+                "fn ident<T>(x: T) -> I64 = { secret() }\nfn main() -> I64 = { ident(0) }\n"
+            ),
+        },
+    )
+    assert "VIS001" in codes
+
+
+def test_impl_body_visibility_enforced(tmp_path: Path) -> None:
+    codes = _check_codes(
+        tmp_path,
+        {
+            "Lib/Sec.flx": "module Lib.Sec\nfn secret() -> I64 = { 77 }\n",
+            "main.flx": (
+                "module Main\nimport Lib.Sec\n"
+                "trait Get = { fn get(self: Self) -> I64 }\ntype Box = { v: I64 }\n"
+                "impl Get for Box = { fn get(self: Box) -> I64 = { secret() } }\n"
+                "fn main() -> I64 = { let b = { v = 1 }\n  b.get() }\n"
+            ),
+        },
+    )
+    assert "VIS001" in codes
+
+
+def test_import_header_must_match_path(tmp_path: Path) -> None:
+    # A headerless imported file defaults to "Main", which mismatches its import
+    # path — its definitions must not silently join the entry module.
+    codes = _check_codes(
+        tmp_path,
+        {
+            "Lib/NoHdr.flx": "fn sneaky() -> I64 = { 1 }\n",
+            "main.flx": "module Main\nimport Lib.NoHdr\nfn main() -> I64 = { sneaky() }\n",
+        },
+    )
+    assert "MOD002" in codes
+
+
+def test_module_injection_rejected(tmp_path: Path) -> None:
+    # A file cannot inject definitions into another module by declaring its name.
+    codes = _check_codes(
+        tmp_path,
+        {
+            "Lib/Evil.flx": "module Lib.Other\npub fn expose() -> I64 = { 1 }\n",
+            "main.flx": "module Main\nimport Lib.Evil\nfn main() -> I64 = { expose() }\n",
+        },
+    )
+    assert "MOD002" in codes
+
+
+def test_duplicate_public_type_rejected(tmp_path: Path) -> None:
+    codes = _check_codes(
+        tmp_path,
+        {
+            "Lib/T1.flx": "module Lib.T1\npub type Thing = { a: I64 }\n",
+            "Lib/T2.flx": "module Lib.T2\npub type Thing = { a: I64, b: I64 }\n",
+            "main.flx": ("module Main\nimport Lib.T1\nimport Lib.T2\nfn main() -> I64 = { 0 }\n"),
+        },
+    )
+    assert "TYPE002" in codes
+
+
+def test_same_shape_private_records_do_not_collide(tmp_path: Path) -> None:
+    # A private record in one module must not make a same-shaped record literal
+    # ambiguous in another module — each side resolves to its own visible type.
+    entry = _project(
+        tmp_path,
+        {
+            "Lib/S.flx": (
+                "module Lib.S\ntype Hidden = { x: I64, y: I64 }\n"
+                "pub fn probe(n: I64) -> I64 = { let h = { x = n, y = n }\n  h.x }\n"
+            ),
+            "main.flx": (
+                "module Main\nimport Lib.S\ntype Mine = { x: I64, y: I64 }\n"
+                "fn main() -> I64 = { let m = { x = 40, y = 2 }\n  m.x + m.y + probe(0) }\n"
+            ),
+        },
+    )
+    assert driver.cmd_run(entry, interpret=True) == 42
+
+
+def test_imported_tests_labeled_with_their_module(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    entry = _project(
+        tmp_path,
+        {
+            "Lib/W.flx": (
+                "module Lib.W\npub fn two() -> I64 = { 2 }\n"
+                'test "lib test" { assert_eq(two(), 2) }\n'
+            ),
+            "main.flx": (
+                "module Main\nimport Lib.W\nfn main() -> I64 = { two() }\n"
+                'test "entry test" { assert_eq(two(), 2) }\n'
+            ),
+        },
+    )
+    assert driver.cmd_test(entry, interpret=True) == 0
+    out = capfd.readouterr().out
+    assert "ok Lib.W / lib test" in out
+    assert "ok Main / entry test" in out
 
 
 def test_cross_file_macro_and_gensym(tmp_path: Path) -> None:

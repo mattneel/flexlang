@@ -386,6 +386,8 @@ class Module:
     imports: list[str]
     items: list[Item]
     span: Span
+    # span of each `import` statement, parallel to `imports` (for diagnostics)
+    import_spans: list[Span] = field(default_factory=list)
 
     @property
     def functions(self) -> list[FnDecl]:

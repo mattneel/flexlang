@@ -139,6 +139,7 @@ class CheckResult:
     generic_fns: dict[str, ast.FnDecl] = field(default_factory=dict)
     instantiations: set[tuple[str, tuple[str, ...]]] = field(default_factory=set)
     inst_subst: dict[tuple[str, tuple[str, ...]], dict[str, Type]] = field(default_factory=dict)
+    file_module: dict[str, str] = field(default_factory=dict)  # file path -> module name
 
 
 @dataclass
@@ -167,12 +168,15 @@ class Checker:
         module: ast.Module,
         decl_module: dict[str, str] | None = None,
         public: set[str] | None = None,
+        file_module: dict[str, str] | None = None,
     ) -> None:
         self.module = module
-        # Visibility: which module declared each top-level name, and which are `pub`.
-        # Empty for a single-file program (then everything is mutually visible).
+        # Visibility: which module declared each top-level name, which are `pub`,
+        # and which module each FILE belongs to. Empty for a single-file program
+        # (then everything is mutually visible).
         self.decl_module = decl_module or {}
         self.public = public or set()
+        self.file_module = file_module or {}
         self.current_module: str | None = None
         self.diags: list[Diagnostic] = []
         self.expr_types: dict[int, Type] = {}
@@ -212,6 +216,8 @@ class Checker:
                         "which is not supported yet",
                         variant.span,
                     )
+            if adt.name in self.adt_templates:
+                self._err_duplicate("type", adt.name, adt.span)
             self.adt_templates[adt.name] = (
                 adt.type_params,
                 [(v.name, v.payload) for v in adt.variants],
@@ -223,6 +229,8 @@ class Checker:
                 self.ctors[vname] = (adt_name, i)
 
         for record in self.module.records:
+            if record.name in self.record_types or record.name in self.adt_templates:
+                self._err_duplicate("type", record.name, record.span)
             fields = tuple((f.name, self._resolve_type(f.type)) for f in record.fields)
             self.record_types[record.name] = RecordType(record.name, fields)
 
@@ -230,8 +238,8 @@ class Checker:
 
         for fn in self.module.functions:
             if fn.name in self.functions or fn.name in self.generic_fns:
-                self._err("TYPE002", f"function {fn.name!r} is already defined", fn.span)
-            self.current_module = self.decl_module.get(fn.name)  # for signature visibility
+                self._err_duplicate("function", fn.name, fn.span)
+            self.current_module = self._module_of(fn.span)  # for signature visibility
             if fn.type_params:
                 # A template: type params are unresolved here. Its concrete
                 # instantiations are checked (and registered) by the monomorphizer.
@@ -242,7 +250,7 @@ class Checker:
             self.functions[fn.name] = FnType(params, ret)
             self.fn_effects[fn.name] = set(fn.effects)
 
-        self.current_module = None  # impls/specs are not visibility-scoped
+        self.current_module = None
         self._register_impls()
 
         for fn in self.module.functions:
@@ -271,6 +279,7 @@ class Checker:
             generic_fns=self.generic_fns,
             instantiations=self.instantiations,
             inst_subst=self.inst_subst,
+            file_module=self.file_module,
         )
 
     # --- traits / impls -------------------------------------------------------
@@ -301,6 +310,8 @@ class Checker:
 
     def _register_impls(self) -> None:
         for impl in self.module.impls:
+            # Impl signatures are visibility-checked against the impl's own module.
+            self.current_module = self._module_of(impl.span)
             if impl.trait not in self.traits:
                 self._err("IMPL001", f"unknown trait {impl.trait!r}", impl.span)
                 continue
@@ -338,6 +349,7 @@ class Checker:
                 self.fn_effects[symbol] = set(method.effects)
                 table[method.name] = symbol
                 self._impl_fns.append(replace(method, name=symbol))
+        self.current_module = None
 
     def _check_impl_conformance(
         self, method: ast.FnDecl, sig: ast.TraitMethod, impl_ty: Type
@@ -459,22 +471,37 @@ class Checker:
 
     # --- declarations ---------------------------------------------------------
 
+    def _module_of(self, span: Span | None) -> str | None:
+        """The module enclosing a definition, derived from its span's FILE. Spans
+        survive monomorphization cloning, impl-method renaming, and derive
+        expansion, so synthetic items inherit their source module — generic and
+        impl bodies cannot escape visibility checks by being re-checked under a
+        mangled name."""
+        if span is None:
+            return None
+        return self.file_module.get(span.file)
+
+    def _name_visible(self, name: str) -> bool:
+        if self.current_module is None or name in self.public:
+            return True
+        owner = self.decl_module.get(name)
+        return owner is None or owner == self.current_module
+
     def _check_visible(self, name: str, span: Span | None) -> None:
         """Flag a reference from `current_module` to another module's private name.
         No-op for single-file programs, builtins, public names, and own-module
-        references; also skipped while checking synthetic items (impl methods,
-        monomorphized specs) whose enclosing module is unknown."""
-        if self.current_module is None or name in self.public:
-            return
-        owner = self.decl_module.get(name)
-        if owner is None or owner == self.current_module:
-            return
-        self._err("VIS001", f"{name!r} is private to module {owner!r}", span)
+        references."""
+        if not self._name_visible(name):
+            self._err(
+                "VIS001",
+                f"{name!r} is private to module {self.decl_module.get(name)!r}",
+                span,
+            )
 
     def _check_fn(self, fn: ast.FnDecl) -> None:
         self.scope = _Scope()
         self.in_test = False
-        self.current_module = self.decl_module.get(fn.name)
+        self.current_module = self._module_of(fn.span)
         self.declared_effects = set(fn.effects)
         fn_ty = self.functions[fn.name]
         seen: set[str] = set()
@@ -500,7 +527,7 @@ class Checker:
     def _check_test(self, test: ast.TestDecl) -> None:
         self.scope = _Scope()
         self.in_test = True
-        self.current_module = None  # tests may use any in-scope name
+        self.current_module = self._module_of(test.span)
         self.declared_effects = set(test.effects)
         self.return_type = UNIT
         self._check_block(test.body)
@@ -609,7 +636,14 @@ class Checker:
     def _infer_record(self, expr: ast.RecordExpr) -> Type:
         self._check_duplicate_fields(expr.fields)
         names = {f.name for f in expr.fields}
-        matches = [rt for rt in self.record_types.values() if {n for n, _ in rt.fields} == names]
+        # A record literal is effectively a constructor call on the type it
+        # resolves to, so other modules' private record types neither match
+        # (constructing one would be a visibility hole) nor create ambiguity.
+        matches = [
+            rt
+            for rt in self.record_types.values()
+            if {n for n, _ in rt.fields} == names and self._name_visible(rt.name)
+        ]
         if len(matches) != 1:
             for f in expr.fields:
                 self._check_expr(f.value)
@@ -908,6 +942,11 @@ class Checker:
                     "MATCH003", f"{pattern.name!r} is not a variant of {scrut_ty}", pattern.span
                 )
                 return False
+            # Naming a constructor in a pattern is a reference to its ADT: a
+            # variant is as visible as its type, in patterns as in expressions.
+            owner = self.ctors.get(pattern.name)
+            if owner is not None:
+                self._check_visible(owner[0], pattern.span)
             if pattern.name in covered:
                 self._err("MATCH002", f"duplicate match arm for {pattern.name!r}", pattern.span)
             covered.add(pattern.name)
@@ -1050,6 +1089,21 @@ class Checker:
     def _err(self, code: str, message: str, span: Span | None, *, help: str | None = None) -> None:
         self.diags.append(Diagnostic(code, message, span, help=help))
 
+    def _err_duplicate(self, kind: str, name: str, span: Span | None) -> None:
+        """A top-level redefinition. Top-level names share one program-wide
+        namespace in this release, so name the colliding modules when known."""
+        first = self.decl_module.get(name)
+        again = self._module_of(span)
+        where = ""
+        if first is not None and again is not None and first != again:
+            where = f" (first in module {first!r}, again in module {again!r})"
+        self._err(
+            "TYPE002",
+            f"{kind} {name!r} is already defined{where}",
+            span,
+            help="top-level names share one namespace; rename one of them" if where else None,
+        )
+
 
 def _same(a: Type, b: Type) -> bool:
     return a is ERROR or b is ERROR or a == b
@@ -1087,5 +1141,6 @@ def check(
     module: ast.Module,
     decl_module: dict[str, str] | None = None,
     public: set[str] | None = None,
+    file_module: dict[str, str] | None = None,
 ) -> CheckResult:
-    return Checker(module, decl_module, public).check()
+    return Checker(module, decl_module, public, file_module).check()

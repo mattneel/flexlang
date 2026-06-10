@@ -63,7 +63,9 @@ def _frontend(path: str) -> tuple[CheckResult | FlexError, dict[str, str]]:
         return loaded, {}
     try:
         module = expand(loaded.module)
-        result = check_and_monomorphize(module, loaded.decl_module, loaded.public)
+        result = check_and_monomorphize(
+            module, loaded.decl_module, loaded.public, loaded.file_module
+        )
         return result, loaded.sources
     except FlexError as err:
         return err, loaded.sources
@@ -213,7 +215,7 @@ def cmd_test(
 
     module = result.module
     selected = [
-        (i, t.name)
+        (i, f"{result.file_module.get(t.span.file, module.name)} / {t.name}")
         for i, t in enumerate(module.tests)
         if test_filter is None or test_filter in t.name
     ]
@@ -224,7 +226,7 @@ def cmd_test(
 
     try:
         mlir_text = emit_program(result, with_tests=True)
-        harness = generate_harness(module.name, selected)
+        harness = generate_harness(selected)
         with tempfile.TemporaryDirectory() as tmp:
             exe = build_executable(mlir_text, harness, Path(tmp) / "tests", Path(tmp))
             return run_executable(exe)

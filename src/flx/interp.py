@@ -135,9 +135,11 @@ class Interpreter:
             return 0
         plural = "" if len(tests) == 1 else "s"
         print(f"running {len(tests)} test{plural}\n")
-        module_name = self.checked.module.name
+        default_module = self.checked.module.name
         passed = failed = 0
         for test in tests:
+            # Imported tests report under their own module, not the entry's.
+            module_name = self.checked.file_module.get(test.span.file, default_module)
             self.in_test = True
             try:
                 self.exec_block(test.body, _Env())

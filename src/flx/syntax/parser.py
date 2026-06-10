@@ -124,9 +124,11 @@ class Parser:
         if self._at(TokenKind.KW_MODULE):
             self._advance()
             name = self._dotted_name()
+        import_spans: list[Span] = []
         while self._at(TokenKind.KW_IMPORT):
-            self._advance()
+            kw = self._advance()
             imports.append(self._dotted_name())
+            import_spans.append(kw.span)
 
         items: list[ast.Item] = []
         while not self._at(TokenKind.EOF):
@@ -164,7 +166,7 @@ class Parser:
                 item = replace(item, pub=True)  # type: ignore[type-var]
             items.append(item)
         end = self._peek().span
-        return ast.Module(name, imports, items, start.to(end))
+        return ast.Module(name, imports, items, start.to(end), import_spans)
 
     def _dotted_name(self) -> str:
         parts = [self._expect(TokenKind.IDENT, "a name").text]
