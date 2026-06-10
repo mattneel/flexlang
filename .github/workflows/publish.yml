@@ -1,0 +1,84 @@
+name: Publish to PyPI
+
+# Publishes the `flx` distribution to PyPI when a GitHub Release is published.
+# Uses PyPI Trusted Publishing (OIDC) — no API token is stored in the repo; PyPI
+# verifies this workflow's identity directly. `workflow_dispatch` builds and
+# uploads to TestPyPI for a dry run.
+#
+# One-time setup on PyPI (https://pypi.org/manage/account/publishing/):
+#   Add a "pending" trusted publisher for project `flx`:
+#     owner = mattneel, repository = flexlang,
+#     workflow = publish.yml, environment = pypi
+#   (and the same on test.pypi.org with environment = testpypi for dry runs).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up mise (Python, uv)
+        uses: jdx/mise-action@v2
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Check metadata
+        run: uvx twine check dist/*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  pypi:
+    name: Publish to PyPI
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/flx/
+    permissions:
+      id-token: write # OIDC token for Trusted Publishing
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  testpypi:
+    name: Publish to TestPyPI (dry run)
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/flx/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
