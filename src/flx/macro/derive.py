@@ -1,0 +1,136 @@
+"""`derive(Eq)` / `derive(Show)` code generation.
+
+Generates real `FnDecl`s (field-by-field for records, match-based for ADTs)
+that flow through the normal checker/backend. They appear in `flx expand`.
+Generic types and unsupported field types are reported, not mis-generated.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from flx.diagnostics import Diagnostic, FlexError, Span
+from flx.syntax import ast
+
+if TYPE_CHECKING:
+    from flx.macro.expand import Expander
+
+_SUPPORTED = {"Eq", "Show"}
+
+
+def run_derives(module: ast.Module, exp: Expander) -> list[ast.FnDecl]:
+    out: list[ast.FnDecl] = []
+    existing = {f.name for f in module.functions}
+    for record in module.records:
+        out.extend(_derive_type(record.name, record.type_params, record.span, record.derives, exp))
+    for adt in module.adts:
+        out.extend(_derive_type(adt.name, adt.type_params, adt.span, adt.derives, exp))
+    for fn in out:
+        if fn.name in existing:
+            raise _err("DER002", f"derive would redefine existing function {fn.name!r}", fn.span)
+    return out
+
+
+def _derive_type(
+    name: str, type_params: list[str], span: Span, derives: list[str], exp: Expander
+) -> list[ast.FnDecl]:
+    out: list[ast.FnDecl] = []
+    for trait in derives:
+        if trait not in _SUPPORTED:
+            raise _err("DER001", f"cannot derive {trait!r} (only Eq, Show)", span)
+        if type_params:
+            raise _err("DER004", f"cannot derive {trait!r} on a generic type yet", span)
+        if trait == "Eq":
+            out.append(_derive_eq(name, span))
+        else:
+            out.append(_derive_show(name, span, exp))
+    return out
+
+
+# --- AST builders -------------------------------------------------------------
+
+
+def _name(n: str, sp: Span) -> ast.NameExpr:
+    return ast.NameExpr(n, sp)
+
+
+def _ty(n: str, sp: Span) -> ast.TypeExpr:
+    return ast.TypeExpr(n, [], sp)
+
+
+def _fn(name: str, params: list[tuple[str, str]], ret: str, body: ast.Expr, sp: Span) -> ast.FnDecl:
+    ps = [ast.Param(p, _ty(t, sp), sp) for p, t in params]
+    return ast.FnDecl(name, ps, _ty(ret, sp), [], ast.Block([ast.ExprStmt(body, sp)], sp), sp)
+
+
+def _concat(parts: list[ast.Expr], sp: Span) -> ast.Expr:
+    result = parts[0]
+    for part in parts[1:]:
+        result = ast.BinaryExpr("++", result, part, sp)
+    return result
+
+
+# --- Eq -----------------------------------------------------------------------
+
+
+def _derive_eq(type_name: str, sp: Span) -> ast.FnDecl:
+    # Delegate to structural equality, which the backend already lowers.
+    body = ast.BinaryExpr("==", _name("a", sp), _name("b", sp), sp)
+    return _fn(f"eq_{type_name}", [("a", type_name), ("b", type_name)], "Bool", body, sp)
+
+
+# --- Show ---------------------------------------------------------------------
+
+
+def _render(value: ast.Expr, type_name: str, sp: Span) -> ast.Expr:
+    if type_name == "I64":
+        return ast.CallExpr(_name("to_str", sp), [value], sp)
+    if type_name == "Bool":
+        then = ast.Block([ast.ExprStmt(ast.StringLit("true", sp), sp)], sp)
+        els = ast.Block([ast.ExprStmt(ast.StringLit("false", sp), sp)], sp)
+        return ast.IfExpr(value, then, els, sp)
+    if type_name == "String":
+        return value
+    return ast.StringLit("<?>", sp)
+
+
+def _derive_show(type_name: str, sp: Span, exp: Expander) -> ast.FnDecl:
+    record = exp.ctx.records.get(type_name)
+    if record is not None:
+        return _show_record(record, sp)
+    adt = exp.ctx.adts.get(type_name)
+    if adt is not None:
+        return _show_adt(adt, sp)
+    raise _err("DER001", f"cannot derive Show for {type_name!r}", sp)
+
+
+def _show_record(record: ast.RecordDecl, sp: Span) -> ast.FnDecl:
+    parts: list[ast.Expr] = [ast.StringLit(record.name + " { ", sp)]
+    for i, fld in enumerate(record.fields):
+        prefix = ("" if i == 0 else ", ") + fld.name + " = "
+        access = ast.MemberExpr(_name("self", sp), fld.name, sp)
+        parts.append(ast.StringLit(prefix, sp))
+        parts.append(_render(access, fld.type.name, sp))
+    parts.append(ast.StringLit(" }", sp))
+    return _fn(f"show_{record.name}", [("self", record.name)], "String", _concat(parts, sp), sp)
+
+
+def _show_adt(adt: ast.AdtDecl, sp: Span) -> ast.FnDecl:
+    arms: list[ast.MatchArm] = []
+    for variant in adt.variants:
+        if variant.payload:
+            bind = ast.CtorPattern(variant.name, [ast.BindPattern("x", sp)], sp)
+            rendered = _render(_name("x", sp), variant.payload[0].name, sp)
+            body = _concat(
+                [ast.StringLit(variant.name + "(", sp), rendered, ast.StringLit(")", sp)], sp
+            )
+        else:
+            bind = ast.CtorPattern(variant.name, [], sp)
+            body = ast.StringLit(variant.name, sp)
+        arms.append(ast.MatchArm(bind, body, sp))
+    match = ast.MatchExpr(_name("self", sp), arms, sp)
+    return _fn(f"show_{adt.name}", [("self", adt.name)], "String", match, sp)
+
+
+def _err(code: str, message: str, span: Span) -> FlexError:
+    return FlexError([Diagnostic(code, message, span)])

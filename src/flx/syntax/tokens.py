@@ -35,8 +35,11 @@ class TokenKind(Enum):
     KW_COMPTIME = auto()
     KW_QUOTE = auto()
     KW_UNQUOTE = auto()
+    KW_UNQUOTE_SPLICE = auto()
     KW_MACRO = auto()
     KW_DERIVE = auto()
+    KW_FOR = auto()
+    KW_IN = auto()
 
     # delimiters
     LPAREN = auto()
@@ -62,6 +65,7 @@ class TokenKind(Enum):
     GT = auto()
     GE = auto()
     PLUS = auto()
+    PLUS_PLUS = auto()  # ++ (string concatenation)
     MINUS = auto()
     STAR = auto()
     SLASH = auto()
@@ -96,8 +100,11 @@ KEYWORDS: dict[str, TokenKind] = {
     "comptime": TokenKind.KW_COMPTIME,
     "quote": TokenKind.KW_QUOTE,
     "unquote": TokenKind.KW_UNQUOTE,
+    "unquote_splice": TokenKind.KW_UNQUOTE_SPLICE,
     "macro": TokenKind.KW_MACRO,
     "derive": TokenKind.KW_DERIVE,
+    "for": TokenKind.KW_FOR,
+    "in": TokenKind.KW_IN,
 }
 
 

@@ -150,6 +150,14 @@ class UnquoteExpr(Expr):
     span: Span
 
 
+@dataclass(frozen=True)
+class UnquoteSpliceExpr(Expr):
+    """`unquote_splice(e)` — splice a comptime list of fragments into a quote."""
+
+    expr: Expr
+    span: Span
+
+
 # --- patterns -----------------------------------------------------------------
 
 
@@ -224,6 +232,16 @@ class AssignStmt(Stmt):
 @dataclass(frozen=True)
 class WhileStmt(Stmt):
     cond: Expr
+    body: Block
+    span: Span
+
+
+@dataclass(frozen=True)
+class ForStmt(Stmt):
+    """`for name in iter { body }` — comptime-only for the MVP."""
+
+    name: str
+    iter: Expr
     body: Block
     span: Span
 

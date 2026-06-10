@@ -26,6 +26,7 @@ _INFIX_BP: dict[TokenKind, int] = {
     TokenKind.GE: 5,
     TokenKind.PLUS: 6,
     TokenKind.MINUS: 6,
+    TokenKind.PLUS_PLUS: 6,
     TokenKind.STAR: 7,
     TokenKind.SLASH: 7,
     TokenKind.PERCENT: 7,
@@ -47,6 +48,7 @@ _OP_TEXT: dict[TokenKind, str] = {
     TokenKind.GE: ">=",
     TokenKind.PLUS: "+",
     TokenKind.MINUS: "-",
+    TokenKind.PLUS_PLUS: "++",
     TokenKind.STAR: "*",
     TokenKind.SLASH: "/",
     TokenKind.PERCENT: "%",
@@ -320,6 +322,8 @@ class Parser:
             return self._let(mutable=True)
         if tok.kind is TokenKind.KW_WHILE:
             return self._while()
+        if tok.kind is TokenKind.KW_FOR:
+            return self._for()
         if tok.kind is TokenKind.KW_RETURN:
             return self._return()
 
@@ -346,6 +350,14 @@ class Parser:
         cond = self._expr()
         body = self._block()
         return ast.WhileStmt(cond, body, start.to(body.span))
+
+    def _for(self) -> ast.Stmt:
+        start = self._advance().span  # `for`
+        name = self._expect(TokenKind.IDENT, "a loop variable").text
+        self._expect(TokenKind.KW_IN, "'in'")
+        iterable = self._expr()
+        body = self._block()
+        return ast.ForStmt(name, iterable, body, start.to(body.span))
 
     def _return(self) -> ast.Stmt:
         start = self._advance().span  # `return`
@@ -459,6 +471,12 @@ class Parser:
             inner = self._expr()
             end = self._expect(TokenKind.RPAREN, "')'").span
             return ast.UnquoteExpr(inner, start.to(end))
+        if tok.kind is TokenKind.KW_UNQUOTE_SPLICE:
+            start = self._advance().span
+            self._expect(TokenKind.LPAREN, "'('")
+            inner = self._expr()
+            end = self._expect(TokenKind.RPAREN, "')'").span
+            return ast.UnquoteSpliceExpr(inner, start.to(end))
         if tok.kind is TokenKind.LBRACE:
             return self._record_expr()
         raise self._error(f"expected an expression, found {self._describe(tok)}", tok.span)

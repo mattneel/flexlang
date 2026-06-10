@@ -103,6 +103,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "parse":
         return driver.cmd_parse(args.path)
+    if args.command == "expand":
+        return driver.cmd_expand(args.path)
     if args.command == "check":
         return driver.cmd_check(args.path)
     if args.command == "emit-mlir":

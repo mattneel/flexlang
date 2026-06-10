@@ -203,6 +203,9 @@ class Checker:
             self._expect(BOOL, self._check_expr(stmt.cond), stmt.cond.span, "while condition")
             self._check_block(stmt.body)
             return UNIT
+        if isinstance(stmt, ast.ForStmt):
+            self._err("TYPE021", "`for` is only supported inside comptime for now", stmt.span)
+            return UNIT
         if isinstance(stmt, ast.ReturnStmt):
             actual = (
                 self._check_expr(stmt.value, self.return_type) if stmt.value is not None else UNIT
@@ -372,6 +375,10 @@ class Checker:
         left = self._check_expr(expr.left)
         right = self._check_expr(expr.right)
         op = expr.op
+        if op == "++":
+            self._expect(STRING, left, expr.left.span, "left operand of `++`")
+            self._expect(STRING, right, expr.right.span, "right operand of `++`")
+            return STRING
         if op in _ARITH:
             self._expect(I64, left, expr.left.span, f"left operand of `{op}`")
             self._expect(I64, right, expr.right.span, f"right operand of `{op}`")
@@ -399,6 +406,12 @@ class Checker:
         if isinstance(callee, ast.NameExpr):
             if callee.name in _BUILTINS:
                 return self._check_builtin(callee.name, expr)
+            if callee.name == "to_str":  # prelude: I64 -> String
+                if len(expr.args) == 1:
+                    self._expect(I64, self._check_expr(expr.args[0]), expr.args[0].span, "argument")
+                else:
+                    self._err("TYPE006", "to_str expects 1 argument", expr.span)
+                return STRING
             if callee.name in self.ctors:  # constructor call, e.g. Ok(x)
                 return self._infer_ctor(callee.name, expr.args, expected, expr.span)
             if callee.name in self.functions:

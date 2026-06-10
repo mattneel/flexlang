@@ -326,6 +326,19 @@ class FunctionLowerer:
         self._emit(f"{length} = llvm.extractvalue {value}[1] : {mty}")
         return ptr, length
 
+    def _str_runtime(self, symbol: str, in_types: list[str], in_args: list[str]) -> str:
+        """Call a string-producing runtime fn via an out-pointer (sret-style)."""
+        one = self._fresh()
+        self._emit(f"{one} = llvm.mlir.constant(1 : i64) : i64")
+        slot = self._fresh()
+        self._emit(f"{slot} = llvm.alloca {one} x !llvm.struct<(ptr, i64)> : (i64) -> !llvm.ptr")
+        args = ", ".join([*in_args, slot])
+        types = ", ".join([*in_types, "!llvm.ptr"])
+        self._emit(f"func.call @{symbol}({args}) : ({types}) -> ()")
+        out = self._fresh()
+        self._emit(f"{out} = llvm.load {slot} : !llvm.ptr -> !llvm.struct<(ptr, i64)>")
+        return out
+
     # --- slots: memref for scalars, llvm.alloca for aggregates ----------------
 
     def _alloc_slot(self, mty: str) -> str:
@@ -570,6 +583,12 @@ class FunctionLowerer:
         left = self.lower_expr(expr.left)
         right = self.lower_expr(expr.right)
         assert left is not None and right is not None
+        if op == "++":
+            lp, ll = self._string_parts(left)
+            rp, rl = self._string_parts(right)
+            return self._str_runtime(
+                "flx_str_concat", ["!llvm.ptr", "i64", "!llvm.ptr", "i64"], [lp, ll, rp, rl]
+            )
         if op in ("==", "!="):
             # Structural equality (works for scalars, records, and ADTs).
             equal = self._emit_equal(left, right, self._ty_of(expr.left))
@@ -639,6 +658,10 @@ class FunctionLowerer:
         if not isinstance(expr.callee, ast.NameExpr):
             raise BackendError("only direct function calls are supported")
         name = expr.callee.name
+        if name == "to_str":  # prelude: I64 -> String
+            arg = self.lower_expr(expr.args[0])
+            assert arg is not None
+            return self._str_runtime("flx_int_to_str", ["i64"], [arg])
         if name in self.constructors:  # variant constructor, e.g. Ok(x)
             adt = self._ty_of(expr)
             assert isinstance(adt, AdtType)

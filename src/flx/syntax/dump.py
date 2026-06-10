@@ -70,6 +70,9 @@ def _dump_stmt(stmt: ast.Stmt, depth: int, out: list[str]) -> None:
     elif isinstance(stmt, ast.WhileStmt):
         out.append(f"{pad}While {_expr(stmt.cond)}")
         _dump_block(stmt.body, depth + 1, out)
+    elif isinstance(stmt, ast.ForStmt):
+        out.append(f"{pad}For {stmt.name} in {_expr(stmt.iter)}")
+        _dump_block(stmt.body, depth + 1, out)
     elif isinstance(stmt, ast.ReturnStmt):
         out.append(f"{pad}Return {_expr(stmt.value) if stmt.value else ''}".rstrip())
     elif isinstance(stmt, ast.ExprStmt):
@@ -115,6 +118,8 @@ def _expr(expr: ast.Expr) -> str:
         return f"quote {{ {_block_value(expr.body)} }}"
     if isinstance(expr, ast.UnquoteExpr):
         return f"unquote({_expr(expr.expr)})"
+    if isinstance(expr, ast.UnquoteSpliceExpr):
+        return f"unquote_splice({_expr(expr.expr)})"
     return "<expr>"
 
 

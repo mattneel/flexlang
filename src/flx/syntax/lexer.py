@@ -20,6 +20,7 @@ _OPERATORS: list[tuple[str, TokenKind]] = [
     (">=", TokenKind.GE),
     ("&&", TokenKind.AMP_AMP),
     ("||", TokenKind.PIPE_PIPE),
+    ("++", TokenKind.PLUS_PLUS),
     ("(", TokenKind.LPAREN),
     (")", TokenKind.RPAREN),
     ("{", TokenKind.LBRACE),

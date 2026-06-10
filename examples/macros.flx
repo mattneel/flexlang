@@ -1,0 +1,39 @@
+module Main
+
+// `comptime { }` is evaluated at compile time and folded to a literal.
+fn answer() -> I64 =
+{
+  comptime { 6 * 7 }
+}
+
+// A hygienic macro: `square(e)` expands to `e * e` before type-checking.
+macro square(x) = quote { unquote(x) * unquote(x) }
+
+// `derive` generates real functions (see `flx expand`).
+derive(Eq, Show) type Point =
+{
+  x: I64
+  y: I64
+}
+
+derive(Show) type Shape =
+  | Circle(I64)
+  | Square(I64)
+
+fn main() -> I64 =
+{
+  answer() + square(5)
+}
+
+test "comptime and macros" {
+  assert_eq(answer(), 42)
+  assert_eq(square(4), 16)
+}
+
+test "derived Eq and Show" uses { Log } {
+  let p = { x = 3, y = 4 }
+  Log.info(show_Point(p))
+  Log.info(show_Shape(Circle(7)))
+  assert(eq_Point(p, p))
+  assert(!eq_Point(p, { x = 3, y = 9 }))
+}

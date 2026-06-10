@@ -14,6 +14,7 @@ from flx.backend.mlir import BackendError, emit_module, emit_program
 from flx.backend.runtime import BASE_RUNTIME_C
 from flx.backend.toolchain import build_executable, run_executable
 from flx.diagnostics import Diagnostic, FlexError
+from flx.macro import expand
 from flx.sema.check import CheckResult, check
 from flx.syntax.dump import dump_module
 from flx.syntax.parser import parse
@@ -53,11 +54,28 @@ def cmd_parse(path: str) -> int:
 def _parse_and_check(path: str, source: str) -> CheckResult | FlexError:
     try:
         module = parse(source, path)
+        module = expand(module)
         return check(module)
     except FlexError as err:
         return err
     except RecursionError:
         return FlexError([Diagnostic("PAR003", "input is too deeply nested to parse")])
+
+
+def cmd_expand(path: str) -> int:
+    source = _read(path)
+    if source is None:
+        return 1
+    try:
+        module = expand(parse(source, path))
+    except FlexError as err:
+        _report(err, source)
+        return 1
+    except RecursionError:
+        print("flx: input is too deeply nested", file=sys.stderr)
+        return 1
+    print(dump_module(module))
+    return 0
 
 
 def cmd_check(path: str) -> int:
