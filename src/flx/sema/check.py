@@ -11,7 +11,18 @@ from dataclasses import dataclass, field
 
 from flx.diagnostics import Diagnostic, FlexError, Span
 from flx.syntax import ast
-from flx.types import BOOL, ERROR, I64, PRIMITIVES, REGION, STRING, UNIT, FnType, Type
+from flx.types import (
+    BOOL,
+    ERROR,
+    I64,
+    PRIMITIVES,
+    REGION,
+    STRING,
+    UNIT,
+    FnType,
+    RecordType,
+    Type,
+)
 
 # name -> (arity or None for variadic-ish, checker). Builtins are checked ad hoc.
 _BUILTINS = {"assert", "assert_eq", "assert_ne", "fail", "panic"}
@@ -78,10 +89,15 @@ class Checker:
         self.in_test = False
         self.fn_effects: dict[str, set[str]] = {}
         self.declared_effects: set[str] = set()
+        self.record_types: dict[str, RecordType] = {}
 
     # --- entry ----------------------------------------------------------------
 
     def check(self) -> CheckResult:
+        for record in self.module.records:
+            fields = tuple((f.name, self._resolve_type(f.type)) for f in record.fields)
+            self.record_types[record.name] = RecordType(record.name, fields)
+
         for fn in self.module.functions:
             if fn.name in self.functions:
                 self._err("TYPE002", f"function {fn.name!r} is already defined", fn.span)
@@ -216,9 +232,61 @@ class Checker:
             return self._infer_if(expr)
         if isinstance(expr, ast.RegionExpr):
             return self._infer_region(expr)
+        if isinstance(expr, ast.RecordExpr):
+            return self._infer_record(expr)
+        if isinstance(expr, ast.RecordUpdateExpr):
+            return self._infer_record_update(expr)
         if isinstance(expr, ast.MemberExpr):
-            self._err("TYPE010", "module-qualified calls are not supported yet", expr.span)
+            return self._infer_member(expr)
+        return ERROR
+
+    def _infer_record(self, expr: ast.RecordExpr) -> Type:
+        names = {f.name for f in expr.fields}
+        matches = [rt for rt in self.record_types.values() if {n for n, _ in rt.fields} == names]
+        if len(matches) != 1:
+            for f in expr.fields:
+                self._check_expr(f.value)
+            detail = "ambiguous" if matches else "no record type matches"
+            self._err("TYPE014", f"cannot determine record type ({detail})", expr.span)
             return ERROR
+        rt = matches[0]
+        field_types = dict(rt.fields)
+        for f in expr.fields:
+            self._expect(
+                field_types[f.name], self._check_expr(f.value), f.value.span, f"field {f.name!r}"
+            )
+        return rt
+
+    def _infer_record_update(self, expr: ast.RecordUpdateExpr) -> Type:
+        base_ty = self._check_expr(expr.base)
+        if not isinstance(base_ty, RecordType):
+            if base_ty is not ERROR:
+                self._err(
+                    "TYPE017", f"record update requires a record, found {base_ty}", expr.base.span
+                )
+            for f in expr.fields:
+                self._check_expr(f.value)
+            return ERROR
+        field_types = dict(base_ty.fields)
+        for f in expr.fields:
+            value_ty = self._check_expr(f.value)
+            if f.name not in field_types:
+                self._err("TYPE015", f"record {base_ty.name} has no field {f.name!r}", f.span)
+            else:
+                self._expect(field_types[f.name], value_ty, f.value.span, f"field {f.name!r}")
+        return base_ty
+
+    def _infer_member(self, expr: ast.MemberExpr) -> Type:
+        obj_ty = self._check_expr(expr.obj)
+        if isinstance(obj_ty, RecordType):
+            for fname, ftype in obj_ty.fields:
+                if fname == expr.name:
+                    return ftype
+            self._err("TYPE015", f"record {obj_ty.name} has no field {expr.name!r}", expr.span)
+            return ERROR
+        if obj_ty is ERROR:
+            return ERROR
+        self._err("TYPE010", f"cannot access field .{expr.name} on {obj_ty}", expr.span)
         return ERROR
 
     def _infer_region(self, expr: ast.RegionExpr) -> Type:
@@ -392,8 +460,9 @@ class Checker:
     def _resolve_type(self, type_expr: ast.TypeExpr) -> Type:
         if type_expr.name in PRIMITIVES and not type_expr.args:
             return PRIMITIVES[type_expr.name]
-        span = type_expr.span
-        self._err("TYPE001", f"unknown type {type_expr.name!r}", span)
+        if type_expr.name in self.record_types and not type_expr.args:
+            return self.record_types[type_expr.name]
+        self._err("TYPE001", f"unknown type {type_expr.name!r}", type_expr.span)
         return ERROR
 
     def _expect(self, expected: Type, actual: Type, span: Span, what: str) -> None:

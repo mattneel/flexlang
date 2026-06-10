@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 from flx.sema.check import CheckResult
 from flx.syntax import ast
-from flx.types import BOOL, I64, UNIT, FnType, Type
+from flx.types import BOOL, I64, UNIT, FnType, RecordType, Type
 
 _ARITH_OP = {"+": "addi", "-": "subi", "*": "muli", "/": "divsi", "%": "remsi"}
 _CMP_PRED = {"<": "slt", "<=": "sle", ">": "sgt", ">=": "sge", "==": "eq", "!=": "ne"}
@@ -39,7 +39,14 @@ def mlir_type(ty: Type) -> str:
         return "i64"
     if ty is BOOL:
         return "i1"
+    if isinstance(ty, RecordType):
+        fields = ", ".join(mlir_type(t) for _, t in ty.fields)
+        return f"!llvm.struct<({fields})>"
     raise BackendError(f"type {ty} has no MLIR representation yet")
+
+
+def _is_aggregate(mty: str) -> bool:
+    return mty.startswith("!llvm")
 
 
 class BackendError(Exception):
@@ -149,8 +156,13 @@ class FunctionLowerer:
                 # Reachable only at an unreachable join (e.g. if/else where both
                 # branches return). The checker guarantees the function diverges;
                 # emit a default return so the MLIR stays well-formed.
-                dummy = self._const("0", mlir_type(ret))
-                self._terminator(f"func.return {dummy} : {mlir_type(ret)}")
+                rt = mlir_type(ret)
+                if _is_aggregate(rt):
+                    dummy = self._fresh()
+                    self._emit(f"{dummy} = llvm.mlir.undef : {rt}")
+                else:
+                    dummy = self._const("0", rt)
+                self._terminator(f"func.return {dummy} : {rt}")
 
         header = f"func.func @{symbol}({sig}){ret_str} {{"
         return "\n".join([header, *self.lines, "}"])
@@ -186,16 +198,17 @@ class FunctionLowerer:
             return None
         if isinstance(stmt, ast.MutStmt):
             value = self.lower_expr(stmt.value)
+            assert value is not None
             mty = mlir_type(self._ty_of(stmt.value))
-            slot = self._fresh()
-            self._emit(f"{slot} = memref.alloca() : memref<{mty}>")
-            self._emit(f"memref.store {value}, {slot}[] : memref<{mty}>")
+            slot = self._alloc_slot(mty)
+            self._store_slot(slot, mty, value)
             self._define(stmt.name, _Binding("slot", slot, mty))
             return None
         if isinstance(stmt, ast.AssignStmt):
             value = self.lower_expr(stmt.value)
+            assert value is not None
             binding = self._lookup(stmt.name)
-            self._emit(f"memref.store {value}, {binding.ref}[] : memref<{binding.ty}>")
+            self._store_slot(binding.ref, binding.ty, value)
             return None
         if isinstance(stmt, ast.WhileStmt):
             self.lower_while(stmt)
@@ -243,6 +256,12 @@ class FunctionLowerer:
             # Shallow MVP: a region just evaluates its body inline (no real
             # scoped allocation for scalar values).
             return self.lower_block(expr.body)
+        if isinstance(expr, ast.RecordExpr):
+            return self._lower_record(expr)
+        if isinstance(expr, ast.RecordUpdateExpr):
+            return self._lower_record_update(expr)
+        if isinstance(expr, ast.MemberExpr):
+            return self._lower_member(expr)
         raise BackendError(f"cannot lower expression {type(expr).__name__}")
 
     def _const(self, literal: str, mty: str) -> str:
@@ -250,12 +269,75 @@ class FunctionLowerer:
         self._emit(f"{out} = arith.constant {literal} : {mty}")
         return out
 
+    # --- slots: memref for scalars, llvm.alloca for aggregates ----------------
+
+    def _alloc_slot(self, mty: str) -> str:
+        slot = self._fresh()
+        if _is_aggregate(mty):
+            one = self._fresh()
+            self._emit(f"{one} = llvm.mlir.constant(1 : i64) : i64")
+            self._emit(f"{slot} = llvm.alloca {one} x {mty} : (i64) -> !llvm.ptr")
+        else:
+            self._emit(f"{slot} = memref.alloca() : memref<{mty}>")
+        return slot
+
+    def _store_slot(self, slot: str, mty: str, value: str) -> None:
+        if _is_aggregate(mty):
+            self._emit(f"llvm.store {value}, {slot} : {mty}, !llvm.ptr")
+        else:
+            self._emit(f"memref.store {value}, {slot}[] : memref<{mty}>")
+
+    def _load_slot(self, slot: str, mty: str) -> str:
+        out = self._fresh()
+        if _is_aggregate(mty):
+            self._emit(f"{out} = llvm.load {slot} : !llvm.ptr -> {mty}")
+        else:
+            self._emit(f"{out} = memref.load {slot}[] : memref<{mty}>")
+        return out
+
     def _lower_name(self, expr: ast.NameExpr) -> str:
         binding = self._lookup(expr.name)
         if binding.kind == "val":
             return binding.ref
+        return self._load_slot(binding.ref, binding.ty)
+
+    # --- records --------------------------------------------------------------
+
+    def _lower_record(self, expr: ast.RecordExpr) -> str:
+        rt = self._ty_of(expr)
+        assert isinstance(rt, RecordType)
+        mty = mlir_type(rt)
+        values = {f.name: self.lower_expr(f.value) for f in expr.fields}
+        cur = self._fresh()
+        self._emit(f"{cur} = llvm.mlir.undef : {mty}")
+        for i, (fname, _) in enumerate(rt.fields):
+            nxt = self._fresh()
+            self._emit(f"{nxt} = llvm.insertvalue {values[fname]}, {cur}[{i}] : {mty}")
+            cur = nxt
+        return cur
+
+    def _lower_record_update(self, expr: ast.RecordUpdateExpr) -> str:
+        rt = self._ty_of(expr)
+        assert isinstance(rt, RecordType)
+        mty = mlir_type(rt)
+        index_of = {n: i for i, (n, _) in enumerate(rt.fields)}
+        cur = self.lower_expr(expr.base)
+        assert cur is not None
+        for f in expr.fields:
+            value = self.lower_expr(f.value)
+            nxt = self._fresh()
+            self._emit(f"{nxt} = llvm.insertvalue {value}, {cur}[{index_of[f.name]}] : {mty}")
+            cur = nxt
+        return cur
+
+    def _lower_member(self, expr: ast.MemberExpr) -> str:
+        obj = self.lower_expr(expr.obj)
+        obj_ty = self._ty_of(expr.obj)
+        assert isinstance(obj_ty, RecordType)
+        mty = mlir_type(obj_ty)
+        index = next(i for i, (n, _) in enumerate(obj_ty.fields) if n == expr.name)
         out = self._fresh()
-        self._emit(f"{out} = memref.load {binding.ref}[] : memref<{binding.ty}>")
+        self._emit(f"{out} = llvm.extractvalue {obj}[{index}] : {mty}")
         return out
 
     def _lower_unary(self, expr: ast.UnaryExpr) -> str:
@@ -392,11 +474,11 @@ class FunctionLowerer:
         slot: str | None = None
         mty = mlir_type(result_ty) if has_value else ""
         if has_value:
-            slot = self._fresh()
-            self._emit(f"{slot} = memref.alloca() : memref<{mty}>")
+            slot = self._alloc_slot(mty)
 
         def store(value: str) -> None:
-            self._emit(f"memref.store {value}, {slot}[] : memref<{mty}>")
+            assert slot is not None
+            self._store_slot(slot, mty, value)
 
         cond = self.lower_expr(expr.cond)
         then_lbl = self._label()
@@ -433,9 +515,7 @@ class FunctionLowerer:
 
         self._start_block(join_lbl)
         if slot is not None:
-            out = self._fresh()
-            self._emit(f"{out} = memref.load {slot}[] : memref<{mlir_type(result_ty)}>")
-            return out
+            return self._load_slot(slot, mty)
         return None
 
 

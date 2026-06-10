@@ -28,6 +28,35 @@ class FnType(Type):
 
 
 @dataclass(frozen=True)
+class RecordType(Type):
+    name: str
+    fields: tuple[tuple[str, Type], ...]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+@dataclass(frozen=True)
+class VariantDef:
+    name: str
+    payload: tuple[Type, ...]
+
+
+@dataclass(frozen=True)
+class AdtType(Type):
+    """A monomorphic ADT instantiation (e.g. Result<I64, MathError>)."""
+
+    name: str
+    variants: tuple[VariantDef, ...]
+    type_args: tuple[Type, ...] = ()
+
+    def __str__(self) -> str:
+        if self.type_args:
+            return f"{self.name}<{', '.join(str(a) for a in self.type_args)}>"
+        return self.name
+
+
+@dataclass(frozen=True)
 class ErrorType(Type):
     """Placeholder produced after a type error, to suppress cascades."""
 
