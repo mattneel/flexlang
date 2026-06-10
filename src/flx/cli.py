@@ -115,6 +115,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return driver.cmd_emit_mlir(args.path)
     if args.command == "run":
         return driver.cmd_run(args.path)
+    if args.command == "build":
+        return driver.cmd_build(args.path, args.output)
     if args.command == "test":
         if args.path is None:
             print(

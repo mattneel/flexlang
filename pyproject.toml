@@ -16,6 +16,21 @@ keywords = ["compiler", "mlir", "llvm", "functional", "systems-language"]
 dependencies = [
     "pygments>=2.19",
 ]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Compilers",
+]
+
+[project.urls]
+Homepage = "https://github.com/mattneel/flexlang"
+Documentation = "https://mattneel.github.io/flexlang/"
+Repository = "https://github.com/mattneel/flexlang"
+Issues = "https://github.com/mattneel/flexlang/issues"
 
 [project.scripts]
 flx = "flx.cli:main"
@@ -50,7 +65,7 @@ package = true
 
 [tool.ruff]
 line-length = 100
-target-version = "py313"
+target-version = "py314"
 src = ["src", "tests"]
 
 [tool.ruff.lint]

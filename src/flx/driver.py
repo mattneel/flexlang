@@ -182,6 +182,39 @@ def cmd_test(path: str, test_filter: str | None = None) -> int:
         return 1
 
 
+def cmd_build(path: str, output: str | None = None) -> int:
+    source = _read(path)
+    if source is None:
+        return 1
+    result = _parse_and_check(path, source)
+    if isinstance(result, FlexError):
+        _report(result, source)
+        return 1
+
+    main = result.functions.get("main")
+    if main is None:
+        print(f"flx: {path} has no `main` function to build", file=sys.stderr)
+        return 1
+    if main.params:
+        print("flx: `main` must take no arguments", file=sys.stderr)
+        return 1
+
+    out_path = Path(output) if output else Path(path).with_suffix("")
+    try:
+        mlir_text = emit_module(result)
+        shim = _run_shim(main.ret)
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = build_executable(mlir_text, shim, out_path, Path(tmp))
+    except BackendError as exc:
+        print(f"flx: backend error: {exc}", file=sys.stderr)
+        return 1
+    except FlexError as err:
+        _report(err, source)
+        return 1
+    print(f"wrote {exe}")
+    return 0
+
+
 def cmd_doctor() -> int:
     """Report whether the optional native backend toolchain is available.
 

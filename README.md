@@ -7,9 +7,40 @@ compiled through MLIR/LLVM to native code.
 
 The full language spec and MVP plan live in [`docs/MVP.md`](docs/MVP.md).
 
-This repository hosts the **prototype compiler**, written in Python with
-[xDSL](https://github.com/xdslproject/xdsl) for MLIR construction and the
-LLVM/MLIR 22 toolchain for lowering to native binaries.
+This repository hosts the **prototype compiler**, written in Python. It emits
+textual MLIR and shells out to the LLVM/MLIR 22 toolchain to lower to native
+binaries.
+
+## Install
+
+The compiler ships on PyPI as **`flexlang`**; the command it installs is `flx`.
+The fastest way to try it — no clone, no setup — is with
+[uv](https://docs.astral.sh/uv/):
+
+```sh
+uvx --from flexlang flx -- check     examples/macros.flx
+uvx --from flexlang flx -- expand    examples/macros.flx
+uvx --from flexlang flx -- highlight examples/macros.flx
+```
+
+The core install is **pure Python** (one dependency, `pygments`), so those
+commands — `parse`, `check`, `expand`, `highlight`, and `doctor` — work
+everywhere with nothing else installed. To keep `flx` around:
+
+```sh
+uv tool install --from flexlang flx     # then just `flx <command>`
+```
+
+> The PyPI distribution is `flexlang` (the name `flx` is too close to an existing
+> project), so `--from flexlang` tells uv the package behind the `flx` command.
+
+### Native backend (optional)
+
+Compiling and running native code — `flx run`, `test`, `emit-mlir`, `build` —
+needs a system **MLIR/LLVM 22** toolchain (`mlir-opt`, `mlir-translate`,
+`clang`). It is deliberately **not** a Python dependency, so the base install
+stays light. Check what you have with `flx doctor`; on Debian/Ubuntu,
+`scripts/install-llvm.sh` (or [apt.llvm.org](https://apt.llvm.org)) installs it.
 
 ## Toolchain
 
@@ -18,11 +49,11 @@ LLVM/MLIR 22 toolchain for lowering to native binaries.
 | Python      | 3.14.2  | mise        |
 | uv          | 0.9.24  | mise        |
 | LLVM / MLIR | 22.1.7  | apt.llvm.org (`scripts/install-llvm.sh`) |
-| lark, xdsl  | latest  | uv / pyproject |
+| pygments    | 2.19+   | uv / pyproject (only runtime dependency) |
 
-The compiler shells out to `mlir-opt`, `mlir-translate`, `llc`, and `clang`
-from LLVM 22. mise prepends `/usr/lib/llvm-22/bin` to `PATH` for this repo so
-they resolve to v22 even though the system default is LLVM 18.
+The compiler shells out to `mlir-opt`, `mlir-translate`, and `clang` from LLVM
+22. mise prepends `/usr/lib/llvm-22/bin` to `PATH` for this repo so they resolve
+to v22 even though the system default is LLVM 18.
 
 ## Setup
 
@@ -93,12 +124,15 @@ The full §3.1 MVP feature set is implemented and lowers to native code:
 - first-class `test` blocks with `assert`/`assert_eq`/`assert_ne`/`fail`;
 - **compile-time metaprogramming** (`docs/MVP.md` §10): `comptime { }` folding,
   hygienic `quote`/`unquote` **macros**, `reflect.fields` + comptime `for` +
-  `unquote_splice`, and `derive(Eq, Show)` — all viewable with `flx expand`.
+  `unquote_splice`, and `derive(Eq, Show)` — all viewable with `flx expand`;
+- **traits & generics** — `trait`/`impl` with static method dispatch, `derive`d
+  impls, and bounded generic functions (`fn f<T: Show>(…)`) compiled by
+  monomorphization (see [Traits and Generics](https://mattneel.github.io/flexlang/traits.html)).
 
-See `examples/` for `add`, `result`, `records`, `effects`, `regions`, and
-`macros`. The remaining `flx` subcommands (`build`, `emit-hir`, `emit-mir`,
-`explain-*`) are still scaffolded stubs; traits/`impl`, the borrow checker, and
-a standard library remain future work (`docs/MVP.md` §3.2).
+See `examples/` for `add`, `result`, `records`, `effects`, `regions`, `macros`,
+and `traits`. The `emit-hir`/`emit-mir`/`explain-*` subcommands are still
+scaffolded stubs; a module/package system, the borrow checker, and a standard
+library remain future work (`docs/MVP.md` §3.2).
 
 ## Syntax highlighting
 
