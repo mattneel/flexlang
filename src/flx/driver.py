@@ -17,6 +17,7 @@ from flx.backend.runtime import BASE_RUNTIME_C
 from flx.backend.toolchain import build_executable, run_executable
 from flx.diagnostics import Diagnostic, FlexError
 from flx.macro import expand
+from flx.modules import ProgramInfo, load_program
 from flx.sema.check import CheckResult
 from flx.sema.specialize import check_and_monomorphize
 from flx.syntax.dump import dump_module
@@ -32,10 +33,42 @@ def _read(path: str) -> str | None:
         return None
 
 
-def _report(err: FlexError, source: str) -> None:
+def _report(err: FlexError, sources: dict[str, str]) -> None:
     for diag in err.diagnostics:
-        print(diag.render(source), file=sys.stderr)
+        src = ""
+        if diag.span is not None:
+            looked_up = sources.get(diag.span.file)
+            if looked_up is None:
+                try:
+                    looked_up = Path(diag.span.file).read_text(encoding="utf-8")
+                except OSError:
+                    looked_up = ""
+            src = looked_up
+        print(diag.render(src), file=sys.stderr)
         print(file=sys.stderr)
+
+
+def _load(path: str) -> ProgramInfo | FlexError:
+    try:
+        return load_program(path)
+    except FlexError as err:
+        return err
+    except RecursionError:
+        return FlexError([Diagnostic("PAR003", "input is too deeply nested")])
+
+
+def _frontend(path: str) -> tuple[CheckResult | FlexError, dict[str, str]]:
+    loaded = _load(path)
+    if isinstance(loaded, FlexError):
+        return loaded, {}
+    try:
+        module = expand(loaded.module)
+        result = check_and_monomorphize(module, loaded.decl_module, loaded.public)
+        return result, loaded.sources
+    except FlexError as err:
+        return err, loaded.sources
+    except RecursionError:
+        return FlexError([Diagnostic("PAR003", "input is too deeply nested")]), loaded.sources
 
 
 def _interpreting(forced: bool) -> bool:
@@ -53,13 +86,14 @@ def _interpreting(forced: bool) -> bool:
 
 
 def cmd_parse(path: str) -> int:
+    # `parse` shows one file's AST verbatim — imports are not followed.
     source = _read(path)
     if source is None:
         return 1
     try:
         module = parse(source, path)
     except FlexError as err:
-        _report(err, source)
+        _report(err, {path: source})
         return 1
     except RecursionError:
         print("flx: input is too deeply nested to parse", file=sys.stderr)
@@ -68,25 +102,15 @@ def cmd_parse(path: str) -> int:
     return 0
 
 
-def _parse_and_check(path: str, source: str) -> CheckResult | FlexError:
-    try:
-        module = parse(source, path)
-        module = expand(module)
-        return check_and_monomorphize(module)
-    except FlexError as err:
-        return err
-    except RecursionError:
-        return FlexError([Diagnostic("PAR003", "input is too deeply nested")])
-
-
 def cmd_expand(path: str) -> int:
-    source = _read(path)
-    if source is None:
+    loaded = _load(path)
+    if isinstance(loaded, FlexError):
+        _report(loaded, {})
         return 1
     try:
-        module = expand(parse(source, path))
+        module = expand(loaded.module)
     except FlexError as err:
-        _report(err, source)
+        _report(err, loaded.sources)
         return 1
     except RecursionError:
         print("flx: input is too deeply nested", file=sys.stderr)
@@ -96,12 +120,9 @@ def cmd_expand(path: str) -> int:
 
 
 def cmd_check(path: str) -> int:
-    source = _read(path)
-    if source is None:
-        return 1
-    result = _parse_and_check(path, source)
+    result, sources = _frontend(path)
     if isinstance(result, FlexError):
-        _report(result, source)
+        _report(result, sources)
         return 1
     print(f"ok: {path} type-checks")
     return 0
@@ -118,12 +139,9 @@ def _run_shim(main_ret: Type) -> str:
 
 
 def cmd_emit_mlir(path: str) -> int:
-    source = _read(path)
-    if source is None:
-        return 1
-    result = _parse_and_check(path, source)
+    result, sources = _frontend(path)
     if isinstance(result, FlexError):
-        _report(result, source)
+        _report(result, sources)
         return 1
     try:
         print(emit_module(result), end="")
@@ -134,12 +152,9 @@ def cmd_emit_mlir(path: str) -> int:
 
 
 def cmd_run(path: str, interpret: bool = False) -> int:
-    source = _read(path)
-    if source is None:
-        return 1
-    result = _parse_and_check(path, source)
+    result, sources = _frontend(path)
     if isinstance(result, FlexError):
-        _report(result, source)
+        _report(result, sources)
         return 1
 
     main = result.functions.get("main")
@@ -168,17 +183,14 @@ def cmd_run(path: str, interpret: bool = False) -> int:
         print(f"flx: backend error: {exc}", file=sys.stderr)
         return 1
     except FlexError as err:
-        _report(err, source)
+        _report(err, sources)
         return 1
 
 
 def cmd_test(path: str, test_filter: str | None = None, interpret: bool = False) -> int:
-    source = _read(path)
-    if source is None:
-        return 1
-    result = _parse_and_check(path, source)
+    result, sources = _frontend(path)
     if isinstance(result, FlexError):
-        _report(result, source)
+        _report(result, sources)
         return 1
 
     if _interpreting(interpret):
@@ -210,17 +222,14 @@ def cmd_test(path: str, test_filter: str | None = None, interpret: bool = False)
         print(f"flx: backend error: {exc}", file=sys.stderr)
         return 1
     except FlexError as err:
-        _report(err, source)
+        _report(err, sources)
         return 1
 
 
 def cmd_build(path: str, output: str | None = None) -> int:
-    source = _read(path)
-    if source is None:
-        return 1
-    result = _parse_and_check(path, source)
+    result, sources = _frontend(path)
     if isinstance(result, FlexError):
-        _report(result, source)
+        _report(result, sources)
         return 1
 
     main = result.functions.get("main")
@@ -241,7 +250,7 @@ def cmd_build(path: str, output: str | None = None) -> int:
         print(f"flx: backend error: {exc}", file=sys.stderr)
         return 1
     except FlexError as err:
-        _report(err, source)
+        _report(err, sources)
         return 1
     print(f"wrote {exe}")
     return 0

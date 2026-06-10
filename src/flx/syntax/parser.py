@@ -8,6 +8,8 @@ stages never see it.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from flx.diagnostics import Diagnostic, FlexError, Span
 from flx.syntax import ast
 from flx.syntax.lexer import tokenize
@@ -128,27 +130,39 @@ class Parser:
 
         items: list[ast.Item] = []
         while not self._at(TokenKind.EOF):
+            pub_tok = self._peek() if self._at(TokenKind.KW_PUB) else None
+            if pub_tok is not None:
+                self._advance()
             if self._at(TokenKind.KW_FN):
-                items.append(self._fn())
-            elif self._at(TokenKind.KW_TEST):
-                items.append(self._test())
+                item: ast.Item = self._fn()
             elif self._at(TokenKind.KW_TYPE):
-                items.append(self._type_decl([]))
+                item = self._type_decl([])
             elif self._at(TokenKind.KW_DERIVE):
-                items.append(self._type_decl(self._derive_list()))
-            elif self._at(TokenKind.KW_MACRO):
-                items.append(self._macro())
+                item = self._type_decl(self._derive_list())
             elif self._at(TokenKind.KW_TRAIT):
-                items.append(self._trait_decl())
-            elif self._at(TokenKind.KW_IMPL):
-                items.append(self._impl_decl())
+                item = self._trait_decl()
+            elif pub_tok is None and self._at(TokenKind.KW_TEST):
+                item = self._test()
+            elif pub_tok is None and self._at(TokenKind.KW_MACRO):
+                item = self._macro()
+            elif pub_tok is None and self._at(TokenKind.KW_IMPL):
+                item = self._impl_decl()
             else:
                 tok = self._peek()
+                if pub_tok is not None:
+                    raise self._error(
+                        f"`pub` can only precede a function, type, or trait, "
+                        f"found {self._describe(tok)}",
+                        tok.span,
+                    )
                 raise self._error(
                     f"expected a function, test, type, macro, trait, or impl, "
                     f"found {self._describe(tok)}",
                     tok.span,
                 )
+            if pub_tok is not None:
+                item = replace(item, pub=True)  # type: ignore[type-var]
+            items.append(item)
         end = self._peek().span
         return ast.Module(name, imports, items, start.to(end))
 

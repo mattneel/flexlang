@@ -31,16 +31,20 @@ from flx.types import AdtType, PrimType, RecordType, Type
 _MONO_LIMIT = 256
 
 
-def check_and_monomorphize(module: ast.Module) -> CheckResult:
+def check_and_monomorphize(
+    module: ast.Module,
+    decl_module: dict[str, str] | None = None,
+    public: set[str] | None = None,
+) -> CheckResult:
     """Type-check `module`, then specialize every generic instantiation it
     demands, re-checking until the set of instantiations is closed."""
-    result = check(module)
+    result = check(module, decl_module, public)
     if not result.generic_fns:
         return result  # nothing generic: the first check is already complete
 
     current = module
     for _ in range(_MONO_LIMIT):
-        result = check(current)
+        result = check(current, decl_module, public)
         pending = [
             (name, key)
             for (name, key) in result.instantiations

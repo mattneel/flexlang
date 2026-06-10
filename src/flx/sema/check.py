@@ -162,8 +162,18 @@ class _Scope:
 
 
 class Checker:
-    def __init__(self, module: ast.Module) -> None:
+    def __init__(
+        self,
+        module: ast.Module,
+        decl_module: dict[str, str] | None = None,
+        public: set[str] | None = None,
+    ) -> None:
         self.module = module
+        # Visibility: which module declared each top-level name, and which are `pub`.
+        # Empty for a single-file program (then everything is mutually visible).
+        self.decl_module = decl_module or {}
+        self.public = public or set()
+        self.current_module: str | None = None
         self.diags: list[Diagnostic] = []
         self.expr_types: dict[int, Type] = {}
         self.functions: dict[str, FnType] = {}
@@ -221,6 +231,7 @@ class Checker:
         for fn in self.module.functions:
             if fn.name in self.functions or fn.name in self.generic_fns:
                 self._err("TYPE002", f"function {fn.name!r} is already defined", fn.span)
+            self.current_module = self.decl_module.get(fn.name)  # for signature visibility
             if fn.type_params:
                 # A template: type params are unresolved here. Its concrete
                 # instantiations are checked (and registered) by the monomorphizer.
@@ -231,6 +242,7 @@ class Checker:
             self.functions[fn.name] = FnType(params, ret)
             self.fn_effects[fn.name] = set(fn.effects)
 
+        self.current_module = None  # impls/specs are not visibility-scoped
         self._register_impls()
 
         for fn in self.module.functions:
@@ -447,9 +459,22 @@ class Checker:
 
     # --- declarations ---------------------------------------------------------
 
+    def _check_visible(self, name: str, span: Span | None) -> None:
+        """Flag a reference from `current_module` to another module's private name.
+        No-op for single-file programs, builtins, public names, and own-module
+        references; also skipped while checking synthetic items (impl methods,
+        monomorphized specs) whose enclosing module is unknown."""
+        if self.current_module is None or name in self.public:
+            return
+        owner = self.decl_module.get(name)
+        if owner is None or owner == self.current_module:
+            return
+        self._err("VIS001", f"{name!r} is private to module {owner!r}", span)
+
     def _check_fn(self, fn: ast.FnDecl) -> None:
         self.scope = _Scope()
         self.in_test = False
+        self.current_module = self.decl_module.get(fn.name)
         self.declared_effects = set(fn.effects)
         fn_ty = self.functions[fn.name]
         seen: set[str] = set()
@@ -475,6 +500,7 @@ class Checker:
     def _check_test(self, test: ast.TestDecl) -> None:
         self.scope = _Scope()
         self.in_test = True
+        self.current_module = None  # tests may use any in-scope name
         self.declared_effects = set(test.effects)
         self.return_type = UNIT
         self._check_block(test.body)
@@ -662,6 +688,7 @@ class Checker:
         if expr.name in self.ctors:  # bare variant, e.g. None / Red
             return self._infer_ctor(expr.name, [], expected, expr.span)
         if expr.name in self.functions:
+            self._check_visible(expr.name, expr.span)
             return self.functions[expr.name]
         self._err("NAME001", f"unknown name {expr.name!r}", expr.span)
         return ERROR
@@ -718,8 +745,10 @@ class Checker:
             if callee.name in self.ctors:  # constructor call, e.g. Ok(x)
                 return self._infer_ctor(callee.name, expr.args, expected, expr.span)
             if callee.name in self.generic_fns:  # bounded generic, monomorphized
+                self._check_visible(callee.name, expr.span)
                 return self._infer_generic_call(callee.name, expr, expected)
             if callee.name in self.functions:
+                self._check_visible(callee.name, expr.span)
                 fn_ty = self.functions[callee.name]
                 self._check_args(callee.name, fn_ty, expr)
                 self._require_effects(self.fn_effects.get(callee.name, set()), expr.span)
@@ -776,6 +805,7 @@ class Checker:
         self, name: str, args: list[ast.Expr], expected: Type | None, span: Span
     ) -> Type:
         adt_name, vidx = self.ctors[name]
+        self._check_visible(adt_name, span)  # a variant is as visible as its ADT
         params, variants = self.adt_templates[adt_name]
         payload_exprs = variants[vidx][1]
         arg_types = [self._check_expr(a) for a in args]
@@ -984,8 +1014,10 @@ class Checker:
         if type_expr.name in PRIMITIVES and not type_expr.args:
             return PRIMITIVES[type_expr.name]
         if type_expr.name in self.record_types and not type_expr.args:
+            self._check_visible(type_expr.name, type_expr.span)
             return self.record_types[type_expr.name]
         if type_expr.name in self.adt_templates:
+            self._check_visible(type_expr.name, type_expr.span)
             args = [self._resolve_type(a) for a in type_expr.args]
             return self._instantiate(type_expr.name, args, type_expr.span)
         self._err("TYPE001", f"unknown type {type_expr.name!r}", type_expr.span)
@@ -1051,5 +1083,9 @@ def _diverges(block: ast.Block) -> bool:
     return False
 
 
-def check(module: ast.Module) -> CheckResult:
-    return Checker(module).check()
+def check(
+    module: ast.Module,
+    decl_module: dict[str, str] | None = None,
+    public: set[str] | None = None,
+) -> CheckResult:
+    return Checker(module, decl_module, public).check()

@@ -303,6 +303,7 @@ class FnDecl(Item):
     body: Block
     span: Span
     type_params: list[TypeParam] = field(default_factory=list)
+    pub: bool = False
 
 
 @dataclass(frozen=True)
@@ -327,6 +328,7 @@ class RecordDecl(Item):
     fields: list[RecordField]
     span: Span
     derives: list[str] = field(default_factory=list)
+    pub: bool = False
 
 
 @dataclass(frozen=True)
@@ -343,6 +345,7 @@ class AdtDecl(Item):
     variants: list[Variant]
     span: Span
     derives: list[str] = field(default_factory=list)
+    pub: bool = False
 
 
 @dataclass(frozen=True)
@@ -366,6 +369,7 @@ class TraitDecl(Item):
     name: str
     methods: list[TraitMethod]
     span: Span
+    pub: bool = False
 
 
 @dataclass(frozen=True)
