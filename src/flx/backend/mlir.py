@@ -17,9 +17,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from flx.backend.runtime import BASE_RUNTIME_DECLS
 from flx.sema.check import CheckResult
 from flx.syntax import ast
-from flx.types import BOOL, I64, UNIT, FnType, RecordType, Type
+from flx.types import BOOL, I64, UNIT, AdtType, FnType, RecordType, Type
 
 _ARITH_OP = {"+": "addi", "-": "subi", "*": "muli", "/": "divsi", "%": "remsi"}
 _CMP_PRED = {"<": "slt", "<=": "sle", ">": "sgt", ">=": "sge", "==": "eq", "!=": "ne"}
@@ -42,11 +43,20 @@ def mlir_type(ty: Type) -> str:
     if isinstance(ty, RecordType):
         fields = ", ".join(mlir_type(t) for _, t in ty.fields)
         return f"!llvm.struct<({fields})>"
+    if isinstance(ty, AdtType):
+        # Payloadless enum: just the tag. Otherwise {i32 tag, i64 widened payload}.
+        if _is_enum(ty):
+            return "i64"
+        return "!llvm.struct<(i32, i64)>"
     raise BackendError(f"type {ty} has no MLIR representation yet")
 
 
 def _is_aggregate(mty: str) -> bool:
     return mty.startswith("!llvm")
+
+
+def _is_enum(ty: AdtType) -> bool:
+    return all(not v.payload for v in ty.variants)
 
 
 class BackendError(Exception):
@@ -66,6 +76,7 @@ class FunctionLowerer:
     def __init__(self, checked: CheckResult) -> None:
         self.types = checked.expr_types
         self.functions = checked.functions
+        self.constructors = checked.constructors
         self.lines: list[str] = []
         self._n = 0
         self._b = 0
@@ -262,6 +273,10 @@ class FunctionLowerer:
             return self._lower_record_update(expr)
         if isinstance(expr, ast.MemberExpr):
             return self._lower_member(expr)
+        if isinstance(expr, ast.MatchExpr):
+            return self._lower_match(expr)
+        if isinstance(expr, ast.TryExpr):
+            return self._lower_try(expr)
         raise BackendError(f"cannot lower expression {type(expr).__name__}")
 
     def _const(self, literal: str, mty: str) -> str:
@@ -296,6 +311,10 @@ class FunctionLowerer:
         return out
 
     def _lower_name(self, expr: ast.NameExpr) -> str:
+        if expr.name in self.constructors:  # bare variant, e.g. None / Red
+            adt = self._ty_of(expr)
+            assert isinstance(adt, AdtType)
+            return self._lower_ctor(adt, expr.name, [])
         binding = self._lookup(expr.name)
         if binding.kind == "val":
             return binding.ref
@@ -331,6 +350,11 @@ class FunctionLowerer:
         return cur
 
     def _lower_member(self, expr: ast.MemberExpr) -> str:
+        # `Type.Variant` path access to a constructor (e.g. MathError.DivideByZero).
+        if expr.name in self.constructors:
+            adt = self._ty_of(expr)
+            assert isinstance(adt, AdtType)
+            return self._lower_ctor(adt, expr.name, [])
         obj = self.lower_expr(expr.obj)
         obj_ty = self._ty_of(expr.obj)
         assert isinstance(obj_ty, RecordType)
@@ -339,6 +363,152 @@ class FunctionLowerer:
         out = self._fresh()
         self._emit(f"{out} = llvm.extractvalue {obj}[{index}] : {mty}")
         return out
+
+    # --- ADTs / constructors / match / `?` ------------------------------------
+
+    def _lower_ctor(self, adt: AdtType, vname: str, args: list[ast.Expr]) -> str:
+        vidx = next(i for i, v in enumerate(adt.variants) if v.name == vname)
+        if _is_enum(adt):
+            return self._const(str(vidx), "i64")
+        mty = mlir_type(adt)
+        if args:
+            raw = self.lower_expr(args[0])
+            assert raw is not None
+            payload = self._widen_to_i64(raw, adt.variants[vidx].payload[0])
+        else:
+            payload = self._const("0", "i64")
+        tag = self._const(str(vidx), "i32")
+        undef = self._fresh()
+        self._emit(f"{undef} = llvm.mlir.undef : {mty}")
+        with_tag = self._fresh()
+        self._emit(f"{with_tag} = llvm.insertvalue {tag}, {undef}[0] : {mty}")
+        out = self._fresh()
+        self._emit(f"{out} = llvm.insertvalue {payload}, {with_tag}[1] : {mty}")
+        return out
+
+    def _widen_to_i64(self, value: str, ty: Type) -> str:
+        if ty is BOOL:
+            out = self._fresh()
+            self._emit(f"{out} = arith.extui {value} : i1 to i64")
+            return out
+        if ty is I64 or (isinstance(ty, AdtType) and _is_enum(ty)):
+            return value
+        raise BackendError(f"ADT payload of type {ty} is not supported yet")
+
+    def _narrow_from_i64(self, value: str, ty: Type) -> str:
+        if ty is BOOL:
+            out = self._fresh()
+            self._emit(f"{out} = arith.trunci {value} : i64 to i1")
+            return out
+        if ty is I64 or (isinstance(ty, AdtType) and _is_enum(ty)):
+            return value
+        raise BackendError(f"ADT payload of type {ty} is not supported yet")
+
+    def _lower_match(self, expr: ast.MatchExpr) -> str | None:
+        scrut_ty = self._ty_of(expr.scrutinee)
+        assert isinstance(scrut_ty, AdtType)
+        scrut = self.lower_expr(expr.scrutinee)
+        assert scrut is not None
+        smty = mlir_type(scrut_ty)
+        payload: str | None = None
+        if _is_enum(scrut_ty):
+            tag, tag_ty = scrut, "i64"
+        else:
+            tag = self._fresh()
+            self._emit(f"{tag} = llvm.extractvalue {scrut}[0] : {smty}")
+            tag_ty = "i32"
+            payload = self._fresh()
+            self._emit(f"{payload} = llvm.extractvalue {scrut}[1] : {smty}")
+
+        result_ty = self._ty_of(expr)
+        has_value = result_ty is not UNIT
+        rmty = mlir_type(result_ty) if has_value else ""
+        slot = self._alloc_slot(rmty) if has_value else None
+
+        vidx_of = {v.name: i for i, v in enumerate(scrut_ty.variants)}
+        join_lbl = self._label()
+        arm_labels = [self._label() for _ in expr.arms]
+        cases = []
+        default_lbl: str | None = None
+        for arm, lbl in zip(expr.arms, arm_labels, strict=True):
+            if isinstance(arm.pattern, ast.CtorPattern):
+                cases.append((vidx_of[arm.pattern.name], lbl))
+            else:
+                default_lbl = lbl
+        trap_lbl = None
+        if default_lbl is None:
+            trap_lbl = self._label()
+            default_lbl = trap_lbl
+
+        case_text = "".join(f", {vi}: {lbl}" for vi, lbl in cases)
+        self._terminator(f"cf.switch {tag} : {tag_ty}, [ default: {default_lbl}{case_text} ]")
+
+        join_reachable = False
+        for arm, lbl in zip(expr.arms, arm_labels, strict=True):
+            self._start_block(lbl)
+            self.scopes.append({})
+            self._bind_pattern_runtime(arm.pattern, scrut_ty, scrut, payload)
+            body_val = self.lower_expr(arm.body)
+            self.scopes.pop()
+            if not self.terminated:
+                if slot is not None and body_val is not None:
+                    self._store_slot(slot, rmty, body_val)
+                self._terminator(f"cf.br {join_lbl}")
+                join_reachable = True
+
+        if trap_lbl is not None:
+            self._start_block(trap_lbl)
+            self._emit("func.call @__flx_match_fail() : () -> ()")
+            self._terminator("llvm.unreachable")
+
+        if not join_reachable:
+            self.terminated = True
+            return None
+        self._start_block(join_lbl)
+        if slot is not None:
+            return self._load_slot(slot, rmty)
+        return None
+
+    def _bind_pattern_runtime(
+        self, pattern: ast.Pattern, scrut_ty: AdtType, scrut_val: str, payload: str | None
+    ) -> None:
+        if isinstance(pattern, ast.BindPattern):
+            self._define(pattern.name, _Binding("val", scrut_val, mlir_type(scrut_ty)))
+        elif isinstance(pattern, ast.CtorPattern) and pattern.args:
+            vidx = next(i for i, v in enumerate(scrut_ty.variants) if v.name == pattern.name)
+            pty = scrut_ty.variants[vidx].payload[0]
+            assert payload is not None
+            narrowed = self._narrow_from_i64(payload, pty)
+            sub = pattern.args[0]
+            if isinstance(sub, ast.BindPattern):
+                self._define(sub.name, _Binding("val", narrowed, mlir_type(pty)))
+
+    def _lower_try(self, expr: ast.TryExpr) -> str:
+        result_adt = self._ty_of(expr.expr)
+        assert isinstance(result_adt, AdtType)
+        r = self.lower_expr(expr.expr)
+        assert r is not None
+        rmty = mlir_type(result_adt)
+        tag = self._fresh()
+        self._emit(f"{tag} = llvm.extractvalue {r}[0] : {rmty}")
+        zero = self._const("0", "i32")
+        is_ok = self._fresh()
+        self._emit(f"{is_ok} = arith.cmpi eq, {tag}, {zero} : i32")
+        cont, prop = self._label(), self._label()
+        self._terminator(f"cf.cond_br {is_ok}, {cont}, {prop}")
+
+        self._start_block(prop)
+        if self.test_mode:
+            self._emit("func.call @__flx_explicit_fail() : () -> ()")
+            one = self._const("1", "i32")
+            self._terminator(f"func.return {one} : i32")
+        else:
+            self._terminator(f"func.return {r} : {rmty}")
+
+        self._start_block(cont)
+        payload = self._fresh()
+        self._emit(f"{payload} = llvm.extractvalue {r}[1] : {rmty}")
+        return self._narrow_from_i64(payload, result_adt.type_args[0])
 
     def _lower_unary(self, expr: ast.UnaryExpr) -> str:
         operand = self.lower_expr(expr.operand)
@@ -407,6 +577,10 @@ class FunctionLowerer:
         if not isinstance(expr.callee, ast.NameExpr):
             raise BackendError("only direct function calls are supported")
         name = expr.callee.name
+        if name in self.constructors:  # variant constructor, e.g. Ok(x)
+            adt = self._ty_of(expr)
+            assert isinstance(adt, AdtType)
+            return self._lower_ctor(adt, name, expr.args)
         if name in _BUILTINS:
             self._lower_builtin(name, expr)
             return None
@@ -427,14 +601,23 @@ class FunctionLowerer:
             left = self.lower_expr(call.args[0])
             right = self.lower_expr(call.args[1])
             assert left is not None and right is not None
-            operand_ty = mlir_type(self._ty_of(call.args[0]))
-            pred = "eq" if name == "assert_eq" else "ne"
-            cond = self._fresh()
-            self._emit(f"{cond} = arith.cmpi {pred}, {left}, {right} : {operand_ty}")
-            a64 = self._to_i64(left, operand_ty)
-            b64 = self._to_i64(right, operand_ty)
-            sym = "@__flx_assert_eq_fail" if name == "assert_eq" else "@__flx_assert_ne_fail"
-            self._assert_branch(cond, sym, f"{a64}, {b64}", "i64, i64")
+            operand_type = self._ty_of(call.args[0])
+            operand_ty = mlir_type(operand_type)
+            equal = self._emit_equal(left, right, operand_type)
+            if name == "assert_eq":
+                ok_cond = equal
+            else:  # assert_ne passes when the values differ
+                one = self._const("1", "i1")
+                ok_cond = self._fresh()
+                self._emit(f"{ok_cond} = arith.xori {equal}, {one} : i1")
+            if _is_aggregate(operand_ty):
+                # Aggregate values: report a generic failure (no scalar to print).
+                self._assert_branch(ok_cond, "@__flx_assert_fail", "", "")
+            else:
+                a64 = self._to_i64(left, operand_ty)
+                b64 = self._to_i64(right, operand_ty)
+                sym = "@__flx_assert_eq_fail" if name == "assert_eq" else "@__flx_assert_ne_fail"
+                self._assert_branch(ok_cond, sym, f"{a64}, {b64}", "i64, i64")
         else:  # fail / panic always fail
             self._emit("func.call @__flx_explicit_fail() : () -> ()")
             one = self._const("1", "i32")
@@ -455,6 +638,45 @@ class FunctionLowerer:
             return value
         out = self._fresh()
         self._emit(f"{out} = arith.extui {value} : i1 to i64")
+        return out
+
+    def _emit_equal(self, left: str, right: str, ty: Type) -> str:
+        """Structural equality producing an i1 (scalars, ADTs, and records)."""
+        mty = mlir_type(ty)
+        if not _is_aggregate(mty):
+            out = self._fresh()
+            self._emit(f"{out} = arith.cmpi eq, {left}, {right} : {mty}")
+            return out
+        if isinstance(ty, AdtType):
+            tag_eq = self._cmp_field(left, right, mty, 0, "i32")
+            payload_eq = self._cmp_field(left, right, mty, 1, "i64")
+            out = self._fresh()
+            self._emit(f"{out} = arith.andi {tag_eq}, {payload_eq} : i1")
+            return out
+        if isinstance(ty, RecordType):
+            conj: str | None = None
+            for i, (_, fty) in enumerate(ty.fields):
+                lf = self._fresh()
+                self._emit(f"{lf} = llvm.extractvalue {left}[{i}] : {mty}")
+                rf = self._fresh()
+                self._emit(f"{rf} = llvm.extractvalue {right}[{i}] : {mty}")
+                feq = self._emit_equal(lf, rf, fty)
+                if conj is None:
+                    conj = feq
+                else:
+                    nxt = self._fresh()
+                    self._emit(f"{nxt} = arith.andi {conj}, {feq} : i1")
+                    conj = nxt
+            return conj if conj is not None else self._const("1", "i1")
+        raise BackendError(f"cannot compare values of type {ty}")
+
+    def _cmp_field(self, left: str, right: str, mty: str, index: int, field_ty: str) -> str:
+        lf = self._fresh()
+        self._emit(f"{lf} = llvm.extractvalue {left}[{index}] : {mty}")
+        rf = self._fresh()
+        self._emit(f"{rf} = llvm.extractvalue {right}[{index}] : {mty}")
+        out = self._fresh()
+        self._emit(f"{out} = arith.cmpi eq, {lf}, {rf} : {field_ty}")
         return out
 
     def _emit_call(self, symbol: str, args: list[str | None], fn_ty: FnType) -> str | None:
@@ -527,7 +749,8 @@ def emit_program(checked: CheckResult, *, with_tests: bool) -> str:
         for i, test in enumerate(checked.module.tests):
             parts.append(lowerer.lower_test(test, i))
     body = "\n".join(parts) + "\n"
-    return _RUNTIME_DECLS + body if with_tests else body
+    decls = BASE_RUNTIME_DECLS + (_RUNTIME_DECLS if with_tests else "")
+    return decls + body
 
 
 def emit_module(checked: CheckResult) -> str:

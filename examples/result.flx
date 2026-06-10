@@ -1,0 +1,30 @@
+module Main
+
+type MathError =
+  | DivideByZero
+
+fn div(a: I64, b: I64) -> Result<I64, MathError> =
+{
+  if b == 0 {
+    Err(MathError.DivideByZero)
+  } else {
+    Ok(a / b)
+  }
+}
+
+fn main() -> I64 =
+{
+  match div(10, 2) {
+    Ok(x) => x
+    Err(_) => 1
+  }
+}
+
+test "division succeeds" {
+  let x = div(10, 2)?
+  assert_eq(x, 5)
+}
+
+test "division by zero fails" {
+  assert_eq(div(10, 0), Err(MathError.DivideByZero))
+}

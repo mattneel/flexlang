@@ -10,7 +10,12 @@ from __future__ import annotations
 
 # Runtime assertion-failure reporters, called from compiled test code.
 _RUNTIME = r"""#include <stdio.h>
+#include <stdlib.h>
 
+void __flx_match_fail(void) {
+    fputs("flex: non-exhaustive match reached\n", stderr);
+    abort();
+}
 void __flx_assert_fail(void) {
     printf("  assertion failed\n");
 }

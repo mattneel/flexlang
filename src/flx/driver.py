@@ -11,6 +11,7 @@ from pathlib import Path
 
 from flx.backend.harness import generate_harness
 from flx.backend.mlir import BackendError, emit_module, emit_program
+from flx.backend.runtime import BASE_RUNTIME_C
 from flx.backend.toolchain import build_executable, run_executable
 from flx.diagnostics import Diagnostic, FlexError
 from flx.sema.check import CheckResult, check
@@ -73,10 +74,12 @@ def cmd_check(path: str) -> int:
 
 def _run_shim(main_ret: Type) -> str:
     if main_ret is UNIT:
-        return "extern void flx_main(void);\nint main(void){ flx_main(); return 0; }\n"
-    if main_ret is I64:
-        return "extern long long flx_main(void);\nint main(void){ return (int)flx_main(); }\n"
-    raise FlexError([Diagnostic("RUN002", "main must return I64 or Unit")])
+        main = "extern void flx_main(void);\nint main(void){ flx_main(); return 0; }\n"
+    elif main_ret is I64:
+        main = "extern long long flx_main(void);\nint main(void){ return (int)flx_main(); }\n"
+    else:
+        raise FlexError([Diagnostic("RUN002", "main must return I64 or Unit")])
+    return BASE_RUNTIME_C + main
 
 
 def cmd_emit_mlir(path: str) -> int:

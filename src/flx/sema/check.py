@@ -1,8 +1,9 @@
 """Name resolution and type checking for the Flex MVP.
 
 Produces a :class:`CheckResult` mapping each expression to its type (keyed by
-node identity) and validates arity, operand types, return types, and mutability.
-Effect and region checking are deferred (parsed but not enforced).
+node identity) and validates arity, operand types, return types, mutability,
+records, ADTs/match (with exhaustiveness), generic instantiation (monomorphic),
+`?` propagation, and `uses { ... }` effects.
 """
 
 from __future__ import annotations
@@ -19,10 +20,20 @@ from flx.types import (
     REGION,
     STRING,
     UNIT,
+    AdtType,
     FnType,
     RecordType,
     Type,
+    VariantDef,
 )
+
+# Builtin generic ADT templates (tag order is fixed): name -> (params, variants),
+# where each variant is (name, list of payload TypeExprs).
+_TE = ast.TypeExpr
+_BUILTIN_ADTS: dict[str, tuple[list[str], list[tuple[str, list[ast.TypeExpr]]]]] = {
+    "Result": (["T", "E"], [("Ok", [_TE("T")]), ("Err", [_TE("E")])]),
+    "Option": (["T"], [("None", []), ("Some", [_TE("T")])]),
+}
 
 # name -> (arity or None for variadic-ish, checker). Builtins are checked ad hoc.
 _BUILTINS = {"assert", "assert_eq", "assert_ne", "fail", "panic"}
@@ -56,6 +67,7 @@ class CheckResult:
     module: ast.Module
     expr_types: dict[int, Type]
     functions: dict[str, FnType]
+    constructors: set[str]
 
 
 @dataclass
@@ -90,10 +102,25 @@ class Checker:
         self.fn_effects: dict[str, set[str]] = {}
         self.declared_effects: set[str] = set()
         self.record_types: dict[str, RecordType] = {}
+        # ADT templates: name -> (type params, [(variant name, payload TypeExprs)]).
+        self.adt_templates: dict[str, tuple[list[str], list[tuple[str, list[ast.TypeExpr]]]]] = {}
+        self.ctors: dict[str, tuple[str, int]] = {}  # variant name -> (adt name, index)
+        self._subst: dict[str, Type] = {}  # active type-parameter substitution
 
     # --- entry ----------------------------------------------------------------
 
     def check(self) -> CheckResult:
+        for adt in self.module.adts:
+            self.adt_templates[adt.name] = (
+                adt.type_params,
+                [(v.name, v.payload) for v in adt.variants],
+            )
+        for name, template in _BUILTIN_ADTS.items():
+            self.adt_templates.setdefault(name, template)
+        for adt_name, (_, variants) in self.adt_templates.items():
+            for i, (vname, _) in enumerate(variants):
+                self.ctors[vname] = (adt_name, i)
+
         for record in self.module.records:
             fields = tuple((f.name, self._resolve_type(f.type)) for f in record.fields)
             self.record_types[record.name] = RecordType(record.name, fields)
@@ -113,7 +140,7 @@ class Checker:
 
         if self.diags:
             raise FlexError(self.diags)
-        return CheckResult(self.module, self.expr_types, self.functions)
+        return CheckResult(self.module, self.expr_types, self.functions, set(self.ctors))
 
     # --- declarations ---------------------------------------------------------
 
@@ -129,7 +156,7 @@ class Checker:
             seen.add(param.name)
             self.scope.define(param.name, _Binding(ptype, mutable=False))
         self.return_type = fn_ty.ret
-        body_ty = self._check_block(fn.body)
+        body_ty = self._check_block(fn.body, fn_ty.ret)
         # A body that's guaranteed to `return` needs no tail value; its returns
         # are type-checked individually.
         if fn_ty.ret is not UNIT and not _diverges(fn.body):
@@ -151,17 +178,18 @@ class Checker:
 
     # --- statements / blocks --------------------------------------------------
 
-    def _check_block(self, block: ast.Block) -> Type:
+    def _check_block(self, block: ast.Block, expected: Type | None = None) -> Type:
         self.scope.push()
         result: Type = UNIT
+        last = block.stmts[-1] if block.stmts else None
         for stmt in block.stmts:
-            result = self._check_stmt(stmt)
+            result = self._check_stmt(stmt, expected if stmt is last else None)
         # The block's value is its trailing expression, else Unit.
         value = result if block.tail is not None else UNIT
         self.scope.pop()
         return value
 
-    def _check_stmt(self, stmt: ast.Stmt) -> Type:
+    def _check_stmt(self, stmt: ast.Stmt, expected: Type | None = None) -> Type:
         if isinstance(stmt, ast.LetStmt):
             self.scope.define(stmt.name, _Binding(self._check_expr(stmt.value), mutable=False))
             return UNIT
@@ -176,12 +204,14 @@ class Checker:
             self._check_block(stmt.body)
             return UNIT
         if isinstance(stmt, ast.ReturnStmt):
-            actual = self._check_expr(stmt.value) if stmt.value is not None else UNIT
+            actual = (
+                self._check_expr(stmt.value, self.return_type) if stmt.value is not None else UNIT
+            )
             span = stmt.value.span if stmt.value is not None else stmt.span
             self._expect(self.return_type, actual, span, "return value")
             return UNIT
         if isinstance(stmt, ast.ExprStmt):
-            return self._check_expr(stmt.expr)
+            return self._check_expr(stmt.expr, expected)
         return UNIT
 
     def _check_assign(self, stmt: ast.AssignStmt) -> None:
@@ -202,12 +232,12 @@ class Checker:
 
     # --- expressions ----------------------------------------------------------
 
-    def _check_expr(self, expr: ast.Expr) -> Type:
-        ty = self._infer(expr)
+    def _check_expr(self, expr: ast.Expr, expected: Type | None = None) -> Type:
+        ty = self._infer(expr, expected)
         self.expr_types[id(expr)] = ty
         return ty
 
-    def _infer(self, expr: ast.Expr) -> Type:
+    def _infer(self, expr: ast.Expr, expected: Type | None) -> Type:
         if isinstance(expr, ast.IntLit):
             if expr.value > _I64_MAX:
                 self._err(
@@ -221,15 +251,15 @@ class Checker:
         if isinstance(expr, ast.StringLit):
             return STRING
         if isinstance(expr, ast.NameExpr):
-            return self._infer_name(expr)
+            return self._infer_name(expr, expected)
         if isinstance(expr, ast.UnaryExpr):
             return self._infer_unary(expr)
         if isinstance(expr, ast.BinaryExpr):
             return self._infer_binary(expr)
         if isinstance(expr, ast.CallExpr):
-            return self._infer_call(expr)
+            return self._infer_call(expr, expected)
         if isinstance(expr, ast.IfExpr):
-            return self._infer_if(expr)
+            return self._infer_if(expr, expected)
         if isinstance(expr, ast.RegionExpr):
             return self._infer_region(expr)
         if isinstance(expr, ast.RecordExpr):
@@ -238,6 +268,10 @@ class Checker:
             return self._infer_record_update(expr)
         if isinstance(expr, ast.MemberExpr):
             return self._infer_member(expr)
+        if isinstance(expr, ast.MatchExpr):
+            return self._infer_match(expr, expected)
+        if isinstance(expr, ast.TryExpr):
+            return self._infer_try(expr)
         return ERROR
 
     def _infer_record(self, expr: ast.RecordExpr) -> Type:
@@ -277,6 +311,10 @@ class Checker:
         return base_ty
 
     def _infer_member(self, expr: ast.MemberExpr) -> Type:
+        # `Type.Variant` path access to a (payloadless) constructor, e.g.
+        # MathError.DivideByZero.
+        if isinstance(expr.obj, ast.NameExpr) and expr.obj.name in self.adt_templates:
+            return self._infer_ctor(expr.name, [], None, expr.span)
         obj_ty = self._check_expr(expr.obj)
         if isinstance(obj_ty, RecordType):
             for fname, ftype in obj_ty.fields:
@@ -299,10 +337,12 @@ class Checker:
         self.scope.pop()
         return ty
 
-    def _infer_name(self, expr: ast.NameExpr) -> Type:
+    def _infer_name(self, expr: ast.NameExpr, expected: Type | None) -> Type:
         binding = self.scope.lookup(expr.name)
         if binding is not None:
             return binding.type
+        if expr.name in self.ctors:  # bare variant, e.g. None / Red
+            return self._infer_ctor(expr.name, [], expected, expr.span)
         if expr.name in self.functions:
             return self.functions[expr.name]
         self._err("NAME001", f"unknown name {expr.name!r}", expr.span)
@@ -342,11 +382,13 @@ class Checker:
             return BOOL
         return ERROR
 
-    def _infer_call(self, expr: ast.CallExpr) -> Type:
+    def _infer_call(self, expr: ast.CallExpr, expected: Type | None) -> Type:
         callee = expr.callee
         if isinstance(callee, ast.NameExpr):
             if callee.name in _BUILTINS:
                 return self._check_builtin(callee.name, expr)
+            if callee.name in self.ctors:  # constructor call, e.g. Ok(x)
+                return self._infer_ctor(callee.name, expr.args, expected, expr.span)
             if callee.name in self.functions:
                 fn_ty = self.functions[callee.name]
                 self._check_args(callee.name, fn_ty, expr)
@@ -394,6 +436,131 @@ class Checker:
                     help=f"add {eff} to its `uses {{ ... }}`",
                 )
 
+    # --- ADTs / constructors / match / `?` ------------------------------------
+
+    def _infer_ctor(
+        self, name: str, args: list[ast.Expr], expected: Type | None, span: Span
+    ) -> Type:
+        adt_name, vidx = self.ctors[name]
+        params, variants = self.adt_templates[adt_name]
+        payload_exprs = variants[vidx][1]
+        arg_types = [self._check_expr(a) for a in args]
+        if len(args) != len(payload_exprs):
+            self._err(
+                "TYPE005",
+                f"{name!r} expects {len(payload_exprs)} argument(s), got {len(args)}",
+                span,
+            )
+        # Resolve type parameters from the expected type, then from arguments.
+        subst: dict[str, Type] = {}
+        if (
+            isinstance(expected, AdtType)
+            and expected.name == adt_name
+            and len(expected.type_args) == len(params)
+        ):
+            subst = dict(zip(params, expected.type_args, strict=True))
+        for pe, at in zip(payload_exprs, arg_types, strict=False):
+            if pe.name in params and not pe.args and pe.name not in subst:
+                subst[pe.name] = at
+        if any(p not in subst for p in params):
+            self._err("TYPE016", f"cannot infer type arguments for {name!r} from context", span)
+            return ERROR
+        adt = self._instantiate(adt_name, [subst[p] for p in params], span)
+        for arg, at, pty in zip(args, arg_types, adt.variants[vidx].payload, strict=False):
+            self._expect(pty, at, arg.span, f"argument to {name!r}")
+        return adt
+
+    def _infer_try(self, expr: ast.TryExpr) -> Type:
+        inner = self._check_expr(expr.expr)
+        if not (isinstance(inner, AdtType) and inner.name == "Result"):
+            if inner is not ERROR:
+                self._err("QUEST001", f"`?` requires a Result, found {inner}", expr.span)
+            return ERROR
+        payload_t, err_e = inner.type_args
+        if self.in_test:
+            return payload_t  # `?` in a test propagates failure as a failed test
+        ret = self.return_type
+        if not (isinstance(ret, AdtType) and ret.name == "Result"):
+            self._err("QUEST001", "`?` used outside a Result-returning function", expr.span)
+            return ERROR
+        if not _same(ret.type_args[1], err_e):
+            self._err(
+                "QUEST001",
+                f"`?` error type {err_e} is incompatible with {ret.type_args[1]}",
+                expr.span,
+            )
+        return payload_t
+
+    def _infer_match(self, expr: ast.MatchExpr, expected: Type | None) -> Type:
+        scrut = self._check_expr(expr.scrutinee)
+        if not isinstance(scrut, AdtType):
+            for arm in expr.arms:
+                self.scope.push()
+                self._bind_pattern(arm.pattern, scrut, {}, set())
+                self._check_expr(arm.body, expected)
+                self.scope.pop()
+            if scrut is not ERROR:
+                self._err("TYPE018", f"match requires an ADT, found {scrut}", expr.scrutinee.span)
+            return ERROR
+        variants = {v.name: v for v in scrut.variants}
+        covered: set[str] = set()
+        catchall = False
+        result: Type | None = None
+        for arm in expr.arms:
+            self.scope.push()
+            if self._bind_pattern(arm.pattern, scrut, variants, covered):
+                catchall = True
+            body_ty = self._check_expr(arm.body, expected)
+            self.scope.pop()
+            if result is None:
+                result = body_ty
+            elif not _same(result, body_ty):
+                self._err(
+                    "TYPE008",
+                    f"match arms have mismatched types: {result} vs {body_ty}",
+                    arm.span,
+                )
+        if not catchall and covered != set(variants):
+            missing = ", ".join(sorted(set(variants) - covered))
+            self._err("MATCH001", f"non-exhaustive match; missing {missing}", expr.span)
+        return result if result is not None else UNIT
+
+    def _bind_pattern(
+        self,
+        pattern: ast.Pattern,
+        scrut_ty: Type,
+        variants: dict[str, VariantDef],
+        covered: set[str],
+    ) -> bool:
+        if isinstance(pattern, ast.WildcardPattern):
+            return True
+        if isinstance(pattern, ast.BindPattern):
+            self.scope.define(pattern.name, _Binding(scrut_ty, mutable=False))
+            return True
+        if isinstance(pattern, ast.CtorPattern):
+            variant = variants.get(pattern.name)
+            if variant is None:
+                self._err(
+                    "MATCH003", f"{pattern.name!r} is not a variant of {scrut_ty}", pattern.span
+                )
+                return False
+            covered.add(pattern.name)
+            if len(pattern.args) != len(variant.payload):
+                self._err(
+                    "TYPE005",
+                    f"{pattern.name!r} expects {len(variant.payload)} pattern argument(s)",
+                    pattern.span,
+                )
+            for sub, pty in zip(pattern.args, variant.payload, strict=False):
+                self._bind_subpattern(sub, pty)
+        return False
+
+    def _bind_subpattern(self, pattern: ast.Pattern, ty: Type) -> None:
+        if isinstance(pattern, ast.BindPattern):
+            self.scope.define(pattern.name, _Binding(ty, mutable=False))
+        elif isinstance(pattern, ast.CtorPattern) and isinstance(ty, AdtType):
+            self._bind_pattern(pattern, ty, {v.name: v for v in ty.variants}, set())
+
     def _check_args(self, name: str, fn_ty: FnType, call: ast.CallExpr) -> None:
         if len(call.args) != len(fn_ty.params):
             self._err(
@@ -402,7 +569,7 @@ class Checker:
                 call.span,
             )
         for arg, expected in zip(call.args, fn_ty.params, strict=False):
-            actual = self._check_expr(arg)
+            actual = self._check_expr(arg, expected)
             self._expect(expected, actual, arg.span, "argument")
         for extra in call.args[len(fn_ty.params) :]:
             self._check_expr(extra)
@@ -415,37 +582,39 @@ class Checker:
                 call.span,
                 help='move this into a `test "..." { ... }` block',
             )
-        for arg in call.args:
-            self._check_expr(arg)
-        if name in ("assert",):
+        if name == "assert":
             if len(call.args) == 1:
-                self._expect(
-                    BOOL, self.expr_types[id(call.args[0])], call.args[0].span, "assertion"
-                )
+                self._expect(BOOL, self._check_expr(call.args[0]), call.args[0].span, "assertion")
             else:
                 self._err("TYPE006", "assert expects 1 argument", call.span)
         elif name in ("assert_eq", "assert_ne"):
             if len(call.args) != 2:
+                for arg in call.args:
+                    self._check_expr(arg)
                 self._err("TYPE006", f"{name} expects 2 arguments", call.span)
             else:
-                a = self.expr_types[id(call.args[0])]
-                b = self.expr_types[id(call.args[1])]
+                # Check the second operand against the first so constructors like
+                # `Err(...)` get the expected type.
+                a = self._check_expr(call.args[0])
+                b = self._check_expr(call.args[1], a)
                 if not _same(a, b):
                     self._err("TYPE003", f"cannot compare {a} with {b}", call.span)
         elif name in ("fail", "panic"):
+            for arg in call.args:
+                self._check_expr(arg)
             if len(call.args) != 1:
                 self._err("TYPE006", f"{name} expects 1 argument", call.span)
             elif self.expr_types[id(call.args[0])] not in (STRING, ERROR):
                 self._err("TYPE007", f"{name} expects a String message", call.args[0].span)
         return UNIT
 
-    def _infer_if(self, expr: ast.IfExpr) -> Type:
+    def _infer_if(self, expr: ast.IfExpr, expected: Type | None) -> Type:
         cond = self._check_expr(expr.cond)
         self._expect(BOOL, cond, expr.cond.span, "if condition")
-        then_ty = self._check_block(expr.then_block)
+        then_ty = self._check_block(expr.then_block, expected)
         if expr.else_block is None:
             return UNIT
-        else_ty = self._check_block(expr.else_block)
+        else_ty = self._check_block(expr.else_block, expected)
         if not _same(then_ty, else_ty):
             self._err(
                 "TYPE008",
@@ -458,12 +627,35 @@ class Checker:
     # --- helpers --------------------------------------------------------------
 
     def _resolve_type(self, type_expr: ast.TypeExpr) -> Type:
+        if type_expr.name in self._subst and not type_expr.args:
+            return self._subst[type_expr.name]
         if type_expr.name in PRIMITIVES and not type_expr.args:
             return PRIMITIVES[type_expr.name]
         if type_expr.name in self.record_types and not type_expr.args:
             return self.record_types[type_expr.name]
+        if type_expr.name in self.adt_templates:
+            args = [self._resolve_type(a) for a in type_expr.args]
+            return self._instantiate(type_expr.name, args, type_expr.span)
         self._err("TYPE001", f"unknown type {type_expr.name!r}", type_expr.span)
         return ERROR
+
+    def _instantiate(self, adt_name: str, type_args: list[Type], span: Span | None) -> AdtType:
+        params, variants = self.adt_templates[adt_name]
+        if len(type_args) != len(params):
+            self._err(
+                "TYPE013",
+                f"type {adt_name!r} expects {len(params)} type argument(s), got {len(type_args)}",
+                span,
+            )
+            type_args = (type_args + [ERROR] * len(params))[: len(params)]
+        saved = self._subst
+        self._subst = dict(zip(params, type_args, strict=True))
+        defs = tuple(
+            VariantDef(vname, tuple(self._resolve_type(pe) for pe in payload))
+            for vname, payload in variants
+        )
+        self._subst = saved
+        return AdtType(adt_name, defs, tuple(type_args))
 
     def _expect(self, expected: Type, actual: Type, span: Span, what: str) -> None:
         if expected is ERROR or actual is ERROR:
