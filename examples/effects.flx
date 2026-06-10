@@ -1,0 +1,17 @@
+module Main
+
+fn log_answer(answer: I64) -> Unit uses { Log } =
+{
+  Log.info("answer")
+}
+
+fn main() -> I64 uses { Log } =
+{
+  log_answer(42)
+  42
+}
+
+test "log_answer can be called from effectful test" uses { Log } {
+  log_answer(42)
+  assert(true)
+}

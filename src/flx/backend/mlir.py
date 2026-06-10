@@ -313,6 +313,11 @@ class FunctionLowerer:
         return out
 
     def _lower_call(self, expr: ast.CallExpr) -> str | None:
+        # Effectful intrinsics (e.g. Log.info) are validated by the checker;
+        # the MVP lowers them to a no-op at runtime (string I/O lands with
+        # runtime-backed strings).
+        if isinstance(expr.callee, ast.MemberExpr):
+            return None
         if not isinstance(expr.callee, ast.NameExpr):
             raise BackendError("only direct function calls are supported")
         name = expr.callee.name

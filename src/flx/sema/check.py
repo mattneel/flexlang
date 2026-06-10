@@ -16,12 +16,22 @@ from flx.types import BOOL, ERROR, I64, PRIMITIVES, STRING, UNIT, FnType, Type
 # name -> (arity or None for variadic-ish, checker). Builtins are checked ad hoc.
 _BUILTINS = {"assert", "assert_eq", "assert_ne", "fail", "panic"}
 
+# Capability modules whose calls (e.g. Log.info) are effectful intrinsics.
+_EFFECT_MODULES = {"Fs", "Http", "Db", "Log", "Time", "Alloc", "Random", "Process", "Unsafe"}
+
 _ARITH = {"+", "-", "*", "/", "%"}
 _COMPARE = {"<", "<=", ">", ">="}
 _EQUALITY = {"==", "!="}
 _BOOLEAN = {"&&", "||"}
 
 _I64_MAX = 2**63 - 1
+
+# (module, method) -> (effect, param types, return type).
+_INTRINSICS: dict[tuple[str, str], tuple[str, tuple[Type, ...], Type]] = {
+    ("Log", "info"): ("Log", (STRING,), UNIT),
+    ("Log", "warn"): ("Log", (STRING,), UNIT),
+    ("Log", "error"): ("Log", (STRING,), UNIT),
+}
 
 
 @dataclass
@@ -66,6 +76,8 @@ class Checker:
         self.scope = _Scope()
         self.return_type: Type = UNIT
         self.in_test = False
+        self.fn_effects: dict[str, set[str]] = {}
+        self.declared_effects: set[str] = set()
 
     # --- entry ----------------------------------------------------------------
 
@@ -76,6 +88,7 @@ class Checker:
             params = tuple(self._resolve_type(p.type) for p in fn.params)
             ret = self._resolve_type(fn.return_type) if fn.return_type else UNIT
             self.functions[fn.name] = FnType(params, ret)
+            self.fn_effects[fn.name] = set(fn.effects)
 
         for fn in self.module.functions:
             self._check_fn(fn)
@@ -91,6 +104,7 @@ class Checker:
     def _check_fn(self, fn: ast.FnDecl) -> None:
         self.scope = _Scope()
         self.in_test = False
+        self.declared_effects = set(fn.effects)
         fn_ty = self.functions[fn.name]
         seen: set[str] = set()
         for param, ptype in zip(fn.params, fn_ty.params, strict=True):
@@ -115,6 +129,7 @@ class Checker:
     def _check_test(self, test: ast.TestDecl) -> None:
         self.scope = _Scope()
         self.in_test = True
+        self.declared_effects = set(test.effects)
         self.return_type = UNIT
         self._check_block(test.body)
 
@@ -248,19 +263,56 @@ class Checker:
         return ERROR
 
     def _infer_call(self, expr: ast.CallExpr) -> Type:
-        if isinstance(expr.callee, ast.NameExpr) and expr.callee.name in _BUILTINS:
-            return self._check_builtin(expr.callee.name, expr)
-        if isinstance(expr.callee, ast.NameExpr) and expr.callee.name in self.functions:
-            fn_ty = self.functions[expr.callee.name]
-            self._check_args(expr.callee.name, fn_ty, expr)
-            return fn_ty.ret
-        callee_ty = self._check_expr(expr.callee)
+        callee = expr.callee
+        if isinstance(callee, ast.NameExpr):
+            if callee.name in _BUILTINS:
+                return self._check_builtin(callee.name, expr)
+            if callee.name in self.functions:
+                fn_ty = self.functions[callee.name]
+                self._check_args(callee.name, fn_ty, expr)
+                self._require_effects(self.fn_effects.get(callee.name, set()), expr.span)
+                return fn_ty.ret
+        if (
+            isinstance(callee, ast.MemberExpr)
+            and isinstance(callee.obj, ast.NameExpr)
+            and callee.obj.name in _EFFECT_MODULES
+        ):
+            return self._infer_intrinsic(callee.obj.name, callee.name, expr)
+        callee_ty = self._check_expr(callee)
         if isinstance(callee_ty, FnType):
             self._check_args("call", callee_ty, expr)
             return callee_ty.ret
         if callee_ty is not ERROR:
-            self._err("TYPE004", "expression is not callable", expr.callee.span)
+            self._err("TYPE004", "expression is not callable", callee.span)
         return ERROR
+
+    def _infer_intrinsic(self, module: str, method: str, call: ast.CallExpr) -> Type:
+        sig = _INTRINSICS.get((module, method))
+        if sig is None:
+            for arg in call.args:
+                self._check_expr(arg)
+            self._err("TYPE010", f"unknown operation {module}.{method}", call.span)
+            return ERROR
+        effect, params, ret = sig
+        if len(call.args) != len(params):
+            self._err("TYPE005", f"{module}.{method} expects {len(params)} argument(s)", call.span)
+        for arg, expected in zip(call.args, params, strict=False):
+            self._expect(expected, self._check_expr(arg), arg.span, "argument")
+        for extra in call.args[len(params) :]:
+            self._check_expr(extra)
+        self._require_effects({effect}, call.span)
+        return ret
+
+    def _require_effects(self, effects: set[str], span: Span) -> None:
+        site = "test" if self.in_test else "function"
+        for eff in sorted(effects):
+            if eff not in self.declared_effects:
+                self._err(
+                    "EFFECT001",
+                    f"this call requires effect {eff!r}, which the {site} does not declare",
+                    span,
+                    help=f"add {eff} to its `uses {{ ... }}`",
+                )
 
     def _check_args(self, name: str, fn_ty: FnType, call: ast.CallExpr) -> None:
         if len(call.args) != len(fn_ty.params):
