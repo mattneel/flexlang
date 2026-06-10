@@ -71,6 +71,29 @@ flx run   examples/hello.flx
 flx emit-mlir examples/add.flx
 ```
 
+## Syntax highlighting
+
+Flex ships a [Pygments](https://pygments.org) lexer, so `.flx` renders nicely
+in the terminal and in docs:
+
+```sh
+flx highlight examples/add.flx                 # auto-detects truecolor/256
+flx highlight examples/add.flx --style github-dark
+flx highlight examples/add.flx --format html > add.html
+```
+
+The lexer is registered as a Pygments plugin (alias `flex`), so any
+Pygments-aware tool works too:
+
+```sh
+pygmentize -l flex examples/add.flx
+pygmentize examples/add.flx            # picks Flex by the .flx extension
+```
+
+> Note: Pygments' built-in **Felix** lexer also claims `*.flx`; the Flex lexer
+> sets a higher priority so extension-based lookup resolves to Flex. Use the
+> `flex` alias (not `flx`) for unambiguous explicit selection.
+
 ## Layout
 
 ```

@@ -10,8 +10,10 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from flx import __version__
+from flx.highlight import DEFAULT_STYLE, FORMATS
 
 # Single-file commands: each takes a path to a `.flx` source file.
 _FILE_COMMANDS: dict[str, str] = {
@@ -52,7 +54,38 @@ def _build_parser() -> argparse.ArgumentParser:
         help="test output format",
     )
 
+    hl = sub.add_parser("highlight", help="Syntax-highlight a .flx file")
+    hl.add_argument("path", help="path to a .flx source file")
+    hl.add_argument(
+        "--format",
+        dest="format",
+        choices=list(FORMATS),
+        default="auto",
+        help="output format (default: auto-detect the terminal)",
+    )
+    hl.add_argument(
+        "--style",
+        default=DEFAULT_STYLE,
+        help=f"Pygments style name (default: {DEFAULT_STYLE})",
+    )
+
     return parser
+
+
+def _run_highlight(path: str, fmt: str, style: str) -> int:
+    try:
+        source = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"flx highlight: {exc}", file=sys.stderr)
+        return 1
+
+    from flx.highlight import render
+
+    rendered = render(source, fmt=fmt, style=style, tty=sys.stdout.isatty())
+    sys.stdout.write(rendered)
+    if not rendered.endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -62,6 +95,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 0
+
+    if args.command == "highlight":
+        return _run_highlight(args.path, args.format, args.style)
 
     print(f"flx {args.command}: not yet implemented", file=sys.stderr)
     return 2
