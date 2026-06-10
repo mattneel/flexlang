@@ -32,14 +32,19 @@ def _dump_item(item: ast.Item, depth: int, out: list[str]) -> None:
     elif isinstance(item, ast.RecordDecl):
         params = f"<{', '.join(item.type_params)}>" if item.type_params else ""
         fields = ", ".join(f"{f.name}: {_type(f.type)}" for f in item.fields)
-        out.append(f"{_indent(depth)}Record {item.name}{params} {{{fields}}}")
+        derives = f" derive({', '.join(item.derives)})" if item.derives else ""
+        out.append(f"{_indent(depth)}Record {item.name}{params} {{{fields}}}{derives}")
     elif isinstance(item, ast.AdtDecl):
         params = f"<{', '.join(item.type_params)}>" if item.type_params else ""
         variants = " | ".join(
             v.name + (f"({', '.join(_type(t) for t in v.payload)})" if v.payload else "")
             for v in item.variants
         )
-        out.append(f"{_indent(depth)}Adt {item.name}{params} = {variants}")
+        derives = f" derive({', '.join(item.derives)})" if item.derives else ""
+        out.append(f"{_indent(depth)}Adt {item.name}{params} = {variants}{derives}")
+    elif isinstance(item, ast.MacroDecl):
+        params = ", ".join(item.params)
+        out.append(f"{_indent(depth)}Macro {item.name}({params}) = {_expr(item.body)}")
 
 
 def _type(t: ast.TypeExpr) -> str:
@@ -104,7 +109,18 @@ def _expr(expr: ast.Expr) -> str:
     if isinstance(expr, ast.MatchExpr):
         arms = " ".join(f"{_pattern(a.pattern)} => {_expr(a.body)}" for a in expr.arms)
         return f"match {_expr(expr.scrutinee)} {{ {arms} }}"
+    if isinstance(expr, ast.ComptimeExpr):
+        return f"comptime {{ {_block_value(expr.body)} }}"
+    if isinstance(expr, ast.QuoteExpr):
+        return f"quote {{ {_block_value(expr.body)} }}"
+    if isinstance(expr, ast.UnquoteExpr):
+        return f"unquote({_expr(expr.expr)})"
     return "<expr>"
+
+
+def _block_value(block: ast.Block) -> str:
+    tail = block.tail
+    return _expr(tail) if tail is not None else "..."
 
 
 def _pattern(pat: ast.Pattern) -> str:

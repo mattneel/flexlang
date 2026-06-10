@@ -131,11 +131,16 @@ class Parser:
             elif self._at(TokenKind.KW_TEST):
                 items.append(self._test())
             elif self._at(TokenKind.KW_TYPE):
-                items.append(self._type_decl())
+                items.append(self._type_decl([]))
+            elif self._at(TokenKind.KW_DERIVE):
+                items.append(self._type_decl(self._derive_list()))
+            elif self._at(TokenKind.KW_MACRO):
+                items.append(self._macro())
             else:
                 tok = self._peek()
                 raise self._error(
-                    f"expected a function, test, or type, found {self._describe(tok)}", tok.span
+                    f"expected a function, test, type, or macro, found {self._describe(tok)}",
+                    tok.span,
                 )
         end = self._peek().span
         return ast.Module(name, imports, items, start.to(end))
@@ -203,14 +208,37 @@ class Parser:
         body = self._block()
         return ast.TestDecl(name, effects, body, start.to(body.span))
 
-    def _type_decl(self) -> ast.Item:
+    def _derive_list(self) -> list[str]:
+        self._advance()  # `derive`
+        self._expect(TokenKind.LPAREN, "'('")
+        traits = [self._expect(TokenKind.IDENT, "a trait name").text]
+        while self._eat(TokenKind.COMMA):
+            traits.append(self._expect(TokenKind.IDENT, "a trait name").text)
+        self._expect(TokenKind.RPAREN, "')'")
+        return traits
+
+    def _type_decl(self, derives: list[str]) -> ast.Item:
         start = self._advance().span  # `type`
         name = self._expect(TokenKind.IDENT, "a type name").text
         type_params = self._opt_type_params()
         self._expect(TokenKind.EQ, "'='")
         if self._at(TokenKind.LBRACE):
-            return self._record_decl(start, name, type_params)
-        return self._adt_decl(start, name, type_params)
+            return self._record_decl(start, name, type_params, derives)
+        return self._adt_decl(start, name, type_params, derives)
+
+    def _macro(self) -> ast.MacroDecl:
+        start = self._advance().span  # `macro`
+        name = self._expect(TokenKind.IDENT, "a macro name").text
+        self._expect(TokenKind.LPAREN, "'('")
+        params: list[str] = []
+        if not self._at(TokenKind.RPAREN):
+            params.append(self._expect(TokenKind.IDENT, "a macro parameter").text)
+            while self._eat(TokenKind.COMMA):
+                params.append(self._expect(TokenKind.IDENT, "a macro parameter").text)
+        self._expect(TokenKind.RPAREN, "')'")
+        self._expect(TokenKind.EQ, "'='")
+        body = self._expr()
+        return ast.MacroDecl(name, params, body, start.to(body.span))
 
     def _opt_type_params(self) -> list[str]:
         params: list[str] = []
@@ -221,7 +249,9 @@ class Parser:
             self._expect(TokenKind.GT, "'>'")
         return params
 
-    def _record_decl(self, start: Span, name: str, type_params: list[str]) -> ast.RecordDecl:
+    def _record_decl(
+        self, start: Span, name: str, type_params: list[str], derives: list[str]
+    ) -> ast.RecordDecl:
         self._expect(TokenKind.LBRACE, "'{'")
         fields: list[ast.RecordField] = []
         while not self._at(TokenKind.RBRACE) and not self._at(TokenKind.EOF):
@@ -231,16 +261,18 @@ class Parser:
             fields.append(ast.RecordField(fname.text, ftype, fname.span))
             self._eat(TokenKind.COMMA)
         end = self._expect(TokenKind.RBRACE, "'}'").span
-        return ast.RecordDecl(name, type_params, fields, start.to(end))
+        return ast.RecordDecl(name, type_params, fields, start.to(end), derives)
 
-    def _adt_decl(self, start: Span, name: str, type_params: list[str]) -> ast.AdtDecl:
+    def _adt_decl(
+        self, start: Span, name: str, type_params: list[str], derives: list[str]
+    ) -> ast.AdtDecl:
         variants: list[ast.Variant] = []
         self._eat(TokenKind.PIPE)  # optional leading `|`
         variants.append(self._variant())
         while self._eat(TokenKind.PIPE):
             variants.append(self._variant())
         end = variants[-1].span
-        return ast.AdtDecl(name, type_params, variants, start.to(end))
+        return ast.AdtDecl(name, type_params, variants, start.to(end), derives)
 
     def _variant(self) -> ast.Variant:
         name_tok = self._expect(TokenKind.IDENT, "a variant name")
@@ -413,6 +445,20 @@ class Parser:
             return self._match()
         if tok.kind is TokenKind.KW_REGION:
             return self._region()
+        if tok.kind is TokenKind.KW_COMPTIME:
+            start = self._advance().span
+            body = self._block()
+            return ast.ComptimeExpr(body, start.to(body.span))
+        if tok.kind is TokenKind.KW_QUOTE:
+            start = self._advance().span
+            body = self._block()
+            return ast.QuoteExpr(body, start.to(body.span))
+        if tok.kind is TokenKind.KW_UNQUOTE:
+            start = self._advance().span
+            self._expect(TokenKind.LPAREN, "'('")
+            inner = self._expr()
+            end = self._expect(TokenKind.RPAREN, "')'").span
+            return ast.UnquoteExpr(inner, start.to(end))
         if tok.kind is TokenKind.LBRACE:
             return self._record_expr()
         raise self._error(f"expected an expression, found {self._describe(tok)}", tok.span)

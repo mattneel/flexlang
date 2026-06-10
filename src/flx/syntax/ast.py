@@ -126,6 +126,30 @@ class TryExpr(Expr):
     span: Span
 
 
+@dataclass(frozen=True)
+class ComptimeExpr(Expr):
+    """`comptime { ... }` — evaluated at compile time, folded to a literal."""
+
+    body: Block
+    span: Span
+
+
+@dataclass(frozen=True)
+class QuoteExpr(Expr):
+    """`quote { ... }` — a templated AST value (used in macro bodies)."""
+
+    body: Block
+    span: Span
+
+
+@dataclass(frozen=True)
+class UnquoteExpr(Expr):
+    """`unquote(e)` — splice the AST value of `e` into a surrounding quote."""
+
+    expr: Expr
+    span: Span
+
+
 # --- patterns -----------------------------------------------------------------
 
 
@@ -276,6 +300,7 @@ class RecordDecl(Item):
     type_params: list[str]
     fields: list[RecordField]
     span: Span
+    derives: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -290,6 +315,15 @@ class AdtDecl(Item):
     name: str
     type_params: list[str]
     variants: list[Variant]
+    span: Span
+    derives: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class MacroDecl(Item):
+    name: str
+    params: list[str]
+    body: Expr
     span: Span
 
 
@@ -315,3 +349,7 @@ class Module:
     @property
     def adts(self) -> list[AdtDecl]:
         return [it for it in self.items if isinstance(it, AdtDecl)]
+
+    @property
+    def macros(self) -> list[MacroDecl]:
+        return [it for it in self.items if isinstance(it, MacroDecl)]

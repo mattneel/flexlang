@@ -32,6 +32,11 @@ class TokenKind(Enum):
     KW_MATCH = auto()
     KW_REGION = auto()
     KW_WITH = auto()
+    KW_COMPTIME = auto()
+    KW_QUOTE = auto()
+    KW_UNQUOTE = auto()
+    KW_MACRO = auto()
+    KW_DERIVE = auto()
 
     # delimiters
     LPAREN = auto()
@@ -88,6 +93,11 @@ KEYWORDS: dict[str, TokenKind] = {
     "match": TokenKind.KW_MATCH,
     "region": TokenKind.KW_REGION,
     "with": TokenKind.KW_WITH,
+    "comptime": TokenKind.KW_COMPTIME,
+    "quote": TokenKind.KW_QUOTE,
+    "unquote": TokenKind.KW_UNQUOTE,
+    "macro": TokenKind.KW_MACRO,
+    "derive": TokenKind.KW_DERIVE,
 }
 
 
