@@ -667,6 +667,12 @@ class FunctionLowerer:
         if not isinstance(expr.callee, ast.NameExpr):
             raise BackendError("only direct function calls are supported")
         name = expr.callee.name
+        # Bounded-generic call -> direct call to the monomorphized specialization.
+        symbol = self.method_targets.get(id(expr))
+        if symbol is not None:
+            spec_ty = self.functions[symbol]
+            args = [self.lower_expr(a) for a in expr.args]
+            return self._emit_call(f"flx_{symbol}", args, spec_ty)
         if name == "to_str":  # prelude: I64 -> String
             arg = self.lower_expr(expr.args[0])
             assert arg is not None

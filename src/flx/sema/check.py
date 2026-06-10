@@ -50,9 +50,24 @@ def _type_key(ty: Type) -> str:
     return "?"
 
 
+def _mono_key(ty: Type) -> str:
+    """Structural key for a monomorphization: distinguishes `Option<I64>` from
+    `Option<Bool>`, unlike the nominal `_type_key` used for impl lookup."""
+    if isinstance(ty, AdtType) and ty.type_args:
+        return ty.name + "".join("_" + _mono_key(a) for a in ty.type_args)
+    if isinstance(ty, (PrimType, RecordType, AdtType)):
+        return ty.name
+    return "?"
+
+
 def _mangle(trait: str, key: str, method: str) -> str:
     # `$` is illegal in source identifiers, so this can't collide with user code.
     return f"{trait}${key}${method}"
+
+
+def spec_symbol(name: str, key_tuple: tuple[str, ...]) -> str:
+    """Backend symbol for a monomorphized generic-function instantiation."""
+    return name + "$" + "$".join(key_tuple)
 
 
 # name -> (arity or None for variadic-ish, checker). Builtins are checked ad hoc.
@@ -89,7 +104,12 @@ class CheckResult:
     expr_types: dict[int, Type]
     functions: dict[str, FnType]
     constructors: set[str]
-    method_targets: dict[int, str]  # id(CallExpr) -> resolved impl symbol
+    method_targets: dict[int, str]  # id(CallExpr) -> resolved impl/spec symbol
+    # generic function templates (name -> decl) and the instantiations demanded
+    # by call sites. The monomorphizer turns these into concrete functions.
+    generic_fns: dict[str, ast.FnDecl] = field(default_factory=dict)
+    instantiations: set[tuple[str, tuple[str, ...]]] = field(default_factory=set)
+    inst_subst: dict[tuple[str, tuple[str, ...]], dict[str, Type]] = field(default_factory=dict)
 
 
 @dataclass
@@ -135,6 +155,11 @@ class Checker:
         self.method_targets: dict[int, str] = {}  # id(CallExpr) -> impl symbol
         self._impl_fns: list[ast.FnDecl] = []  # renamed impl methods, emitted as functions
         self._self_type: Type | None = None
+        # bounded generics: templates kept out of `functions`; instantiations
+        # demanded by call sites and the substitution that produced each one.
+        self.generic_fns: dict[str, ast.FnDecl] = {}
+        self.instantiations: set[tuple[str, tuple[str, ...]]] = set()
+        self.inst_subst: dict[tuple[str, tuple[str, ...]], dict[str, Type]] = {}
 
     # --- entry ----------------------------------------------------------------
 
@@ -165,8 +190,13 @@ class Checker:
         self._register_traits()
 
         for fn in self.module.functions:
-            if fn.name in self.functions:
+            if fn.name in self.functions or fn.name in self.generic_fns:
                 self._err("TYPE002", f"function {fn.name!r} is already defined", fn.span)
+            if fn.type_params:
+                # A template: type params are unresolved here. Its concrete
+                # instantiations are checked (and registered) by the monomorphizer.
+                self._register_generic_fn(fn)
+                continue
             params = tuple(self._resolve_type(p.type) for p in fn.params)
             ret = self._resolve_type(fn.return_type) if fn.return_type else UNIT
             self.functions[fn.name] = FnType(params, ret)
@@ -175,6 +205,8 @@ class Checker:
         self._register_impls()
 
         for fn in self.module.functions:
+            if fn.name in self.generic_fns:
+                continue
             self._check_fn(fn)
         for impl_fn in self._impl_fns:
             self._check_fn(impl_fn)
@@ -183,11 +215,21 @@ class Checker:
 
         if self.diags:
             raise FlexError(self.diags)
-        # Emit impl methods as ordinary (mangled) functions for the backend.
-        items = [*self.module.items, *self._impl_fns]
-        module = replace(self.module, items=items)
+        # Emit impl methods as ordinary (mangled) functions for the backend, and
+        # drop generic templates (the monomorphizer emits concrete copies instead).
+        kept = [
+            it for it in self.module.items if not (isinstance(it, ast.FnDecl) and it.type_params)
+        ]
+        module = replace(self.module, items=[*kept, *self._impl_fns])
         return CheckResult(
-            module, self.expr_types, self.functions, set(self.ctors), self.method_targets
+            module,
+            self.expr_types,
+            self.functions,
+            set(self.ctors),
+            self.method_targets,
+            generic_fns=self.generic_fns,
+            instantiations=self.instantiations,
+            inst_subst=self.inst_subst,
         )
 
     # --- traits / impls -------------------------------------------------------
@@ -308,6 +350,71 @@ class Checker:
         self._require_effects(self.fn_effects.get(symbol, set()), call.span)
         self.method_targets[id(call)] = symbol
         return fn_ty.ret
+
+    # --- bounded generics -----------------------------------------------------
+
+    def _register_generic_fn(self, fn: ast.FnDecl) -> None:
+        seen: set[str] = set()
+        for tp in fn.type_params:
+            if tp.name in seen:
+                self._err("TYPE002", f"duplicate type parameter {tp.name!r}", tp.span)
+            seen.add(tp.name)
+            for bound in tp.bounds:
+                if bound not in self.traits:
+                    self._err("BOUND004", f"unknown trait {bound!r} in bound", tp.span)
+        self.generic_fns[fn.name] = fn
+
+    def _infer_generic_call(self, name: str, call: ast.CallExpr, expected: Type | None) -> Type:
+        template = self.generic_fns[name]
+        tp_names = {tp.name for tp in template.type_params}
+        arg_types = [self._check_expr(a) for a in call.args]
+        if len(call.args) != len(template.params):
+            self._err(
+                "TYPE005",
+                f"{name!r} expects {len(template.params)} argument(s), got {len(call.args)}",
+                call.span,
+            )
+            return ERROR
+        # Solve the substitution positionally: a parameter written exactly as a
+        # type-parameter name binds it to that argument's type.
+        subst: dict[str, Type] = {}
+        for param, at in zip(template.params, arg_types, strict=True):
+            if param.type.name in tp_names and not param.type.args and at is not ERROR:
+                subst.setdefault(param.type.name, at)
+        for tp in template.type_params:
+            if tp.name not in subst:
+                self._err(
+                    "BOUND003",
+                    f"cannot infer type parameter {tp.name!r} of {name!r} from its arguments",
+                    call.span,
+                )
+                return ERROR
+        # Check declared bounds against the chosen concrete types.
+        for tp in template.type_params:
+            concrete = subst[tp.name]
+            for bound in tp.bounds:
+                if (bound, _type_key(concrete)) not in self.impls:
+                    self._err(
+                        "BOUND001",
+                        f"{concrete} does not satisfy bound {bound!r} required by {name!r}",
+                        call.span,
+                    )
+        # Re-check the arguments against the substituted parameter types.
+        saved = self._subst
+        self._subst = {**saved, **subst}
+        try:
+            for param, at, arg in zip(template.params, arg_types, call.args, strict=True):
+                self._expect(self._resolve_type(param.type), at, arg.span, "argument")
+            ret = self._resolve_type(template.return_type) if template.return_type else UNIT
+        finally:
+            self._subst = saved
+        self._require_effects(set(template.effects), call.span)
+        key_tuple = tuple(_mono_key(subst[tp.name]) for tp in template.type_params)
+        inst = (name, key_tuple)
+        self.instantiations.add(inst)
+        self.inst_subst[inst] = subst
+        self.method_targets[id(call)] = spec_symbol(name, key_tuple)
+        return ret
 
     # --- declarations ---------------------------------------------------------
 
@@ -581,6 +688,8 @@ class Checker:
                 return STRING
             if callee.name in self.ctors:  # constructor call, e.g. Ok(x)
                 return self._infer_ctor(callee.name, expr.args, expected, expr.span)
+            if callee.name in self.generic_fns:  # bounded generic, monomorphized
+                return self._infer_generic_call(callee.name, expr, expected)
             if callee.name in self.functions:
                 fn_ty = self.functions[callee.name]
                 self._check_args(callee.name, fn_ty, expr)

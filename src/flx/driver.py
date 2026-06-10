@@ -15,7 +15,8 @@ from flx.backend.runtime import BASE_RUNTIME_C
 from flx.backend.toolchain import build_executable, run_executable
 from flx.diagnostics import Diagnostic, FlexError
 from flx.macro import expand
-from flx.sema.check import CheckResult, check
+from flx.sema.check import CheckResult
+from flx.sema.specialize import check_and_monomorphize
 from flx.syntax.dump import dump_module
 from flx.syntax.parser import parse
 from flx.types import I64, UNIT, Type
@@ -55,7 +56,7 @@ def _parse_and_check(path: str, source: str) -> CheckResult | FlexError:
     try:
         module = parse(source, path)
         module = expand(module)
-        return check(module)
+        return check_and_monomorphize(module)
     except FlexError as err:
         return err
     except RecursionError:
