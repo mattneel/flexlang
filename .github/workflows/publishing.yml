@@ -9,7 +9,7 @@ name: Publish to PyPI
 # One-time setup on PyPI (https://pypi.org/manage/account/publishing/):
 #   Add a "pending" trusted publisher for project `flexlang`:
 #     owner = mattneel, repository = flexlang,
-#     workflow = publish.yml, environment = pypi
+#     workflow = publishing.yml, environment = pypi
 #   (and the same on test.pypi.org with environment = testpypi for dry runs).
 
 on:
