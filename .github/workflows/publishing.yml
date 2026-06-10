@@ -4,13 +4,13 @@ name: Publish to PyPI
 # (the command it installs is still `flx`; the PyPI name is `flexlang` because
 # `flx` is too close to an existing project). Uses PyPI Trusted Publishing (OIDC)
 # — no API token is stored in the repo; PyPI verifies this workflow's identity
-# directly. `workflow_dispatch` builds and uploads to TestPyPI for a dry run.
+# directly. `workflow_dispatch` is a dry run: it builds and `twine check`s the
+# artifacts WITHOUT uploading anywhere (no TestPyPI account required).
 #
 # One-time setup on PyPI (https://pypi.org/manage/account/publishing/):
 #   Add a "pending" trusted publisher for project `flexlang`:
 #     owner = mattneel, repository = flexlang,
 #     workflow = publishing.yml, environment = pypi
-#   (and the same on test.pypi.org with environment = testpypi for dry runs).
 
 on:
   release:
@@ -61,25 +61,3 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-
-  testpypi:
-    name: Publish to TestPyPI (dry run)
-    needs: build
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/project/flexlang/
-    permissions:
-      id-token: write
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-      - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
