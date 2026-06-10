@@ -34,6 +34,9 @@ jobs:
       - name: mypy
         run: uv run mypy
 
+      - name: Install LLVM/MLIR 22 (for native codegen tests)
+        run: bash scripts/install-llvm.sh
+
       - name: pytest
         run: uv run pytest
 
