@@ -23,7 +23,8 @@ def test_no_command_prints_help() -> None:
 
 
 def test_stub_command_returns_nonzero() -> None:
-    assert main(["check", "examples/add.flx"]) == 2
+    # `emit-hir` is still a scaffolded stub (HIR is not implemented yet).
+    assert main(["emit-hir", "examples/add.flx"]) == 2
 
 
 def test_module_entrypoint() -> None:

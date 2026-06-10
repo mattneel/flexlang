@@ -99,6 +99,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "highlight":
         return _run_highlight(args.path, args.format, args.style)
 
+    from flx import driver
+
+    if args.command == "parse":
+        return driver.cmd_parse(args.path)
+    if args.command == "check":
+        return driver.cmd_check(args.path)
+    if args.command == "emit-mlir":
+        return driver.cmd_emit_mlir(args.path)
+    if args.command == "run":
+        return driver.cmd_run(args.path)
+    if args.command == "test":
+        if args.path is None:
+            print(
+                "flx test: a .flx file is required (directory discovery is not yet supported)",
+                file=sys.stderr,
+            )
+            return 2
+        return driver.cmd_test(args.path, args.filter)
+
     print(f"flx {args.command}: not yet implemented", file=sys.stderr)
     return 2
 

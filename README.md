@@ -60,16 +60,33 @@ flx --version
 | `mise run typecheck` | `mypy`                             |
 | `mise run check`   | lint + typecheck + test              |
 
-The `flx` CLI surface (see `docs/MVP.md` §18) is scaffolded; subcommands are
-implemented incrementally:
+The MVP compiler is **working end-to-end** — it lexes, parses, type-checks,
+emits MLIR, lowers through LLVM 22, and produces native binaries:
 
 ```sh
-flx parse examples/add.flx
-flx check examples/add.flx
-flx test  examples/add.flx
-flx run   examples/hello.flx
-flx emit-mlir examples/add.flx
+flx parse     examples/add.flx     # AST
+flx check     examples/add.flx     # type + name checking
+flx emit-mlir examples/add.flx     # textual MLIR (func/arith/cf/memref)
+flx run       examples/add.flx     # compile to native and run (exit code 42)
+flx test      examples/add.flx     # compile + run first-class tests
 ```
+
+```console
+$ flx test examples/add.flx
+running 1 test
+
+ok Main / add works
+
+1 passed, 0 failed
+```
+
+Implemented: integer/bool literals, functions, `let`/`mut`, arithmetic,
+comparisons, boolean ops, `if`/`else`, `while`, calls, the pipe operator, and
+first-class `test` blocks with `assert`/`assert_eq`/`assert_ne`/`fail`. Effects,
+regions, ADTs/`match`, records, `Result`/`?`, and generics are parsed where
+relevant but not yet lowered (see `docs/MVP.md` §3 for the roadmap). The
+remaining `flx` subcommands (`build`, `emit-hir`, `emit-mir`, `expand`,
+`explain-*`) are still scaffolded stubs.
 
 ## Syntax highlighting
 
