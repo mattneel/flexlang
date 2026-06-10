@@ -275,6 +275,7 @@ class Checker:
         return ERROR
 
     def _infer_record(self, expr: ast.RecordExpr) -> Type:
+        self._check_duplicate_fields(expr.fields)
         names = {f.name for f in expr.fields}
         matches = [rt for rt in self.record_types.values() if {n for n, _ in rt.fields} == names]
         if len(matches) != 1:
@@ -291,7 +292,15 @@ class Checker:
             )
         return rt
 
+    def _check_duplicate_fields(self, fields: list[ast.FieldInit]) -> None:
+        seen: set[str] = set()
+        for f in fields:
+            if f.name in seen:
+                self._err("TYPE020", f"duplicate field {f.name!r} in record literal", f.span)
+            seen.add(f.name)
+
     def _infer_record_update(self, expr: ast.RecordUpdateExpr) -> Type:
+        self._check_duplicate_fields(expr.fields)
         base_ty = self._check_expr(expr.base)
         if not isinstance(base_ty, RecordType):
             if base_ty is not ERROR:
@@ -335,6 +344,9 @@ class Checker:
         self.scope.define(expr.name, _Binding(REGION, mutable=False))
         ty = self._check_block(expr.body)
         self.scope.pop()
+        if ty is REGION:
+            self._err("REGION001", "a region cannot yield a region capability", expr.span)
+            return ERROR
         return ty
 
     def _infer_name(self, expr: ast.NameExpr, expected: Type | None) -> Type:
@@ -374,10 +386,10 @@ class Checker:
             return BOOL
         if op in _EQUALITY:
             if not _same(left, right):
+                self._err("TYPE003", f"cannot compare {left} with {right}", expr.span)
+            elif not _is_comparable(left):
                 self._err(
-                    "TYPE003",
-                    f"cannot compare {left} with {right}",
-                    expr.span,
+                    "TYPE019", f"`{op}` is not supported for {left} (contains a String)", expr.span
                 )
             return BOOL
         return ERROR
@@ -394,12 +406,12 @@ class Checker:
                 self._check_args(callee.name, fn_ty, expr)
                 self._require_effects(self.fn_effects.get(callee.name, set()), expr.span)
                 return fn_ty.ret
-        if (
-            isinstance(callee, ast.MemberExpr)
-            and isinstance(callee.obj, ast.NameExpr)
-            and callee.obj.name in _EFFECT_MODULES
-        ):
-            return self._infer_intrinsic(callee.obj.name, callee.name, expr)
+        if isinstance(callee, ast.MemberExpr) and isinstance(callee.obj, ast.NameExpr):
+            if callee.obj.name in _EFFECT_MODULES:
+                return self._infer_intrinsic(callee.obj.name, callee.name, expr)
+            if callee.obj.name in self.adt_templates and callee.name in self.ctors:
+                # Qualified constructor with payload, e.g. E.Code(x).
+                return self._infer_ctor(callee.name, expr.args, expected, expr.span)
         callee_ty = self._check_expr(callee)
         if isinstance(callee_ty, FnType):
             self._check_args("call", callee_ty, expr)
@@ -544,6 +556,8 @@ class Checker:
                     "MATCH003", f"{pattern.name!r} is not a variant of {scrut_ty}", pattern.span
                 )
                 return False
+            if pattern.name in covered:
+                self._err("MATCH002", f"duplicate match arm for {pattern.name!r}", pattern.span)
             covered.add(pattern.name)
             if len(pattern.args) != len(variant.payload):
                 self._err(
@@ -558,8 +572,15 @@ class Checker:
     def _bind_subpattern(self, pattern: ast.Pattern, ty: Type) -> None:
         if isinstance(pattern, ast.BindPattern):
             self.scope.define(pattern.name, _Binding(ty, mutable=False))
-        elif isinstance(pattern, ast.CtorPattern) and isinstance(ty, AdtType):
-            self._bind_pattern(pattern, ty, {v.name: v for v in ty.variants}, set())
+        elif isinstance(pattern, ast.CtorPattern):
+            # Nested constructor patterns aren't lowered yet (the backend keys
+            # cf.switch on the outer tag only), so reject rather than mis-compile.
+            self._err(
+                "MATCH004",
+                "nested constructor patterns are not supported yet; "
+                "bind the payload and match it separately",
+                pattern.span,
+            )
 
     def _check_args(self, name: str, fn_ty: FnType, call: ast.CallExpr) -> None:
         if len(call.args) != len(fn_ty.params):
@@ -599,6 +620,10 @@ class Checker:
                 b = self._check_expr(call.args[1], a)
                 if not _same(a, b):
                     self._err("TYPE003", f"cannot compare {a} with {b}", call.span)
+                elif not _is_comparable(a):
+                    self._err(
+                        "TYPE019", f"{name} is not supported for {a} (contains a String)", call.span
+                    )
         elif name in ("fail", "panic"):
             for arg in call.args:
                 self._check_expr(arg)
@@ -669,6 +694,17 @@ class Checker:
 
 def _same(a: Type, b: Type) -> bool:
     return a is ERROR or b is ERROR or a == b
+
+
+def _is_comparable(ty: Type) -> bool:
+    """Whether `==`/`!=`/assert_eq can be lowered for this type (no strings yet)."""
+    if ty is STRING:
+        return False
+    if isinstance(ty, RecordType):
+        return all(_is_comparable(t) for _, t in ty.fields)
+    if isinstance(ty, AdtType):
+        return all(_is_comparable(t) for v in ty.variants for t in v.payload)
+    return True
 
 
 def _diverges(block: ast.Block) -> bool:

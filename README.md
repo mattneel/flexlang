@@ -80,13 +80,22 @@ ok Main / add works
 1 passed, 0 failed
 ```
 
-Implemented: integer/bool literals, functions, `let`/`mut`, arithmetic,
-comparisons, boolean ops, `if`/`else`, `while`, calls, the pipe operator, and
-first-class `test` blocks with `assert`/`assert_eq`/`assert_ne`/`fail`. Effects,
-regions, ADTs/`match`, records, `Result`/`?`, and generics are parsed where
-relevant but not yet lowered (see `docs/MVP.md` §3 for the roadmap). The
-remaining `flx` subcommands (`build`, `emit-hir`, `emit-mir`, `expand`,
-`explain-*`) are still scaffolded stubs.
+The full §3.1 MVP feature set is implemented and lowers to native code:
+
+- integer/bool literals, `let`/`mut`, arithmetic, comparisons, short-circuit
+  boolean ops, `if`/`else`, `while`, functions, calls, and the pipe operator;
+- **records** (`type T = { … }`, construction, field access, `{ r with f = v }`);
+- **ADTs** + generic `Result<T,E>`/`Option<T>` (monomorphized), **`match`** with
+  exhaustiveness checking, and the **`?`** operator;
+- **effects** — `uses { … }` is checked across the call graph;
+- **regions** — `region name { … }` (shallow);
+- runtime-backed **string** literals (so `Log.info`/`fail` print);
+- first-class `test` blocks with `assert`/`assert_eq`/`assert_ne`/`fail`.
+
+See `examples/` for `add`, `result`, `records`, `effects`, and `regions`.
+The remaining `flx` subcommands (`build`, `emit-hir`, `emit-mir`, `expand`,
+`explain-*`) are still scaffolded stubs; macros/comptime, the borrow checker,
+and a standard library remain future work (`docs/MVP.md` §3.2).
 
 ## Syntax highlighting
 

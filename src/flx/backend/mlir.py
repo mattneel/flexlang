@@ -569,6 +569,16 @@ class FunctionLowerer:
             return self._lower_short_circuit(expr)
         left = self.lower_expr(expr.left)
         right = self.lower_expr(expr.right)
+        assert left is not None and right is not None
+        if op in ("==", "!="):
+            # Structural equality (works for scalars, records, and ADTs).
+            equal = self._emit_equal(left, right, self._ty_of(expr.left))
+            if op == "==":
+                return equal
+            one = self._const("1", "i1")
+            out = self._fresh()
+            self._emit(f"{out} = arith.xori {equal}, {one} : i1")
+            return out
         out = self._fresh()
         if op in _ARITH_OP:
             self._emit(f"{out} = arith.{_ARITH_OP[op]} {left}, {right} : i64")
@@ -614,6 +624,11 @@ class FunctionLowerer:
         # Effectful intrinsics (validated by the checker). Log.* prints its
         # message; other intrinsics are MVP no-ops at runtime.
         if isinstance(expr.callee, ast.MemberExpr):
+            # Qualified constructor with payload, e.g. E.Code(x).
+            if expr.callee.name in self.constructors:
+                adt = self._ty_of(expr)
+                assert isinstance(adt, AdtType)
+                return self._lower_ctor(adt, expr.callee.name, expr.args)
             obj = expr.callee.obj
             if isinstance(obj, ast.NameExpr) and obj.name == "Log" and expr.args:
                 value = self.lower_expr(expr.args[0])
