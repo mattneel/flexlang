@@ -636,17 +636,22 @@ class Parser:
         end = self._expect(TokenKind.RPAREN, "')'").span
         return ast.CallExpr(callee, args, callee.span.to(end))
 
+    def _int_value(self, tok: Token) -> int:
+        """The value of an INT token. Hex/binary literals are BIT PATTERNS:
+        values >= 2^63 reinterpret as signed I64 (0xFFFFFFFFFFFFFFFF is -1)."""
+        value = int(tok.text, 0)  # handles 0x/0b prefixes
+        if tok.text[:2].lower() in ("0x", "0b"):
+            if value >= 1 << 64:
+                raise self._error(f"literal {tok.text} does not fit in 64 bits", tok.span)
+            if value >= 1 << 63:
+                value -= 1 << 64
+        return value
+
     def _prefix(self) -> ast.Expr:
         tok = self._peek()
         if tok.kind is TokenKind.INT:
             self._advance()
-            value = int(tok.text, 0)  # handles 0x/0b prefixes
-            if tok.text[:2].lower() in ("0x", "0b"):
-                if value >= 1 << 64:
-                    raise self._error(f"literal {tok.text} does not fit in 64 bits", tok.span)
-                if value >= 1 << 63:
-                    value -= 1 << 64  # bit patterns reinterpret as signed I64
-            return ast.IntLit(value, tok.span)
+            return ast.IntLit(self._int_value(tok), tok.span)
         if tok.kind is TokenKind.FLOAT:
             self._advance()
             return ast.FloatLit(float(tok.text), tok.span)
@@ -774,11 +779,14 @@ class Parser:
             )
         if tok.kind is TokenKind.INT:
             self._advance()
-            return ast.LiteralPattern(int(tok.text), tok.span)
+            return ast.LiteralPattern(self._int_value(tok), tok.span)
         if tok.kind is TokenKind.MINUS and self._peek_at(1).kind is TokenKind.INT:
             self._advance()
             num = self._advance()
-            return ast.LiteralPattern(-int(num.text), tok.span.to(num.span))
+            value = -self._int_value(num)
+            if value == 1 << 63:
+                value = -(1 << 63)  # negating a wrapped 0x8000... wraps back
+            return ast.LiteralPattern(value, tok.span.to(num.span))
         if tok.kind in (TokenKind.KW_TRUE, TokenKind.KW_FALSE):
             self._advance()
             return ast.LiteralPattern(tok.kind is TokenKind.KW_TRUE, tok.span)

@@ -69,12 +69,15 @@ def _float_binary(op: str, a: float, b: float) -> object:
 
 
 def _f64_str(x: float) -> str:
-    """Shortest %g string that round-trips, via the same try-15/16/17 loop the
-    native runtime runs — Python's %-formatting IS C printf, so the two
-    backends produce identical text by construction."""
-    for precision in (15, 16, 17):
+    """Shortest %g string that round-trips, via the same 1..17 precision loop
+    the native runtime runs — Python's %-formatting IS C printf, so the two
+    backends produce identical text by construction. NaN is canonicalized
+    ("nan", never "-nan": x86 sign-set NaNs would print signed under glibc)."""
+    if x != x:
+        return "nan"
+    for precision in range(1, 18):
         s = "%.*g" % (precision, x)  # noqa: UP031 — C-printf parity is the point
-        if float(s) == x or x != x:  # NaN never compares equal; "%g" is "nan"
+        if float(s) == x:
             return s
     return s  # unreachable: 17 significant digits always round-trip
 
@@ -148,6 +151,22 @@ class _Env:
 
 _PROPAGATE = {"Err", "None"}  # `?` short-circuits on these builtin variants
 _UNWRAP = {"Ok", "Some"}
+
+
+def _struct_eq(a: object, b: object) -> bool:
+    """Structural equality with FLOAT-correct semantics. Python's container
+    equality identity-shortcuts its elements, so a record holding one NaN
+    object would compare equal to itself — the native field-wise cmpf says
+    NaN != NaN. Recurse explicitly and compare floats by value."""
+    if isinstance(a, float) or isinstance(b, float):
+        return isinstance(a, float) and isinstance(b, float) and a == b
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_struct_eq(v, b[k]) for k, v in a.items())
+    if isinstance(a, Variant) and isinstance(b, Variant):
+        return a.tag == b.tag and _struct_eq(a.payload, b.payload)
+    if isinstance(a, tuple) and isinstance(b, tuple):
+        return len(a) == len(b) and all(_struct_eq(x, y) for x, y in zip(a, b, strict=True))
+    return a == b
 
 
 def _fflush_libc() -> None:
@@ -447,9 +466,9 @@ class Interpreter:
         if op == "++":
             return f"{left}{right}"
         if op == "==":
-            return left == right
+            return _struct_eq(left, right)
         if op == "!=":
-            return left != right
+            return not _struct_eq(left, right)
         if isinstance(left, float) or isinstance(right, float):
             return _float_binary(op, float(left), float(right))  # type: ignore[arg-type]
         # The remaining operators are integer arithmetic/comparison/bitwise,
@@ -745,7 +764,7 @@ class Interpreter:
         if name in ("assert_eq", "assert_ne"):
             a = self.eval(expr.args[0], env)
             b = self.eval(expr.args[1], env)
-            equal = a == b
+            equal = _struct_eq(a, b)
             if name == "assert_eq" and not equal:
                 raise _TestFail(self._eq_reason("assert_eq", a, b))
             if name == "assert_ne" and equal:

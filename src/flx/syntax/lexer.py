@@ -137,11 +137,19 @@ class Lexer:
     def _number(self) -> Token:
         start = self._pos()
         digits: list[str] = []
+        saw_underscore = False
         while self.i < len(self.source) and (self._peek().isdigit() or self._peek() == "_"):
             ch = self._advance()
             if ch != "_":
                 digits.append(ch)
-        if digits == ["0"] and self.i < len(self.source) and self._peek() in ("x", "X", "b", "B"):
+            else:
+                saw_underscore = True
+        if (
+            digits == ["0"]
+            and not saw_underscore  # `0_x10` is not a prefix
+            and self.i < len(self.source)
+            and self._peek() in ("x", "X", "b", "B")
+        ):
             base = self._advance().lower()
             allowed = "0123456789abcdefABCDEF" if base == "x" else "01"
             body: list[str] = []

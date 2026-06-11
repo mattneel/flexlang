@@ -191,11 +191,17 @@ long long __flx_list_len(void *lp) {
     return ((FlxList *)lp)->len;
 }
 // Shortest %g representation that round-trips (the interpreter runs the same
-// 15/16/17 loop through Python's C-printf formatting, so the text matches).
+// loop through Python's C-printf formatting, so the text matches). NaN is
+// canonicalized first: x86 produces sign-set NaNs at runtime, which glibc
+// would print as "-nan" while Python never signs a NaN.
 void __flx_f64_fmt(char *buf, size_t cap, double x) {
-    for (int prec = 15; prec <= 17; prec++) {
+    if (x != x) {
+        snprintf(buf, cap, "nan");
+        return;
+    }
+    for (int prec = 1; prec <= 17; prec++) {
         snprintf(buf, cap, "%.*g", prec, x);
-        if (strtod(buf, NULL) == x || x != x) return;  // NaN: "%g" prints "nan"
+        if (strtod(buf, NULL) == x) return;
     }
 }
 void __flx_f64_to_str(double x, FlxStr *out) {

@@ -46,6 +46,13 @@ _INT_BINOPS: dict[str, Callable[[int, int], int]] = {
     "+": operator.add,
     "-": operator.sub,
     "*": operator.mul,
+    # Bitwise ops are pure I64 core operators; the same mask-the-count rule as
+    # the runtime backends (shifts by & 63, two's-complement wrapping).
+    "&": operator.and_,
+    "|": operator.or_,
+    "^": operator.xor,
+    "<<": lambda a, b: a << (b & 63),
+    ">>": lambda a, b: a >> (b & 63),
 }
 _CMP_BINOPS: dict[str, Callable[[Any, Any], bool]] = {
     "<": operator.lt,

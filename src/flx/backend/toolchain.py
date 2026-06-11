@@ -116,7 +116,8 @@ def build_executable(mlir_text: str, c_source: str, out_path: Path, workdir: Pat
 
     runtime = workdir / "runtime.c"
     runtime.write_text(c_source, encoding="utf-8")
-    _run([_tool("clang"), "-O1", str(ll), str(runtime), "-o", str(out_path)])
+    # -lm: Std.Math wraps libm, and F64 % lowers to an fmod libcall.
+    _run([_tool("clang"), "-O1", str(ll), str(runtime), "-o", str(out_path), "-lm"])
     return out_path
 
 

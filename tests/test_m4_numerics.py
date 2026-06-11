@@ -199,6 +199,16 @@ def test_oversized_hex_rejected() -> None:
     assert any("does not fit in 64 bits" in d.message for d in exc.value.diagnostics)
 
 
+def test_hex_literal_patterns(tmp_path: Path) -> None:
+    # `match n { 0x10 => ... }` ICEd: the pattern path parsed with int(),
+    # not int(text, 0). Hex bit patterns work in patterns like in expressions.
+    _both(
+        tmp_path,
+        "type O = | G(I64) | N\nfn main() -> I64 = { match G(16) { G(0x10) => 1  _ => 0 } }\n",
+        1,
+    )
+
+
 def test_nested_generics_close_with_shr(tmp_path: Path) -> None:
     # `Bad<Option<T>>` ends in what now lexes as `>>`; the parser splits it.
     src = (
@@ -294,3 +304,126 @@ def test_effectful_fn_type_syntax_rejected() -> None:
     with pytest.raises(FlexError) as exc:
         parse("fn run(f: (I64) -> I64 uses { Log }) -> I64 = { f(1) }")
     assert any("must be pure" in d.message for d in exc.value.diagnostics)
+
+
+# --- review findings -----------------------------------------------------------------
+
+
+def test_runtime_nan_prints_unsigned(tmp_path: Path, capfd) -> None:
+    # x86 produces SIGN-SET NaNs at runtime; glibc %g would print "-nan" while
+    # Python never signs one. Both backends canonicalize to "nan". The zero is
+    # runtime-derived so LLVM cannot constant-fold the NaN away.
+    _both(
+        tmp_path,
+        "module Main\nimport Std.IO\n"
+        "fn main() -> I64 uses { Process, Log } = {\n"
+        "  let zero = to_f64(List.len(Env.argv()))\n"
+        "  println(to_str(zero / zero))\n  0\n}\n",
+        0,
+        out="nan\n",
+        capfd=capfd,
+    )
+
+
+def test_libm_links_on_runtime_values(tmp_path: Path, capfd) -> None:
+    # The native link was missing -lm: sqrt/sin/fmod of non-constant operands
+    # failed at link time while the interpreter ran them.
+    _both(
+        tmp_path,
+        "module Main\nimport Std.IO\nimport Std.Math\n"
+        "fn main() -> I64 uses { Process, Log } = {\n"
+        "  let zero = to_f64(List.len(Env.argv()))\n"
+        "  println(to_str(sqrt(2.0 + zero)))\n"
+        "  println(to_str((7.5 + zero) % 2.0))\n"
+        "  println(to_str(sin(zero)))\n  0\n}\n",
+        0,
+        out="1.4142135623730951\n1.5\n0\n",
+        capfd=capfd,
+    )
+
+
+def test_denormal_shortest_repr(tmp_path: Path, capfd) -> None:
+    _both(
+        tmp_path,
+        "module Main\nimport Std.IO\n"
+        "fn main() -> I64 uses { Log } = { println(to_str(5e-324))\n 0 }\n",
+        0,
+        out="5e-324\n",
+        capfd=capfd,
+    )
+
+
+def test_record_eq_with_nan_field(tmp_path: Path) -> None:
+    # Python container equality identity-shortcuts elements; the interpreter
+    # now compares structurally, so a NaN field makes a record unequal to
+    # ITSELF — exactly like the native field-wise cmpf.
+    _both(
+        tmp_path,
+        "type P = { x: F64 }\n"
+        "fn main() -> I64 uses { Process } = {\n"
+        "  let zero = to_f64(List.len(Env.argv()))\n"
+        "  let a = { x = zero / zero }\n"
+        "  if a == a { 1 } else { 0 }\n}\n",
+        0,
+    )
+
+
+def test_fn_values_in_inferred_list_literal_rejected() -> None:
+    # TYPE025 fired only on annotated List<fn> — the inferred literal [d]
+    # slipped through to an MLIR verifier error.
+    diags = _diag("fn d(x: I64) -> I64 = { x }\nfn main() -> I64 = { let fs = [d]\n 0 }\n")
+    assert any(d.code == "TYPE025" for d in diags)
+
+
+def test_fn_return_type_rejected() -> None:
+    diags = _diag(
+        "fn d(x: I64) -> I64 = { x }\nfn pick() -> (I64) -> I64 = { d }\nfn main() -> I64 = { 0 }\n"
+    )
+    assert any(d.code == "TYPE025" and "return" in d.message for d in diags)
+
+
+def test_builtin_as_value_gets_name003() -> None:
+    diags = _diag("fn main() -> I64 = { let f = to_str\n 0 }\n")
+    assert any(d.code == "NAME003" and "builtin" in d.message for d in diags)
+
+
+def test_underscore_prefix_not_hex() -> None:
+    # `0_x10` must not lex as a hex literal.
+    diags = _diag("fn main() -> I64 = { 0_x10 }\n")
+    assert any(d.code == "NAME001" for d in diags)
+
+
+def test_comptime_bitwise(tmp_path: Path) -> None:
+    _both(
+        tmp_path,
+        "fn main() -> I64 = { comptime { (0xF0 | 0x0F) & 0xFF ^ 0x0F } }\n",
+        240,
+    )
+
+
+def test_negative_hex_int64_min_pattern(tmp_path: Path) -> None:
+    _both(
+        tmp_path,
+        "type O = | G(I64) | N\n"
+        "fn main() -> I64 = "
+        "{ match G(-9223372036854775808) { G(-0x8000000000000000) => 1  _ => 0 } }\n",
+        1,
+    )
+
+
+def test_std_generic_at_private_type(tmp_path: Path) -> None:
+    # Monomorphizing Std.List.map at a caller-private type must not VIS001:
+    # the caller already passed visibility at the call site.
+    (tmp_path / "Helper.flx").write_text(
+        "module Helper\nimport Std.List\n"
+        "type Secret = { v: I64 }\n"
+        "fn unwrap(s: Secret) -> I64 = { s.v }\n"
+        "pub fn use_it() -> I64 = {\n"
+        "  let xs = map([{ v = 6 }], unwrap)\n  xs[0]\n}\n",
+        encoding="utf-8",
+    )
+    src = "module Main\nimport Std.List\nimport Helper\nfn main() -> I64 = { use_it() }\n"
+    path = _write(tmp_path, src)
+    assert driver.cmd_run(path, interpret=True) == 6
+    if _tools_available():
+        assert driver.cmd_run(path, native=True) == 6

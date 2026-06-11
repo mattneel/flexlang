@@ -371,6 +371,15 @@ class Checker:
                 continue
             params = tuple(self._resolve_type(p.type) for p in fn.params)
             ret = self._resolve_type(fn.return_type) if fn.return_type else UNIT
+            if isinstance(ret, FnType):
+                self._err(
+                    "TYPE025",
+                    f"{fn.name!r} returns a function type; functions cannot "
+                    "return function values yet",
+                    fn.span,
+                    help="take the would-be result's arguments directly instead",
+                )
+                ret = ERROR
             self.functions[fn.name] = FnType(params, ret)
             self.fn_effects[fn.name] = set(fn.effects)
 
@@ -628,7 +637,11 @@ class Checker:
     def _check_visible(self, name: str, span: Span | None) -> None:
         """Flag a reference from `current_module` to another module's private name.
         No-op for single-file programs, builtins, public names, and own-module
-        references."""
+        references. Span-less references are SYNTHETIC (monomorphization
+        substituting a caller's type argument into a template's module) — the
+        caller already passed visibility at the call site, so they're exempt."""
+        if span is None:
+            return
         if not self._name_visible(name):
             self._err(
                 "VIS001",
@@ -960,7 +973,13 @@ class Checker:
         # `r = Err("boom")` work on a typed `mut` binding.
         value_ty = self._check_expr(stmt.value, binding.type if binding else None)
         if binding is None:
-            self._err("NAME001", f"cannot assign to undefined binding {stmt.name!r}", stmt.span)
+            self._err(
+                "NAME001",
+                f"cannot assign to undefined binding {stmt.name!r}",
+                stmt.span,
+                help="a lone `{ x = e }` is a block with an assignment; for a "
+                "one-field record literal, parenthesize it: ({ x = e })",
+            )
             return
         if not binding.mutable:
             self._err(
@@ -1054,6 +1073,14 @@ class Checker:
         first = self._check_expr(expr.items[0], elem_expected)
         for item in expr.items[1:]:
             self._expect(first, self._check_expr(item, first), item.span, "list element")
+        if isinstance(first, FnType):
+            self._err(
+                "TYPE025",
+                "function values cannot be stored in lists yet",
+                expr.span,
+                help="pass functions as arguments; storing them is the roadmap",
+            )
+            return ERROR
         return ListType(first) if first is not ERROR else ERROR
 
     def _infer_record(self, expr: ast.RecordExpr) -> Type:
@@ -1177,6 +1204,14 @@ class Checker:
                 "(pass a monomorphic function)",
                 expr.span,
                 help=f"call it directly: {expr.name}(...)",
+            )
+            return ERROR
+        if expr.name in _BUILTINS or expr.name in ("to_str", "to_f64", "to_i64"):
+            self._err(
+                "NAME003",
+                f"{expr.name!r} is a builtin and cannot be passed as a value",
+                expr.span,
+                help=f"wrap it: fn my_{expr.name}(...) = {{ {expr.name}(...) }}",
             )
             return ERROR
         self._err("NAME001", f"unknown name {expr.name!r}", expr.span)
