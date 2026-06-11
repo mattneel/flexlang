@@ -215,6 +215,7 @@ class Checker:
         self.traits: dict[str, dict[str, ast.TraitMethod]] = {}
         self.method_index: dict[str, set[str]] = {}  # method -> declaring traits
         self.impls: dict[tuple[str, str], dict[str, str]] = {}  # (trait,key) -> method->symbol
+        self._impl_spans: dict[tuple[str, str], Span] = {}  # for IMPL006 "first at" notes
         self.method_targets: dict[int, str] = {}  # id(CallExpr) -> impl symbol
         self._impl_fns: list[ast.FnDecl] = []  # renamed impl methods, emitted as functions
         self._self_type: Type | None = None
@@ -225,6 +226,9 @@ class Checker:
         self.inst_subst: dict[tuple[str, tuple[str, ...]], dict[str, Type]] = {}
         self.extern_fns: set[str] = set()
         self.extern_abi: dict[str, tuple[tuple[str, ...], str]] = {}
+        # First declaration of each extern: (span, pub), for redeclaration
+        # agreement checks and "first declared at ..." notes.
+        self._extern_first: dict[str, tuple[Span | None, bool]] = {}
         # Which modules declared each extern: every declaring module may use it
         # (a private extern redeclared in two modules is usable from both).
         self.extern_decl_modules: dict[str, set[str]] = {}
@@ -233,6 +237,7 @@ class Checker:
 
     def check(self) -> CheckResult:
         for adt in self.module.adts:
+            self._check_type_name(adt.name, adt.span)
             for variant in adt.variants:
                 if len(variant.payload) > 1:
                     self._err(
@@ -255,10 +260,25 @@ class Checker:
 
         self.record_types.update(self._builtin_records)
         for record in self.module.records:
+            self._check_type_name(record.name, record.span)
             if record.name in self.record_types or record.name in self.adt_templates:
                 self._err_duplicate("type", record.name, record.span)
             fields = tuple((f.name, self._resolve_type(f.type)) for f in record.fields)
             self.record_types[record.name] = RecordType(record.name, fields)
+
+        # Every type expression in an ADT payload or trait signature is validated
+        # NOW, not at first use — an uninstantiated `type T = | A(Bogus)` is still
+        # a type error.
+        for adt in self.module.adts:
+            for variant in adt.variants:
+                for payload in variant.payload:
+                    self._validate_type_expr(payload, set(adt.type_params), allow_self=False)
+        for trait in self.module.traits:
+            for sig in trait.methods:
+                for param in sig.params:
+                    self._validate_type_expr(param.type, set(), allow_self=True)
+                if sig.return_type is not None:
+                    self._validate_type_expr(sig.return_type, set(), allow_self=True)
 
         self._register_traits()
 
@@ -352,11 +372,16 @@ class Checker:
                 continue
             key = _type_key(impl_ty)
             if (impl.trait, key) in self.impls:
+                first = self._impl_spans.get((impl.trait, key))
+                where = f" (first at {first.file}:{first.start.line})" if first else ""
                 self._err(
-                    "IMPL006", f"conflicting impl {impl.trait} for {impl.type_name}", impl.span
+                    "IMPL006",
+                    f"conflicting impl {impl.trait} for {impl.type_name}{where}",
+                    impl.span,
                 )
             table: dict[str, str] = {}
             self.impls[(impl.trait, key)] = table
+            self._impl_spans[(impl.trait, key)] = impl.span
             trait_methods = self.traits[impl.trait]
             provided = {m.name for m in impl.methods}
             for mname in trait_methods:
@@ -538,6 +563,10 @@ class Checker:
         self.current_module = self._module_of(fn.span)
         self.declared_effects = set(fn.effects)
         fn_ty = self.functions[fn.name]
+        if len(fn_ty.params) != len(fn.params):
+            # A duplicate definition kept the first signature; TYPE002 was
+            # already reported, so don't check this body against the wrong type.
+            return
         seen: set[str] = set()
         for param, ptype in zip(fn.params, fn_ty.params, strict=True):
             if param.name in seen:
@@ -599,7 +628,11 @@ class Checker:
                     pty = ERROR
                     param_kinds.append("i64")
                 params.append(pty)
-            if ext.return_type is not None and ext.return_type.name == "I32":
+            if (
+                ext.return_type is not None
+                and ext.return_type.name == "I32"
+                and (not ext.return_type.args)
+            ):
                 ret: Type = I64
                 ret_kind = "i32"
             else:
@@ -624,18 +657,26 @@ class Checker:
             abi = (tuple(param_kinds), ret_kind)
             if ext.name in self.extern_fns:
                 # C-style redeclaration: declaring the same symbol again is fine
-                # iff the signature, ABI widths, AND asserted effects agree
-                # exactly — two modules may each privately declare `strlen`.
+                # iff the signature, ABI widths, asserted effects, AND visibility
+                # agree exactly — two modules may each privately declare `strlen`,
+                # but a `pub` redeclaration must not unlock someone else's
+                # private extern program-wide.
+                first = self._extern_first.get(ext.name)
                 if (
                     self.functions.get(ext.name) != fn_ty
                     or self.extern_abi.get(ext.name) != abi
                     or self.fn_effects.get(ext.name) != set(ext.effects)
+                    or (first is not None and first[1] != ext.pub)
                 ):
+                    where = ""
+                    if first is not None and first[0] is not None:
+                        where = f"; first declared at {first[0].file}:{first[0].start.line}"
                     self._err(
                         "FFI004",
                         f"conflicting declarations for extern {ext.name!r}",
                         ext.span,
-                        help="every declaration of a C symbol must agree on signature and effects",
+                        help="every declaration of a C symbol must agree on "
+                        f"signature, effects, and pub{where}",
                     )
                 if self.current_module is not None:
                     self.extern_decl_modules.setdefault(ext.name, set()).add(self.current_module)
@@ -646,8 +687,35 @@ class Checker:
             self.fn_effects[ext.name] = set(ext.effects)
             self.extern_fns.add(ext.name)
             self.extern_abi[ext.name] = abi
+            self._extern_first[ext.name] = (ext.span, ext.pub)
             if self.current_module is not None:
                 self.extern_decl_modules.setdefault(ext.name, set()).add(self.current_module)
+
+    def _check_type_name(self, name: str, span: Span | None) -> None:
+        if name == "I32":
+            self._err(
+                "TYPE002",
+                "type name 'I32' is reserved (the FFI boundary type)",
+                span,
+            )
+
+    def _validate_type_expr(self, te: ast.TypeExpr, params: set[str], *, allow_self: bool) -> None:
+        """Eagerly check that every name in a type expression exists (type
+        parameters, primitives, List, records, ADTs, and optionally Self)."""
+        name = te.name
+        known = (
+            name in params
+            or name in PRIMITIVES
+            or name == "List"
+            or name in self.record_types
+            or name in self.adt_templates
+            or (allow_self and name == "Self")
+        )
+        if not known:
+            self._err("TYPE001", f"unknown type {name!r}", te.span)
+            return
+        for arg in te.args:
+            self._validate_type_expr(arg, params, allow_self=allow_self)
 
     def _check_extern_name(self, ext: ast.ExternFnDecl) -> None:
         """An extern's name IS the C symbol it links: it must be a plain C
@@ -1319,7 +1387,9 @@ class Checker:
             self._err("TYPE003", f"{what} has type {actual}, expected {expected}", span)
 
     def _err(self, code: str, message: str, span: Span | None, *, help: str | None = None) -> None:
-        self.diags.append(Diagnostic(code, message, span, help=help))
+        diag = Diagnostic(code, message, span, help=help)
+        if diag not in self.diags:  # the same fault re-derived is reported once
+            self.diags.append(diag)
 
     def _err_duplicate(self, kind: str, name: str, span: Span | None) -> None:
         """A top-level redefinition. Top-level names share one program-wide

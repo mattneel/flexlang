@@ -78,8 +78,25 @@ def _concat(parts: list[ast.Expr], sp: Span) -> ast.Expr:
 
 
 def _derive_eq(type_name: str, sp: Span, exp: Expander) -> ast.FnDecl:
+    record = exp.ctx.records.get(type_name)
+    if record is not None and any(f.type.name == "String" for f in record.fields):
+        # Field-wise comparison: `==` for structural fields, the Eq trait for
+        # String fields — so `impl Eq for String` (import Std.Str) must be in
+        # scope, or the use site reports DISP001.
+        comparisons: list[ast.Expr] = []
+        for fld in record.fields:
+            mine: ast.Expr = ast.MemberExpr(_name("self", sp), fld.name, sp)
+            theirs: ast.Expr = ast.MemberExpr(_name("other", sp), fld.name, sp)
+            if fld.type.name == "String":
+                comparisons.append(ast.CallExpr(ast.MemberExpr(mine, "eq", sp), [theirs], sp))
+            else:
+                comparisons.append(ast.BinaryExpr("==", mine, theirs, sp))
+        body: ast.Expr = comparisons[0] if comparisons else ast.BoolLit(True, sp)
+        for nxt in comparisons[1:]:
+            body = ast.BinaryExpr("&&", body, nxt, sp)
+        return _fn("eq", [("self", type_name), ("other", type_name)], "Bool", body, sp)
     if _string_field_names(type_name, exp):
-        raise _err("DER001", f"cannot derive Eq for {type_name!r}: it contains a String", sp)
+        raise _err("DER001", f"cannot derive Eq for {type_name!r}: a variant carries a String", sp)
     # Delegate to structural equality, which the backend already lowers.
     body = ast.BinaryExpr("==", _name("self", sp), _name("other", sp), sp)
     return _fn("eq", [("self", type_name), ("other", type_name)], "Bool", body, sp)

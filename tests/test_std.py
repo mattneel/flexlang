@@ -159,6 +159,65 @@ def test_std_effects_propagate(tmp_path: Path, capfd: pytest.CaptureFixture[str]
     assert "EFFECT001" in capfd.readouterr().err
 
 
+# --- review findings -------------------------------------------------------------
+
+
+def test_shadow_cannot_rewire_std_internals(tmp_path: Path) -> None:
+    # The stdlib's own dependency graph is pinned: a user Std/Str.flx shadow must
+    # not change Std.Env's documented behavior (its internal `import Std.Str`).
+    std_dir = tmp_path / "Std"
+    std_dir.mkdir()
+    (std_dir / "Str.flx").write_text(
+        "module Std.Str\npub fn is_empty(s: String) -> Bool = { false }\n", encoding="utf-8"
+    )
+    src = (
+        "module Main\nimport Std.Env\n"
+        "extern fn strlen(s: String) -> I64\n"
+        "fn main() -> I64 uses { Process } = "
+        '{ strlen(get_or("FLX_DEFINITELY_UNSET_XYZ", "fallback")) }\n'
+    )
+    assert driver.cmd_run(_write(tmp_path, src), interpret=True) == 8  # "fallback"
+
+
+def test_pub_redeclaration_cannot_unlock_private_extern(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "Lib.flx").write_text(
+        "module Lib\npub extern fn strcmp(a: String, b: String) -> I32\n", encoding="utf-8"
+    )
+    src = 'module Main\nimport Std.Str\nimport Lib\nfn main() -> I64 = { strcmp("a", "b") }\n'
+    assert driver.cmd_check(_write(tmp_path, src)) == 1
+    assert "FFI004" in capfd.readouterr().err
+
+
+def test_arity_collision_with_std_is_clean(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    # A user fn colliding with a std fn at a different arity must be TYPE002,
+    # not a zip() traceback.
+    src = (
+        "module Main\nimport Std.Math\n"
+        "fn abs(a: I64, b: I64) -> I64 = { a + b }\nfn main() -> I64 = { abs(1, 2) }\n"
+    )
+    assert driver.cmd_check(_write(tmp_path, src)) == 1
+    assert "TYPE002" in capfd.readouterr().err
+
+
+def test_derived_eq_with_string_fields(tmp_path: Path) -> None:
+    # derive(Eq) on a record with String fields compares field-wise through the
+    # Eq trait for strings (so Std.Str must be imported).
+    src = (
+        "module Main\nimport Std.Str\n"
+        "derive(Eq) type User = { id: I64, name: String }\n"
+        "fn main() -> I64 = { 0 }\n"
+        'test "eq" { let a = { id = 1, name = "ada" }\n'
+        '  assert(a.eq({ id = 1, name = "ada" }))\n'
+        '  assert(!a.eq({ id = 1, name = "bob" }))\n'
+        '  assert(!a.eq({ id = 2, name = "ada" })) }\n'
+    )
+    assert driver.cmd_test(_write(tmp_path, src), interpret=True) == 0
+
+
 def test_i32_abi_sign_extension(tmp_path: Path) -> None:
     # The regression that motivated I32: strcmp returns C int; reading it as 64
     # bits made negative results positive. cmp must be exactly -1 here.

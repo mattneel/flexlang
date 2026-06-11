@@ -105,8 +105,15 @@ def load_program(entry_path: str, extra_roots: tuple[Path, ...] = ()) -> Program
         file_module[key] = mod.name
         order.append(mod)
         spans = list(mod.import_spans) + [mod.span] * len(mod.imports)  # tolerate missing spans
+        in_std = std_root() in resolved.parents
         for imp, span in zip(mod.imports, spans, strict=False):
             rel = Path(*imp.split(".")).with_suffix(".flx")
+            if in_std and (std_root() / rel).is_file():
+                # The stdlib's own dependency graph is pinned: a user/dep file at
+                # Std/X.flx shadows what the USER imports, never what the bundled
+                # std modules import from each other.
+                visit(std_root() / rel, imp, span)
+                continue
             found = [r / rel for r in roots if (r / rel).is_file()]
             if len(found) > 1:
                 listing = " and ".join(str(c) for c in found)

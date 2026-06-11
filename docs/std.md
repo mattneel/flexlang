@@ -6,7 +6,9 @@ package — `import Std.Math` works everywhere `flx` runs, including a bare
 mechanism: Std modules are ordinary `.flx` files using `pub`, traits, and
 `extern fn`, compiled into your program like any other import. The bundled
 tree is the **lowest-precedence import root**, so your own modules and
-dependencies can shadow `Std.*` deliberately, never ambiguously.
+dependencies can shadow `Std.*` deliberately, never ambiguously — but the
+stdlib's *own* dependency graph is pinned: a shadow changes what *you* import,
+never what bundled `Std` modules import from each other.
 
 ```flex
 module Main
@@ -37,7 +39,8 @@ an effect-free function is EFFECT001, exactly like any other call.
 
 The headline: **importing `Std.Str` gives every `String` real equality** —
 `"a".eq("b")` dispatches through the trait system to `strcmp`, on both
-backends. (`length` is the UTF-8 *byte* length; `getenv`-backed `Env` cannot
+backends. It also unlocks `derive(Eq)` on records with `String` fields, which
+compare field-wise through the trait. (`length` is the UTF-8 *byte* length; `getenv`-backed `Env` cannot
 distinguish unset from empty, as in C.)
 
 ## How it's built

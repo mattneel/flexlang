@@ -113,6 +113,21 @@ def test_non_ascii_extern_name_rejected() -> None:
     assert "FFI003" in _codes("extern fn übercall(n: I64) -> I64\nfn main() -> I64 = { 0 }")
 
 
+def test_i32_reserved_as_type_name() -> None:
+    assert "TYPE002" in _codes("type I32 = { v: I64 }\nfn main() -> I64 = { 0 }")
+
+
+def test_i32_with_type_args_rejected() -> None:
+    assert "TYPE001" in _codes("extern fn f() -> I32<Bogus>\nfn main() -> I64 = { 0 }")
+
+
+def test_uninstantiated_bogus_payload_rejected() -> None:
+    # Type names in ADT payloads and trait signatures are validated eagerly,
+    # even if never used.
+    assert "TYPE001" in _codes("type T = | A(I32) | B\nfn main() -> I64 = { 0 }")
+    assert "TYPE001" in _codes("trait W = { fn w(self: Self) -> Bogus }\nfn main() -> I64 = { 0 }")
+
+
 # --- running (interpreter; no toolchain needed) ---------------------------------
 
 

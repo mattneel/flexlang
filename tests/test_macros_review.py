@@ -51,8 +51,16 @@ def test_multi_payload_variant_rejected() -> None:
     assert "TYPE022" in _codes("type Pair = | Both(I64, I64)\nfn f() -> I64 = { 0 }")
 
 
-def test_derive_eq_on_string_rejected() -> None:
-    assert "DER001" in _codes("derive(Eq) type W = { s: String }")
+def test_derive_eq_on_string_record_needs_string_eq() -> None:
+    # Records with String fields now derive field-wise through the Eq trait —
+    # without `impl Eq for String` in scope (import Std.Str), dispatch fails.
+    assert "DISP001" in _codes(
+        'derive(Eq) type W = { s: String }\nfn f(w: W) -> Bool = { w.eq({ s = "x" }) }'
+    )
+
+
+def test_derive_eq_on_string_adt_payload_rejected() -> None:
+    assert "DER001" in _codes("derive(Eq) type W = | Tag(String) | Empty")
 
 
 def test_derive_show_multi_payload_rejected() -> None:
