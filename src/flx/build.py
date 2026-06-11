@@ -120,7 +120,7 @@ class BuildInterpreter(interp.Interpreter):
         commands: dict[str, Callable[[str], int]] = {
             "check": driver.cmd_check,
             "test": lambda f: driver.cmd_test(f, interpret=True),
-            "run": lambda f: driver.cmd_run(f, interpret=True),
+            "run": lambda f: driver.cmd_run(f, interpret=True, announce=False),
             "expand": driver.cmd_expand,
             "build": driver.cmd_build,
         }

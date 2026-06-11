@@ -223,3 +223,143 @@ def test_run_reports_exit_code_on_stderr(tmp_path: Path, capfd: pytest.CaptureFi
     captured = capfd.readouterr()
     assert captured.out == ""  # stdout stays parity-clean
     assert "flx: exited with code 7" in captured.err
+
+
+# --- M1 review fixes --------------------------------------------------------------
+
+UNIT_VALUES = (
+    'fn side() -> Unit uses { Log } = { Log.info("side") }\n'
+    "fn take_unit(u: Unit) -> I64 = { 21 }\n"
+    "type Box = { tag: I64, u: Unit }\n"
+    "fn main() -> I64 uses { Log } = {\n"
+    "  if () == () { () } else { () }\n"
+    "  mut m = ()\n  m = side()\n  let u = ()\n"
+    "  let b = { tag = take_unit(u) + take_unit(side()) + take_unit(()), u = m }\n"
+    "  b.tag\n}\n"
+)
+
+UNIT_ASSERTS = (
+    "fn main() -> I64 = { 0 }\n"
+    'test "unit eq" { assert_eq((), ()) }\n'
+    'test "unit ne fails" { assert_ne((), ()) }\n'
+)
+
+
+def test_unit_values_interpret(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
+    assert driver.cmd_run(_write(tmp_path, UNIT_VALUES), interpret=True) == 63
+    assert capfd.readouterr().out == "side\nside\n"
+
+
+@native
+def test_unit_values_native(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
+    # Unit params, record fields, mut slots, and () == () must not ICE natively.
+    assert driver.cmd_run(_write(tmp_path, UNIT_VALUES), native=True) == 63
+    assert capfd.readouterr().out == "side\nside\n"
+
+
+def test_unit_assert_ne_message(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
+    assert driver.cmd_test(_write(tmp_path, UNIT_ASSERTS), interpret=True) == 1
+    out = capfd.readouterr().out
+    assert "ok Main / unit eq" in out
+    assert "assert_ne failed: both are 0" in out  # unit prints as 0, like native
+
+
+@native
+def test_unit_asserts_match_native(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
+    path = _write(tmp_path, UNIT_ASSERTS)
+    native_code = driver.cmd_test(path, native=True)
+    native_out = capfd.readouterr().out
+    interp_code = driver.cmd_test(path, interpret=True)
+    interp_out = capfd.readouterr().out
+    assert (interp_code, interp_out) == (native_code, native_out)
+
+
+def test_read_line_shares_libc_stdin_buffer(tmp_path: Path) -> None:
+    # read_line (libc fgetc) and an extern getchar() consume ONE C stdio buffer,
+    # exactly as the native getline/getchar pair does; two competing read-ahead
+    # buffers over fd 0 would starve each other.
+    src = (
+        "module Main\nimport Std.IO\n"
+        "extern fn getchar() -> I32 uses { Fs }\n"
+        "fn main() -> I64 uses { Fs, Log } = {\n"
+        "  let a = read_line()\n  let c1 = getchar()\n  let c2 = getchar()\n"
+        "  let b = read_line()\n"
+        '  println("a=[" ++ a ++ "] c1=" ++ to_str(c1) ++ " c2=" ++ to_str(c2)'
+        ' ++ " b=[" ++ b ++ "]")\n  0\n}\n'
+    )
+    proc = subprocess.run(
+        [sys.executable, "-m", "flx", "run", _write(tmp_path, src)],
+        input="ab\ncd\nef\n",
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0
+    assert proc.stdout == "a=[ab] c1=99 c2=100 b=[]\n"  # native byte-sequential order
+
+
+def test_build_does_not_leak_exit_banner(tmp_path: Path) -> None:
+    (tmp_path / "hello.flx").write_text(
+        'fn main() -> I64 uses { Log } = { Log.info("hi")\n 0 }\n', encoding="utf-8"
+    )
+    (tmp_path / "build.flx").write_text(
+        'module Build\n\ntarget go uses { Fs } {\n  flx.run("hello.flx")?\n}\n',
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [sys.executable, "-m", "flx", "build", "go"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0
+    assert "hi" in proc.stdout
+    assert "exited with code" not in proc.stdout + proc.stderr
+
+
+def test_runtime_error_prints_exit_line(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
+    # Native binaries print the runtime error and exit(1), then the driver reports
+    # the code; the interpreter path must produce the same stderr shape.
+    path = _write(tmp_path, "fn main() -> I64 = { let z = 0\n 1 / z }\n")
+    assert driver.cmd_run(path, interpret=True) == 1
+    err = capfd.readouterr().err
+    assert "flx: runtime error: division by zero" in err
+    assert "flx: exited with code 1" in err
+
+
+RECORD_UPDATE_ARMS = (
+    "type P = { x: I64, y: I64 }\ntype C = | A | B\n"
+    "fn mk(n: I64) -> P = { { x = n, y = n } }\n"
+    "type Holder = { p: P }\n"
+    "fn main() -> I64 = {\n"
+    "  let h = { p = mk(3) }\n"
+    "  let a = match A { A => { mk(2) with x = 10 }  B => { h.p with y = 9 } }\n"
+    "  let b = match B { A => { mk(2) with x = 10 }  B => { h.p with y = 9 } }\n"
+    "  a.x + a.y + b.x + b.y\n}\n"
+)
+
+
+def test_record_update_arm_bodies(tmp_path: Path) -> None:
+    # `{ <expr> with ... }` arm bodies (call/member bases) are records, not blocks.
+    assert driver.cmd_run(_write(tmp_path, RECORD_UPDATE_ARMS), interpret=True) == 24
+
+
+@native
+def test_record_update_arm_bodies_native(tmp_path: Path) -> None:
+    assert driver.cmd_run(_write(tmp_path, RECORD_UPDATE_ARMS), native=True) == 24
+
+
+def test_paren_multiline_postfix(tmp_path: Path) -> None:
+    # The span of a parenthesized expression reaches the `)`, so a postfix `.x`
+    # on the closing-paren line continues the expression.
+    src = (
+        "type P = { x: I64, y: I64 }\n"
+        "fn main() -> I64 = {\n  let p = { x = 6, y = 1 }\n  let v = (\n    p\n  ).x\n  v\n}\n"
+    )
+    assert driver.cmd_run(_write(tmp_path, src), interpret=True) == 6
+
+
+@native
+def test_list_native_message(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
+    path = _write(tmp_path, "fn main() -> I64 = { let xs = [1, 2, 3]\n 0 }\n")
+    assert driver.cmd_run(path, native=True) == 1
+    assert "list literals are not supported in native builds yet" in capfd.readouterr().err

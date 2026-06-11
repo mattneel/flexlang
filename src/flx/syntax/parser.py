@@ -426,10 +426,29 @@ class Parser:
         nxt = self._peek_at(1)
         if nxt.kind is TokenKind.RBRACE:
             return True
-        return nxt.kind is TokenKind.IDENT and self._peek_at(2).kind in (
+        if nxt.kind is TokenKind.IDENT and self._peek_at(2).kind in (
             TokenKind.EQ,
             TokenKind.KW_WITH,
-        )
+        ):
+            return True
+        # A record update whose base is not a bare identifier (`{ mk(n) with .. }`,
+        # `{ p.origin with .. }`): `with` is only ever valid directly inside the
+        # braces of a record update, so scan ahead for one at this brace depth.
+        depth = 0
+        offset = 1
+        while True:
+            kind = self._peek_at(offset).kind
+            if kind is TokenKind.EOF:
+                return False
+            if kind is TokenKind.LBRACE:
+                depth += 1
+            elif kind is TokenKind.RBRACE:
+                if depth == 0:
+                    return False
+                depth -= 1
+            elif kind is TokenKind.KW_WITH and depth == 0:
+                return True
+            offset += 1
 
     def _block(self) -> ast.Block:
         start = self._expect(TokenKind.LBRACE, "'{'").span
@@ -589,8 +608,11 @@ class Parser:
                 end = self._advance().span
                 return ast.UnitLit(start.to(end))
             inner = self._expr()
-            self._expect(TokenKind.RPAREN, "')'")
-            return inner
+            end = self._expect(TokenKind.RPAREN, "')'").span
+            # The span must reach the `)`: postfix `.member`/`(` continue an
+            # expression only from its last line, which for a multi-line
+            # parenthesized expression is the closing paren, not the inner expr.
+            return replace(inner, span=start.to(end))  # type: ignore[type-var]
         if tok.kind is TokenKind.KW_IF:
             return self._if()
         if tok.kind is TokenKind.KW_MATCH:

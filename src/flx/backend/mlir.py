@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from flx.backend.runtime import BASE_RUNTIME_DECLS
 from flx.sema.check import CheckResult
 from flx.syntax import ast
-from flx.types import BOOL, I64, STRING, UNIT, AdtType, FnType, RecordType, Type
+from flx.types import BOOL, I64, STRING, UNIT, AdtType, FnType, ListType, RecordType, Type
 
 _ARITH_OP = {"+": "addi", "-": "subi", "*": "muli"}
 # `/` and `%` go through guarded runtime calls (see runtime.py): raw arith.divsi /
@@ -46,6 +46,10 @@ def mlir_type(ty: Type) -> str:
         return "i64"
     if ty is BOOL:
         return "i1"
+    if ty is UNIT:
+        # Unit-returning functions stay void (see _lower_callable), but a unit
+        # value that is stored or passed materializes as the constant i64 0.
+        return "i64"
     if ty is STRING:
         return "!llvm.struct<(ptr, i64)>"
     if isinstance(ty, RecordType):
@@ -56,6 +60,10 @@ def mlir_type(ty: Type) -> str:
         if _is_enum(ty):
             return "i64"
         return "!llvm.struct<(i32, i64)>"
+    if isinstance(ty, ListType):
+        raise BackendError(
+            "list values are not supported in native builds yet (run on the interpreter)"
+        )
     raise BackendError(f"type {ty} has no MLIR representation yet")
 
 
@@ -128,6 +136,16 @@ class FunctionLowerer:
 
     def _ty_of(self, expr: ast.Expr) -> Type:
         return self.types[id(expr)]
+
+    def _materialize(self, value: str | None, expr: ast.Expr) -> str:
+        """A value for `expr` where one is demanded (stored, passed, compared).
+        Unit expressions lower to no value; here they become the i64 0 that
+        `mlir_type(UNIT)` promises."""
+        if value is not None:
+            return value
+        if self._ty_of(expr) is UNIT:
+            return self._const("0", "i64")
+        raise BackendError(f"cannot lower expression {type(expr).__name__} as a value")
 
     # --- scope ----------------------------------------------------------------
 
@@ -216,21 +234,18 @@ class FunctionLowerer:
 
     def lower_stmt(self, stmt: ast.Stmt) -> str | None:
         if isinstance(stmt, ast.LetStmt):
-            value = self.lower_expr(stmt.value)
-            if value is not None:
-                self._define(stmt.name, _Binding("val", value, mlir_type(self._ty_of(stmt.value))))
+            value = self._materialize(self.lower_expr(stmt.value), stmt.value)
+            self._define(stmt.name, _Binding("val", value, mlir_type(self._ty_of(stmt.value))))
             return None
         if isinstance(stmt, ast.MutStmt):
-            value = self.lower_expr(stmt.value)
-            assert value is not None
+            value = self._materialize(self.lower_expr(stmt.value), stmt.value)
             mty = mlir_type(self._ty_of(stmt.value))
             slot = self._alloc_slot(mty)
             self._store_slot(slot, mty, value)
             self._define(stmt.name, _Binding("slot", slot, mty))
             return None
         if isinstance(stmt, ast.AssignStmt):
-            value = self.lower_expr(stmt.value)
-            assert value is not None
+            value = self._materialize(self.lower_expr(stmt.value), stmt.value)
             binding = self._lookup(stmt.name)
             self._store_slot(binding.ref, binding.ty, value)
             return None
@@ -240,8 +255,12 @@ class FunctionLowerer:
         if isinstance(stmt, ast.ReturnStmt):
             if stmt.value is None:
                 self._terminator("func.return")
+            elif self._ty_of(stmt.value) is UNIT:
+                # `return unit_expr` in a void function: evaluate for effects.
+                self.lower_expr(stmt.value)
+                self._terminator("func.return")
             else:
-                value = self.lower_expr(stmt.value)
+                value = self._materialize(self.lower_expr(stmt.value), stmt.value)
                 self._terminator(f"func.return {value} : {mlir_type(self._ty_of(stmt.value))}")
             return None
         if isinstance(stmt, ast.ExprStmt):
@@ -294,6 +313,10 @@ class FunctionLowerer:
             return self._lower_match(expr)
         if isinstance(expr, ast.TryExpr):
             return self._lower_try(expr)
+        if isinstance(expr, ast.ListExpr):
+            raise BackendError(
+                "list literals are not supported in native builds yet (run on the interpreter)"
+            )
         raise BackendError(f"cannot lower expression {type(expr).__name__}")
 
     def _const(self, literal: str, mty: str) -> str:
@@ -391,7 +414,7 @@ class FunctionLowerer:
         rt = self._ty_of(expr)
         assert isinstance(rt, RecordType)
         mty = mlir_type(rt)
-        values = {f.name: self.lower_expr(f.value) for f in expr.fields}
+        values = {f.name: self._materialize(self.lower_expr(f.value), f.value) for f in expr.fields}
         cur = self._fresh()
         self._emit(f"{cur} = llvm.mlir.undef : {mty}")
         for i, (fname, _) in enumerate(rt.fields):
@@ -408,7 +431,7 @@ class FunctionLowerer:
         cur = self.lower_expr(expr.base)
         assert cur is not None
         for f in expr.fields:
-            value = self.lower_expr(f.value)
+            value = self._materialize(self.lower_expr(f.value), f.value)
             nxt = self._fresh()
             self._emit(f"{nxt} = llvm.insertvalue {value}, {cur}[{index_of[f.name]}] : {mty}")
             cur = nxt
@@ -590,9 +613,8 @@ class FunctionLowerer:
         op = expr.op
         if op in ("&&", "||"):
             return self._lower_short_circuit(expr)
-        left = self.lower_expr(expr.left)
-        right = self.lower_expr(expr.right)
-        assert left is not None and right is not None
+        left = self._materialize(self.lower_expr(expr.left), expr.left)
+        right = self._materialize(self.lower_expr(expr.right), expr.right)
         if op == "++":
             lp, ll = self._string_parts(left)
             rp, rl = self._string_parts(right)
@@ -657,8 +679,8 @@ class FunctionLowerer:
             symbol = self.method_targets.get(id(expr))
             if symbol is not None:
                 method_ty = self.functions[symbol]
-                recv = self.lower_expr(expr.callee.obj)
-                args = [recv, *(self.lower_expr(a) for a in expr.args)]
+                recv = self._materialize(self.lower_expr(expr.callee.obj), expr.callee.obj)
+                args = [recv, *(self._materialize(self.lower_expr(a), a) for a in expr.args)]
                 return self._emit_call(f"flx_{symbol}", args, method_ty)
         # Effectful intrinsics (validated by the checker). Log.* prints its
         # message; other intrinsics are MVP no-ops at runtime.
@@ -692,7 +714,7 @@ class FunctionLowerer:
         symbol = self.method_targets.get(id(expr))
         if symbol is not None:
             spec_ty = self.functions[symbol]
-            args = [self.lower_expr(a) for a in expr.args]
+            args = [self._materialize(self.lower_expr(a), a) for a in expr.args]
             return self._emit_call(f"flx_{symbol}", args, spec_ty)
         if name in self.extern_fns:
             return self._lower_extern_call(name, expr)
@@ -710,7 +732,7 @@ class FunctionLowerer:
         fn_ty = self.functions.get(name)
         if fn_ty is None:
             raise BackendError(f"call to non-function {name!r}")
-        args = [self.lower_expr(a) for a in expr.args]
+        args = [self._materialize(self.lower_expr(a), a) for a in expr.args]
         return self._emit_call(f"flx_{name}", args, fn_ty)
 
     def _lower_builtin(self, name: str, call: ast.CallExpr) -> None:
@@ -721,9 +743,8 @@ class FunctionLowerer:
             assert cond is not None
             self._assert_branch(cond, "@__flx_assert_fail", "", "")
         elif name in ("assert_eq", "assert_ne"):
-            left = self.lower_expr(call.args[0])
-            right = self.lower_expr(call.args[1])
-            assert left is not None and right is not None
+            left = self._materialize(self.lower_expr(call.args[0]), call.args[0])
+            right = self._materialize(self.lower_expr(call.args[1]), call.args[1])
             operand_type = self._ty_of(call.args[0])
             operand_ty = mlir_type(operand_type)
             if operand_type is STRING:
@@ -875,8 +896,8 @@ class FunctionLowerer:
             return widened
         return out
 
-    def _emit_call(self, symbol: str, args: list[str | None], fn_ty: FnType) -> str | None:
-        arg_list = ", ".join(a for a in args if a is not None)
+    def _emit_call(self, symbol: str, args: list[str], fn_ty: FnType) -> str | None:
+        arg_list = ", ".join(args)
         arg_types = ", ".join(mlir_type(t) for t in fn_ty.params)
         if fn_ty.ret is UNIT:
             self._emit(f"func.call @{symbol}({arg_list}) : ({arg_types}) -> ()")

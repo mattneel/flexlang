@@ -241,7 +241,14 @@ def cmd_emit_mlir(path: str) -> int:
     return 0
 
 
-def cmd_run(path: str | None = None, interpret: bool = False, native: bool = False) -> int:
+def cmd_run(
+    path: str | None = None,
+    interpret: bool = False,
+    native: bool = False,
+    announce: bool = True,
+) -> int:
+    """Run a program. `announce` controls the `flx: exited with code N` stderr
+    line — a CLI affordance that in-process callers (build targets) suppress."""
     resolved = _resolve_entry(path)
     if resolved is None:
         return 1
@@ -268,8 +275,13 @@ def cmd_run(path: str | None = None, interpret: bool = False, native: bool = Fal
         except interp.FlexRuntimeError as exc:
             sys.stdout.flush()  # emit buffered output before the error (match native)
             print(f"flx: runtime error: {exc}", file=sys.stderr)
+            # Native binaries print their runtime error and exit(1); the driver
+            # then reports the code. Match that stderr shape exactly.
+            if announce:
+                print("flx: exited with code 1", file=sys.stderr)
             return 1
-        print(f"flx: exited with code {code}", file=sys.stderr)
+        if announce:
+            print(f"flx: exited with code {code}", file=sys.stderr)
         return code
 
     try:
@@ -278,7 +290,8 @@ def cmd_run(path: str | None = None, interpret: bool = False, native: bool = Fal
         with tempfile.TemporaryDirectory() as tmp:
             exe = build_executable(mlir_text, shim, Path(tmp) / "program", Path(tmp))
             code = run_executable(exe)
-            print(f"flx: exited with code {code}", file=sys.stderr)
+            if announce:
+                print(f"flx: exited with code {code}", file=sys.stderr)
             return code
     except BackendError as exc:
         print(f"flx: backend error: {exc}", file=sys.stderr)

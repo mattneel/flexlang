@@ -20,6 +20,9 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 from flx.syntax import ast
 
 if TYPE_CHECKING:
@@ -115,6 +118,49 @@ def _fflush_libc() -> None:
         fflush(None)
     except OSError, AttributeError:  # no libc to flush (non-POSIX)
         pass
+
+
+def _libc_fgetc() -> tuple[Callable[[ctypes.c_void_p], int], ctypes.c_void_p] | None:
+    """libc's fgetc plus its own `FILE *stdin`. Natively, read_line (getline) and
+    extern calls like getchar() share the single C stdio input buffer; reading
+    through Python's sys.stdin instead would create a second, competing
+    read-ahead buffer over fd 0 and the two would starve each other."""
+    try:
+        libc = ctypes.CDLL(None)
+        fgetc = libc.fgetc
+        fgetc.argtypes = [ctypes.c_void_p]
+        fgetc.restype = ctypes.c_int
+        for symbol in ("stdin", "__stdinp"):  # glibc / macOS
+            try:
+                return fgetc, ctypes.c_void_p.in_dll(libc, symbol)
+            except ValueError:
+                continue
+    except OSError, AttributeError:
+        pass
+    return None
+
+
+def _read_line() -> str:
+    """One line of stdin with the trailing newline stripped; "" at EOF. Reads
+    byte-wise through libc stdio (see _libc_fgetc); byte-lossless via
+    surrogateescape, matching extern string marshalling."""
+    via_libc = None
+    try:
+        if sys.stdin.fileno() == 0:  # pytest/StringIO stand-ins have no real fd
+            via_libc = _libc_fgetc()
+    except OSError, ValueError:
+        pass
+    if via_libc is None:
+        line = sys.stdin.readline()
+        return line[:-1] if line.endswith("\n") else line
+    fgetc, stream = via_libc
+    buf = bytearray()
+    while True:
+        ch = fgetc(stream)
+        if ch in (-1, 0x0A):  # EOF / '\n'
+            break
+        buf.append(ch & 0xFF)
+    return buf.decode("utf-8", "surrogateescape")
 
 
 class Interpreter:
@@ -406,8 +452,7 @@ class Interpreter:
                 return None
             if isinstance(obj, ast.NameExpr) and obj.name == "Fs" and callee.name == "read_line":
                 sys.stdout.flush()
-                line = sys.stdin.readline()
-                return line[:-1] if line.endswith("\n") else line  # "" at EOF
+                return _read_line()
             if (
                 isinstance(obj, ast.NameExpr)
                 and obj.name == "Time"
@@ -505,6 +550,8 @@ class Interpreter:
     def _scalar(self, value: object) -> int | None:
         """The i64 the native harness would compare for an assert failure, or None
         for an aggregate (record / ADT-with-payload) it reports generically."""
+        if value is None:
+            return 0  # unit materializes as i64 0 natively
         if isinstance(value, bool):
             return 1 if value else 0
         if isinstance(value, int):
