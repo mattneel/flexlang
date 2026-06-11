@@ -58,6 +58,11 @@ def _dump_item(item: ast.Item, depth: int, out: list[str]) -> None:
     elif isinstance(item, ast.MacroDecl):
         params = ", ".join(item.params)
         out.append(f"{_indent(depth)}Macro {item.name}({params}) = {_expr(item.body)}")
+    elif isinstance(item, ast.ExternFnDecl):
+        params = ", ".join(f"{p.name}: {_type(p.type)}" for p in item.params)
+        ret = _type(item.return_type) if item.return_type else "Unit"
+        uses = f" uses {{{', '.join(item.effects)}}}" if item.effects else ""
+        out.append(f"{_indent(depth)}Extern fn {item.name}({params}) -> {ret}{uses}")
     elif isinstance(item, ast.TargetDecl):
         uses = f" uses {{{', '.join(item.effects)}}}" if item.effects else ""
         out.append(f"{_indent(depth)}Target {item.name}{uses}")

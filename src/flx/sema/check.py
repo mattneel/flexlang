@@ -140,6 +140,9 @@ class CheckResult:
     functions: dict[str, FnType]
     constructors: set[str]
     method_targets: dict[int, str]  # id(CallExpr) -> resolved impl/spec symbol
+    # C-ABI foreign functions: called by their unmangled symbol name; the native
+    # backend declares them, the interpreter dispatches them through ctypes.
+    extern_fns: set[str] = field(default_factory=set)
     # generic function templates (name -> decl) and the instantiations demanded
     # by call sites. The monomorphizer turns these into concrete functions.
     generic_fns: dict[str, ast.FnDecl] = field(default_factory=dict)
@@ -215,6 +218,7 @@ class Checker:
         self.generic_fns: dict[str, ast.FnDecl] = {}
         self.instantiations: set[tuple[str, tuple[str, ...]]] = set()
         self.inst_subst: dict[tuple[str, tuple[str, ...]], dict[str, Type]] = {}
+        self.extern_fns: set[str] = set()
 
     # --- entry ----------------------------------------------------------------
 
@@ -263,6 +267,7 @@ class Checker:
             self.functions[fn.name] = FnType(params, ret)
             self.fn_effects[fn.name] = set(fn.effects)
 
+        self._register_externs()
         self.current_module = None
         self._register_impls()
         self._register_targets()
@@ -292,6 +297,7 @@ class Checker:
             self.functions,
             set(self.ctors),
             self.method_targets,
+            extern_fns=self.extern_fns,
             generic_fns=self.generic_fns,
             instantiations=self.instantiations,
             inst_subst=self.inst_subst,
@@ -547,6 +553,39 @@ class Checker:
         self.declared_effects = set(test.effects)
         self.return_type = UNIT
         self._check_block(test.body)
+
+    def _register_externs(self) -> None:
+        for ext in self.module.externs:
+            self.current_module = self._module_of(ext.span)
+            if ext.name in self.functions or ext.name in self.generic_fns:
+                self._err_duplicate("function", ext.name, ext.span)
+            # The C ABI surface is deliberately small: I64 and String (passed as a
+            # NUL-terminated char*) in; I64, String, or Unit out. Everything else
+            # is rejected rather than mis-marshalled.
+            params: list[Type] = []
+            for param in ext.params:
+                pty = self._resolve_type(param.type)
+                if pty not in (I64, STRING) and pty is not ERROR:
+                    self._err(
+                        "FFI002",
+                        f"extern parameter {param.name!r} has type {pty}; "
+                        "only I64 and String cross the C ABI",
+                        param.span,
+                    )
+                    pty = ERROR
+                params.append(pty)
+            ret = self._resolve_type(ext.return_type) if ext.return_type else UNIT
+            if ret not in (I64, STRING, UNIT) and ret is not ERROR:
+                self._err(
+                    "FFI002",
+                    f"extern return type {ret} is not supported; "
+                    "only I64, String, and Unit cross the C ABI",
+                    ext.span,
+                )
+                ret = ERROR
+            self.functions[ext.name] = FnType(tuple(params), ret)
+            self.fn_effects[ext.name] = set(ext.effects)
+            self.extern_fns.add(ext.name)
 
     def _target_result(self, span: Span | None) -> Type:
         """The value a target (or build intrinsic) call yields: Result<Unit, String>."""

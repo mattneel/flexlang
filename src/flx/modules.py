@@ -35,7 +35,10 @@ class ProgramInfo:
 
 
 def _decl_name(item: ast.Item) -> str | None:
-    if isinstance(item, (ast.FnDecl, ast.RecordDecl, ast.AdtDecl, ast.TraitDecl, ast.MacroDecl)):
+    if isinstance(
+        item,
+        (ast.FnDecl, ast.ExternFnDecl, ast.RecordDecl, ast.AdtDecl, ast.TraitDecl, ast.MacroDecl),
+    ):
         return item.name
     return None
 

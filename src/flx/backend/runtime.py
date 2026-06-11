@@ -48,6 +48,11 @@ void flx_int_to_str(long long n, FlxStr *out) {
     out->len = (long long)sprintf(buf, "%lld", n);
     out->ptr = buf;
 }
+// Wrap a C string returned by an extern call as a Flex String (NULL -> "").
+void flx_cstr_wrap(const char *p, FlxStr *out) {
+    out->ptr = p ? p : "";
+    out->len = p ? (long long)strlen(p) : 0;
+}
 void flx_str_concat(const char *p1, long long n1, const char *p2, long long n2, FlxStr *out) {
     char *buf = (char *)malloc((size_t)(n1 + n2) + 1);
     memcpy(buf, p1, (size_t)n1);
@@ -66,4 +71,5 @@ BASE_RUNTIME_DECLS = (
     "func.func private @flx_log(!llvm.ptr, i64)\n"
     "func.func private @flx_int_to_str(i64, !llvm.ptr)\n"
     "func.func private @flx_str_concat(!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr)\n"
+    "func.func private @flx_cstr_wrap(!llvm.ptr, !llvm.ptr)\n"
 )

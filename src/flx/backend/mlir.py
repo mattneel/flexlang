@@ -84,6 +84,7 @@ class FunctionLowerer:
         self.functions = checked.functions
         self.constructors = checked.constructors
         self.method_targets = checked.method_targets
+        self.extern_fns = checked.extern_fns
         self.globals: list[str] = []  # module-level string constants (not reset)
         self._str_count = 0
         self.lines: list[str] = []
@@ -678,6 +679,8 @@ class FunctionLowerer:
             spec_ty = self.functions[symbol]
             args = [self.lower_expr(a) for a in expr.args]
             return self._emit_call(f"flx_{symbol}", args, spec_ty)
+        if name in self.extern_fns:
+            return self._lower_extern_call(name, expr)
         if name == "to_str":  # prelude: I64 -> String
             arg = self.lower_expr(expr.args[0])
             assert arg is not None
@@ -790,6 +793,35 @@ class FunctionLowerer:
         self._emit(f"{out} = arith.cmpi eq, {lf}, {rf} : {field_ty}")
         return out
 
+    def _lower_extern_call(self, name: str, expr: ast.CallExpr) -> str | None:
+        """Call a C function by its unmangled symbol. Strings cross the ABI as
+        their (NUL-terminated) data pointer; a returned char* is wrapped back
+        into a Flex String by the runtime (NULL becomes \"\")."""
+        fn_ty = self.functions[name]
+        args: list[str] = []
+        types: list[str] = []
+        for arg_expr, pty in zip(expr.args, fn_ty.params, strict=True):
+            value = self.lower_expr(arg_expr)
+            assert value is not None
+            if pty is STRING:
+                ptr, _length = self._string_parts(value)
+                args.append(ptr)
+                types.append("!llvm.ptr")
+            else:
+                args.append(value)
+                types.append("i64")
+        arg_list = ", ".join(args)
+        type_list = ", ".join(types)
+        if fn_ty.ret is UNIT:
+            self._emit(f"func.call @{name}({arg_list}) : ({type_list}) -> ()")
+            return None
+        out = self._fresh()
+        cret = "!llvm.ptr" if fn_ty.ret is STRING else "i64"
+        self._emit(f"{out} = func.call @{name}({arg_list}) : ({type_list}) -> {cret}")
+        if fn_ty.ret is STRING:
+            return self._str_runtime("flx_cstr_wrap", ["!llvm.ptr"], [out])
+        return out
+
     def _emit_call(self, symbol: str, args: list[str | None], fn_ty: FnType) -> str | None:
         arg_list = ", ".join(a for a in args if a is not None)
         arg_types = ", ".join(mlir_type(t) for t in fn_ty.params)
@@ -852,6 +884,17 @@ class FunctionLowerer:
         return None
 
 
+def _extern_decls(checked: CheckResult) -> str:
+    """C-ABI declarations for `extern fn`s, by their unmangled symbol names."""
+    lines = []
+    for name in sorted(checked.extern_fns):
+        fn_ty = checked.functions[name]
+        params = ", ".join("!llvm.ptr" if p is STRING else "i64" for p in fn_ty.params)
+        ret = "" if fn_ty.ret is UNIT else " -> " + ("!llvm.ptr" if fn_ty.ret is STRING else "i64")
+        lines.append(f"func.func private @{name}({params}){ret}\n")
+    return "".join(lines)
+
+
 def emit_program(checked: CheckResult, *, with_tests: bool) -> str:
     """Emit MLIR for all functions, optionally including ``@flx_test_<i>``."""
     lowerer = FunctionLowerer(checked)
@@ -860,7 +903,7 @@ def emit_program(checked: CheckResult, *, with_tests: bool) -> str:
         for i, test in enumerate(checked.module.tests):
             parts.append(lowerer.lower_test(test, i))
     body = "\n".join(parts) + "\n"
-    decls = BASE_RUNTIME_DECLS + (_RUNTIME_DECLS if with_tests else "")
+    decls = BASE_RUNTIME_DECLS + (_RUNTIME_DECLS if with_tests else "") + _extern_decls(checked)
     globals_text = "".join(g + "\n" for g in lowerer.globals)
     return decls + globals_text + body
 

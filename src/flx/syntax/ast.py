@@ -313,6 +313,21 @@ class FnDecl(Item):
 
 
 @dataclass(frozen=True)
+class ExternFnDecl(Item):
+    """A C-ABI foreign function: `extern fn strlen(s: String) -> I64 uses { ... }`.
+
+    A trust declaration — the author asserts the C symbol's signature and its
+    effects; the effect system propagates them to callers like any other call."""
+
+    name: str
+    params: list[Param]
+    return_type: TypeExpr | None
+    effects: list[str]
+    span: Span
+    pub: bool = False
+
+
+@dataclass(frozen=True)
 class TargetDecl(Item):
     """A `build.flx` target: an effect-checked, runnable unit of build logic.
     `target name uses { Fs, Process } { body }`."""
@@ -445,6 +460,10 @@ class Module:
     @property
     def targets(self) -> list[TargetDecl]:
         return [it for it in self.items if isinstance(it, TargetDecl)]
+
+    @property
+    def externs(self) -> list[ExternFnDecl]:
+        return [it for it in self.items if isinstance(it, ExternFnDecl)]
 
     @property
     def default_target(self) -> str | None:

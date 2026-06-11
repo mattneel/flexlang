@@ -149,7 +149,12 @@ ok Main / add works
 - **`build.flx`** — builds are Flex programs: effect-checked `target`s where
   shelling out requires `Process`, driving the compiler requires `Fs`, calling a
   target demands its effects, and `?` propagates failure through the memoized
-  build graph. This repo [builds itself](build.flx) with it: `flx build`.
+  build graph. This repo [builds itself](build.flx) with it: `flx build`;
+- **FFI** — `extern fn` declares a C symbol's signature *and its effects* (a
+  trust declaration the effect system holds callers to). I64/String cross the
+  ABI; works on both backends — the interpreter calls libc via `ctypes`, so
+  even `uvx … flx run` can call C with no toolchain
+  ([FFI — Calling C](https://mattneel.github.io/flexlang/ffi.html)).
 
 ### Prototype / partial
 
@@ -167,7 +172,7 @@ ok Main / add works
   `docs/MVP.md` §3.2.
 
 See `examples/` for `add`, `result`, `records`, `effects`, `regions`, `macros`,
-`traits`, and the two-package `package-demo/`.
+`traits`, `ffi`, and the two-package `package-demo/`.
 
 ## Syntax highlighting
 

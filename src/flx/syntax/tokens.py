@@ -44,6 +44,7 @@ class TokenKind(Enum):
     KW_IMPL = auto()
     KW_PUB = auto()
     KW_TARGET = auto()
+    KW_EXTERN = auto()
 
     # delimiters
     LPAREN = auto()
@@ -113,6 +114,7 @@ KEYWORDS: dict[str, TokenKind] = {
     "impl": TokenKind.KW_IMPL,
     "pub": TokenKind.KW_PUB,
     "target": TokenKind.KW_TARGET,
+    "extern": TokenKind.KW_EXTERN,
 }
 
 

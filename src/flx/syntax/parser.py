@@ -137,6 +137,8 @@ class Parser:
                 self._advance()
             if self._at(TokenKind.KW_FN):
                 item: ast.Item = self._fn()
+            elif self._at(TokenKind.KW_EXTERN):
+                item = self._extern_fn()
             elif self._at(TokenKind.KW_TYPE):
                 item = self._type_decl([])
             elif self._at(TokenKind.KW_DERIVE):
@@ -155,7 +157,7 @@ class Parser:
                 tok = self._peek()
                 if pub_tok is not None:
                     raise self._error(
-                        f"`pub` can only precede a function, type, or trait, "
+                        f"`pub` can only precede a function, extern fn, type, or trait, "
                         f"found {self._describe(tok)}",
                         tok.span,
                     )
@@ -292,6 +294,24 @@ class Parser:
         effects = self._uses_clause()
         body = self._block()
         return ast.TestDecl(name, effects, body, start.to(body.span))
+
+    def _extern_fn(self) -> ast.ExternFnDecl:
+        start = self._advance().span  # `extern`
+        self._expect(TokenKind.KW_FN, "'fn'")
+        name = self._expect(TokenKind.IDENT, "a function name").text
+        self._expect(TokenKind.LPAREN, "'('")
+        params: list[ast.Param] = []
+        if not self._at(TokenKind.RPAREN):
+            params.append(self._param())
+            while self._eat(TokenKind.COMMA):
+                params.append(self._param())
+        end = self._expect(TokenKind.RPAREN, "')'").span
+        return_type: ast.TypeExpr | None = None
+        if self._eat(TokenKind.ARROW):
+            return_type = self._type()
+            end = return_type.span or end
+        effects = self._uses_clause()
+        return ast.ExternFnDecl(name, params, return_type, effects, start.to(end))
 
     def _target_name(self) -> Token:
         # Target names live in their own (build) namespace, so common ones that

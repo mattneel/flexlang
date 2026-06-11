@@ -1,0 +1,23 @@
+module Main
+
+// An `extern fn` declares a C symbol: its signature AND its effects. It is a
+// trust declaration — Flex can't verify C, so the author asserts what crossing
+// this boundary may do, and the effect system holds every caller to it.
+extern fn llabs(n: I64) -> I64
+extern fn strlen(s: String) -> I64
+extern fn getenv(name: String) -> String
+extern fn puts(s: String) -> I64 uses { Process }
+
+fn main() -> I64 uses { Process } = {
+  let r = puts("hello from libc")
+  llabs(0 - 40) + strlen("ab")
+}
+
+test "pure C calls" {
+  assert_eq(llabs(0 - 7), 7)
+  assert_eq(strlen("hello"), 5)
+}
+
+test "NULL char* becomes the empty string" {
+  assert_eq(strlen(getenv("FLX_NO_SUCH_VAR_XYZ")), 0)
+}

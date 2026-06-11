@@ -20,6 +20,7 @@ from flx import driver
 RUN_EXIT = {
     "add": 42,
     "effects": 42,
+    "ffi": 42,
     "hello": 42,
     "macros": 67,
     "records": 142,

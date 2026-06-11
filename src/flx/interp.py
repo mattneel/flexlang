@@ -15,11 +15,13 @@ an ADT value -> :class:`Variant`. Control flow that escapes an expression — ea
 
 from __future__ import annotations
 
+import ctypes
 import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from flx.syntax import ast
+from flx.types import STRING, UNIT
 
 if TYPE_CHECKING:
     from flx.sema.check import CheckResult
@@ -103,6 +105,19 @@ _PROPAGATE = {"Err", "None"}  # `?` short-circuits on these builtin variants
 _UNWRAP = {"Ok", "Some"}
 
 
+def _fflush_libc() -> None:
+    """Flush every C stdio stream (fflush(NULL)) so extern-call output lands
+    immediately rather than at process exit."""
+    try:
+        libc = ctypes.CDLL(None)
+        fflush = libc.fflush
+        fflush.argtypes = [ctypes.c_void_p]
+        fflush.restype = ctypes.c_int
+        fflush(None)
+    except OSError, AttributeError:  # no libc to flush (non-POSIX)
+        pass
+
+
 class Interpreter:
     def __init__(self, checked: CheckResult, max_steps: int | None = None) -> None:
         self.checked = checked
@@ -122,6 +137,10 @@ class Interpreter:
         # terminate): counted per evaluated expression; None = unbounded.
         self.max_steps = max_steps
         self.steps = 0
+        # C-ABI foreign functions, dispatched through ctypes against the symbols
+        # already loaded in this process (libc and friends).
+        self.extern_fns = checked.extern_fns
+        self._extern_cache: dict[str, object] = {}
 
     # --- entry points ---------------------------------------------------------
 
@@ -389,10 +408,57 @@ class Interpreter:
         if name in self.constructors:
             payload = self.eval(expr.args[0], env) if expr.args else None
             return Variant(name, payload)
+        if name in self.extern_fns:
+            return self._call_extern(name, [self.eval(a, env) for a in expr.args])
         func = self.functions.get(name)
         if func is None:
             raise FlexRuntimeError(f"call to unknown function {name!r}")
         return self.call(func, [self.eval(a, env) for a in expr.args])
+
+    def _call_extern(self, name: str, args: list[object]) -> object:
+        fn_ty = self.checked.functions[name]
+        cfn = self._extern_cache.get(name)
+        if cfn is None:
+            try:
+                cfn = getattr(ctypes.CDLL(None), name)
+            except OSError, AttributeError:
+                raise FlexRuntimeError(
+                    f"extern symbol {name!r} not found in this process"
+                ) from None
+            cfn.argtypes = [
+                ctypes.c_char_p if p is STRING else ctypes.c_longlong for p in fn_ty.params
+            ]
+            if fn_ty.ret is STRING:
+                cfn.restype = ctypes.c_char_p
+            elif fn_ty.ret is UNIT:
+                cfn.restype = None
+            else:
+                cfn.restype = ctypes.c_longlong
+            self._extern_cache[name] = cfn
+        cargs: list[object] = []
+        for v, p in zip(args, fn_ty.params, strict=True):
+            if p is STRING:
+                cargs.append(str(v).encode("utf-8"))
+            else:  # I64 (the checker admits nothing else)
+                assert isinstance(v, int)
+                cargs.append(_wrap(v))
+        # Python and libc buffer stdout independently inside this one process:
+        # flush ours before the call and libc's after, so interleaved output
+        # appears in call order — exactly as it would from a native binary.
+        sys.stdout.flush()
+        try:
+            result = cfn(*cargs)  # type: ignore[operator]
+        except (ctypes.ArgumentError, OSError) as exc:
+            raise FlexRuntimeError(f"extern call {name!r} failed: {exc}") from None
+        finally:
+            _fflush_libc()
+        if fn_ty.ret is STRING:
+            # A NULL char* comes back as the empty string (no null pointers in Flex).
+            return result.decode("utf-8", "replace") if result is not None else ""
+        if fn_ty.ret is UNIT:
+            return None
+        assert isinstance(result, int)
+        return _wrap(result)
 
     def _builtin(self, name: str, expr: ast.CallExpr, env: _Env) -> object:
         if name == "assert":
