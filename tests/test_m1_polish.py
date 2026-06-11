@@ -68,11 +68,11 @@ def test_io_matches_native(tmp_path: Path, capfd: pytest.CaptureFixture[str]) ->
     assert (interp_code, interp_out) == (native_code, native_out) == (0, "abc\n")
 
 
-def test_read_line_eof_is_empty(tmp_path: Path) -> None:
-    # Closed stdin: read_line() yields "".
+def test_read_line_eof_is_none(tmp_path: Path) -> None:
+    # Closed stdin: read_line() yields None (M6 made EOF distinguishable).
     src = (
-        "module Main\nimport Std.IO\nimport Std.Str\n"
-        "fn main() -> I64 uses { Fs } = { length(read_line()) }\n"
+        "module Main\nimport Std.IO\n"
+        "fn main() -> I64 uses { Fs } = { match read_line() { Some(l) => 1  None => 0 } }\n"
     )
     path = _write(tmp_path, src)
     proc = subprocess.run(
@@ -84,8 +84,9 @@ def test_read_line_eof_is_empty(tmp_path: Path) -> None:
 def test_read_line_via_cli(tmp_path: Path) -> None:
     src = (
         "module Main\nimport Std.IO\nimport Std.Str\n"
-        "fn main() -> I64 uses { Fs, Log } = { let l = read_line()\n"
-        '  println("got: " ++ l)\n  length(l) }\n'
+        "fn main() -> I64 uses { Fs, Log } = { match read_line() {\n"
+        '    Some(l) => { println("got: " ++ l)\n      length(l) }\n'
+        "    None => 99\n  } }\n"
     )
     path = _write(tmp_path, src)
     proc = subprocess.run(
@@ -285,9 +286,11 @@ def test_read_line_shares_libc_stdin_buffer(tmp_path: Path) -> None:
     src = (
         "module Main\nimport Std.IO\n"
         "extern fn getchar() -> I32 uses { Fs }\n"
+        "fn line_or(d: String) -> String uses { Fs } = {\n"
+        "  match read_line() { Some(l) => l  None => d }\n}\n"
         "fn main() -> I64 uses { Fs, Log } = {\n"
-        "  let a = read_line()\n  let c1 = getchar()\n  let c2 = getchar()\n"
-        "  let b = read_line()\n"
+        '  let a = line_or("<eof>")\n  let c1 = getchar()\n  let c2 = getchar()\n'
+        '  let b = line_or("<eof>")\n'
         '  println("a=[" ++ a ++ "] c1=" ++ to_str(c1) ++ " c2=" ++ to_str(c2)'
         ' ++ " b=[" ++ b ++ "]")\n  0\n}\n'
     )

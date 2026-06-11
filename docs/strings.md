@@ -26,12 +26,17 @@ fn main() -> I64 uses { Log } = {
 
 ## Reading
 
+`read_line()` returns `Option<String>`: `Some(line)` with the newline
+stripped — `Some("")` for a blank line — and `None` at end of input.
+
 ```flex
 import Std.IO
 
 fn main() -> I64 uses { Fs, Log } = {
-  let line = read_line()   // one line, newline stripped; "" at end of input
-  println("you said: " ++ line)
+  match read_line() {
+    Some(line) => { println("you said: " ++ line) }
+    None => { println("(no input)") }
+  }
   0
 }
 ```
@@ -72,14 +77,29 @@ fn main() -> I64 uses { Time, Log } = {
 }
 ```
 
+## Bytes
+
+Strings are byte strings. `byte_at(s, i)` reads byte `i`; `from_byte(b)` and
+`from_bytes(bs)` build strings back from bytes (1..255 — byte 0 is the NUL
+terminator and panics). String literals accept `\xNN` byte escapes:
+
+```flex
+import Std.Str
+
+test "bytes round-trip" {
+  assert_eq(byte_at("\xff", 0), 255)
+  assert_eq(from_bytes([195, 169]), "é")
+}
+```
+
 ## Beyond this page
 
 Much of what this page once listed as missing has shipped: floats and
 hex/bitwise live in [Numbers, Bits, and Function Values](numerics.md), and
-byte-level access — `byte_at`, `substr`, `char_at`, `split`, `parse_int` —
-is in [`Std.Str`](api/Std.Str.md) (generated from the compiler, examples
-executed in CI).
+byte-level access — `byte_at`, `substr`, `char_at`, `split`, `parse_int`,
+`from_byte`, `from_bytes` — is in [`Std.Str`](api/Std.Str.md) (generated
+from the compiler, examples executed in CI).
 
 Still missing, and the compiler says so at the exact place you try them:
 format strings, `parse_float` (declare `extern fn atof(s: String) -> F64`),
-byte-to-String construction (`chr`), and string literal patterns.
+and string literal patterns.

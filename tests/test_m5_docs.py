@@ -189,7 +189,7 @@ def test_index_assign_hint() -> None:
 
 def test_unknown_escape_is_an_error() -> None:
     with pytest.raises(FlexError) as exc:
-        parse('fn main() -> I64 uses { Log } = { Log.info("a\\x41b")\n 0 }')
+        parse('fn main() -> I64 uses { Log } = { Log.info("a\\qb")\n 0 }')
     assert any("unknown string escape" in d.message for d in exc.value.diagnostics)
 
 

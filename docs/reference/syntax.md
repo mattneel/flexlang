@@ -43,8 +43,19 @@ assert_eq(1 << 2 + 3, 32)
 
 ## String escapes
 
-The escape set is `\n` `\t` `\r` `\"` `\\` — anything else is a compile
-error, never silent mangling. Prose blocks use `\"\"\"` and are raw.
+The escape set is `\n` `\t` `\r` `\"` `\\` `\xNN` — anything else is a
+compile error, never silent mangling. `\xNN` is a raw BYTE (two hex digits,
+1..FF — never 0, strings are NUL-terminated), so adjacent escapes can spell
+a multi-byte UTF-8 character. Prose blocks use `\"\"\"` and are raw.
+
+**Example: hex escapes are bytes** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq("\x41", "A")
+assert_eq(byte_at("\xff", 0), 255)
+assert_eq("\xc3\xa9", "é")
+assert_eq(from_byte(0x41), "\x41")
+```
 
 ## Literals
 

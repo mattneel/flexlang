@@ -156,10 +156,8 @@ _EFFECT_MODULES = {"Fs", "Http", "Db", "Log", "Time", "Alloc", "Random", "Proces
 _KNOWN_ABSENT: dict[str, str] = {
     "break": "loops have no break; use a flag in the `while` condition, or an early `return`",
     "continue": "loops have no continue; guard the rest of the body with an `if`",
-    "chr": "there is no byte-to-String construction yet; keep data as byte lists "
-    "(List<I64>) and print via FFI putchar, or build strings only from existing strings",
-    "from_byte": "there is no byte-to-String construction yet (see `chr`)",
-    "from_bytes": "there is no byte-to-String construction yet (see `chr`)",
+    "chr": 'Flex calls it from_byte: import Std.Str, then from_byte(65) is "A" '
+    "(from_bytes builds a string from a whole List<I64>)",
     "parse_float": "parse_float does not exist yet; declare libc's parser: "
     "`extern fn atof(s: String) -> F64` (import Std.Str for parse_int)",
     "to_float": "see parse_float: declare `extern fn atof(s: String) -> F64`",
@@ -171,6 +169,28 @@ _KNOWN_ABSENT: dict[str, str] = {
     "printf": "there is no printf; use println (import Std.IO) with `++` and to_str",
     "input": "use read_line() (import Std.IO, uses { Fs })",
 }
+
+# Stdlib names users reach for without the import. A plain "unknown name" on
+# `split` or `from_byte` reads as "Flex can't do this"; name the module instead.
+_NEEDS_IMPORT: dict[str, str] = (
+    dict.fromkeys(("print", "println", "read_line"), "Std.IO")
+    | dict.fromkeys(
+        (
+            "length",
+            "is_empty",
+            "split",
+            "parse_int",
+            "byte_at",
+            "substr",
+            "char_at",
+            "from_byte",
+            "from_bytes",
+        ),
+        "Std.Str",
+    )
+    | dict.fromkeys(("map", "filter", "fold", "range"), "Std.List")
+    | dict.fromkeys(("sqrt", "abs", "min", "max", "floor", "ceil"), "Std.Math")
+)
 
 # Build-only intrinsics under `flx.` (available when the module declares targets).
 _FLX_BUILD_OPS = {"check", "test", "run", "expand", "build"}
@@ -184,18 +204,35 @@ _BOOLEAN = {"&&", "||"}
 _I64_MAX = 2**63 - 1
 _NO_SPAN = Span("<builtin>", Pos(0, 0, 0), Pos(0, 0, 0))
 
+
+class _InstantiateRet:
+    """An _INTRINSICS return type that needs a live checker to build: generic
+    builtin ADTs (Option<String>) must be settled instantiations — with their
+    variants resolved through the checker's cache — for match to work."""
+
+    def __init__(self, adt: str, args: tuple[Type, ...]) -> None:
+        self.adt = adt
+        self.args = args
+
+
+_OPTION_OF_STRING = _InstantiateRet("Option", (STRING,))
+
 # (module, method) -> (effect, param types, return type).
-_INTRINSICS: dict[tuple[str, str], tuple[str, tuple[Type, ...], Type]] = {
+_INTRINSICS: dict[tuple[str, str], tuple[str, tuple[Type, ...], Type | _InstantiateRet]] = {
     ("Log", "info"): ("Log", (STRING,), UNIT),
     ("Log", "warn"): ("Log", (STRING,), UNIT),
     ("Log", "error"): ("Log", (STRING,), UNIT),
     ("Log", "print"): ("Log", (STRING,), UNIT),  # no trailing newline
-    ("Fs", "read_line"): ("Fs", (), STRING),  # one line from stdin, "" at EOF
+    # One stdin line, trailing newline stripped: Some(line) — Some("") for a
+    # blank line — and None at end of input, distinguishably.
+    ("Fs", "read_line"): ("Fs", (), _OPTION_OF_STRING),
     ("Time", "monotonic_ms"): ("Time", (), I64),
     # Strings are byte strings: byte_at/substr index BYTES (UTF-8 sequences can
     # split; surrogateescape keeps the bytes lossless). Pure ("" = no effect).
     ("Str", "byte_at"): ("", (STRING, I64), I64),  # panics out of bounds
     ("Str", "substr"): ("", (STRING, I64, I64), STRING),  # clamps to the string
+    ("Str", "from_byte"): ("", (I64,), STRING),  # panics outside 1..255
+    ("Str", "from_bytes"): ("", (ListType(I64),), STRING),  # panics per element
     ("Env", "argv"): ("Process", (), ListType(STRING)),  # user args, no argv[0]
 }
 
@@ -1377,6 +1414,15 @@ class Checker:
                 help=absent,
             )
             return ERROR
+        needs = _NEEDS_IMPORT.get(expr.name)
+        if needs is not None:
+            self._err(
+                "NAME001",
+                f"unknown name {expr.name!r}",
+                expr.span,
+                help=f"`import {needs}` provides {expr.name}",
+            )
+            return ERROR
         self._err("NAME001", f"unknown name {expr.name!r}", expr.span)
         return ERROR
 
@@ -1573,11 +1619,15 @@ class Checker:
         if len(call.args) != len(params):
             self._err("TYPE005", f"{module}.{method} expects {len(params)} argument(s)", call.span)
         for arg, expected in zip(call.args, params, strict=False):
-            self._expect(expected, self._check_expr(arg), arg.span, "argument")
+            # The param type is inference context too, so from_bytes([]) infers
+            # List<I64> instead of tripping over the empty literal.
+            self._expect(expected, self._check_expr(arg, expected), arg.span, "argument")
         for extra in call.args[len(params) :]:
             self._check_expr(extra)
         if effect:
             self._require_effects({effect}, call.span)
+        if isinstance(ret, _InstantiateRet):
+            return self._instantiate(ret.adt, list(ret.args), call.span)
         return ret
 
     def _infer_list_op(self, op: str, call: ast.CallExpr) -> Type:

@@ -350,7 +350,8 @@ def test_read_line_truncates_at_nul(tmp_path: Path) -> None:
     # strlen-based ops see, so read_line cuts at the first NUL.
     src = (
         "module Main\nimport Std.IO\nimport Std.Str\n"
-        "fn main() -> I64 uses { Fs } = { length(read_line()) }\n"
+        "fn main() -> I64 uses { Fs } = {\n"
+        "  match read_line() { Some(l) => length(l)  None => 99 }\n}\n"
     )
     path = _write(tmp_path, src)
     proc = subprocess.run(

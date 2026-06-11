@@ -202,8 +202,9 @@ def _libc_fgetc() -> tuple[Callable[[ctypes.c_void_p], int], ctypes.c_void_p] | 
     return None
 
 
-def _read_line() -> str:
-    """One line of stdin with the trailing newline stripped; "" at EOF. Reads
+def _read_line() -> str | None:
+    """One line of stdin with the trailing newline stripped, or None at end of
+    input — a blank line is "" and EOF is None, distinguishably. Reads
     byte-wise through libc stdio (see _libc_fgetc); byte-lossless via
     surrogateescape, matching extern string marshalling."""
     via_libc = None
@@ -214,21 +215,39 @@ def _read_line() -> str:
         pass
     if via_libc is None:
         line = sys.stdin.readline()
+        if line == "":
+            return None  # EOF: readline yields "" only at end of input
         line = line[:-1] if line.endswith("\n") else line
         # Truncate at an embedded NUL (strings are NUL-terminated; the native
         # runtime's strlen-based extent must match the stored length).
         return line.split("\x00", 1)[0]
     fgetc, stream = via_libc
     buf = bytearray()
+    saw_input = False
     while True:
         ch = fgetc(stream)
-        if ch in (-1, 0x0A):  # EOF / '\n'
+        if ch == -1:  # EOF: a final unterminated line still returns its bytes
+            break
+        saw_input = True
+        if ch == 0x0A:  # '\n'
             break
         buf.append(ch & 0xFF)
+    if not saw_input:
+        return None
     nul = buf.find(0)
     if nul >= 0:
         del buf[nul:]  # see above: the first NUL ends the string
     return buf.decode("utf-8", "surrogateescape")
+
+
+def _checked_byte(b: object) -> int:
+    """Validate a string byte for from_byte/from_bytes: 1..255 (byte 0 is the
+    NUL terminator and cannot be carried). The message matches the native
+    runtime byte-for-byte."""
+    assert isinstance(b, int)
+    if not 1 <= b <= 255:
+        raise FlexRuntimeError(f"byte {b} is outside 1..255 (strings are NUL-terminated)")
+    return b
 
 
 class Interpreter:
@@ -464,7 +483,14 @@ class Interpreter:
         left = self.eval(expr.left, env)
         right = self.eval(expr.right, env)
         if op == "++":
-            return f"{left}{right}"
+            out = f"{left}{right}"
+            if not out.isascii():
+                # Re-canonicalize: adjacent surrogate-escaped bytes can complete
+                # a UTF-8 sequence (from_byte(195) ++ from_byte(169) IS "é" on
+                # the wire, and native strcmp says so) — equal byte strings must
+                # be equal Python strings.
+                out = out.encode("utf-8", "surrogateescape").decode("utf-8", "surrogateescape")
+            return out
         if op == "==":
             return _struct_eq(left, right)
         if op == "!=":
@@ -603,7 +629,8 @@ class Interpreter:
                 and not shadowed
             ):
                 sys.stdout.flush()
-                return _read_line()
+                line = _read_line()
+                return Variant("None") if line is None else Variant("Some", line)
             if (
                 isinstance(obj, ast.NameExpr)
                 and obj.name == "Time"
@@ -680,6 +707,17 @@ class Interpreter:
         raise FlexRuntimeError(f"cannot interpret List.{op}")
 
     def _str_op(self, op: str, expr: ast.CallExpr, env: _Env) -> object:
+        if op == "from_byte":
+            b = self.eval(expr.args[0], env)
+            assert isinstance(b, int)
+            return bytes([_checked_byte(b)]).decode("utf-8", "surrogateescape")
+        if op == "from_bytes":
+            xs = self.eval(expr.args[0], env)
+            assert isinstance(xs, list)
+            raw = bytes(_checked_byte(b) for b in xs)
+            # Decoding canonicalizes: completed UTF-8 sequences become their
+            # characters, stray bytes stay surrogates — same form as literals.
+            return raw.decode("utf-8", "surrogateescape")
         # BYTE semantics, matching the native runtime exactly: index the UTF-8
         # bytes (surrogateescape keeps split sequences lossless).
         data = str(self.eval(expr.args[0], env)).encode("utf-8", "surrogateescape")

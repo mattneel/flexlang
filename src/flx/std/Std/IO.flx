@@ -1,14 +1,14 @@
 module Std.IO
 
 // Console IO. Output is the Log capability; reading stdin is the Fs capability
-// (standard input is a stream read). `read_line` returns one line with the
-// trailing newline stripped, and "" at end of input.
+// (standard input is a stream read). `read_line` returns Some(line) with the
+// trailing newline stripped — Some("") for a blank line — and None at EOF.
 
 pub fn print(s: String) -> Unit uses { Log } = { Log.print(s) }
 
 pub fn println(s: String) -> Unit uses { Log } = { Log.info(s) }
 
-pub fn read_line() -> String uses { Fs } = { Fs.read_line() }
+pub fn read_line() -> Option<String> uses { Fs } = { Fs.read_line() }
 
 // --- documentation ---------------------------------------------------------------
 
@@ -40,19 +40,23 @@ doc println {
 }
 
 doc read_line {
-  summary "Read one line from stdin, trailing newline stripped; \"\" at EOF."
+  summary "Read one line from stdin: Some(line) with the newline stripped, None at EOF."
   text """
-  KNOWN LIMITATION: a blank line and end-of-input both return `""`, so they
-  cannot be told apart from in-language. For byte-exact input handling,
-  declare `extern fn getchar() -> I32 uses { Fs }` and read to a true EOF
-  (-1). An Option-returning read is the roadmap.
+  A blank line is `Some("")` and end of input is `None` — distinguishable, so
+  reading every line loses nothing. A final line with no trailing newline is
+  still returned (then `None` on the next call). A line containing an embedded
+  NUL byte is truncated at the NUL (strings are NUL-terminated). Bytes are
+  read losslessly — no encoding is assumed.
   """
   snippet "a read loop (interactive — not run here)" {
-    mut line = read_line()
-    while !is_empty(line) {
-      println("got: " ++ line)
-      line = read_line()
+    mut going = true
+    while going {
+      match read_line() {
+        Some(line) => { println("got: " ++ line) }
+        None => { going = false }
+      }
     }
   }
-  status partial
+  since "0.0.1"
+  status implemented
 }

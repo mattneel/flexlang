@@ -46,24 +46,27 @@ println("hello from a doc example")
 ## read_line
 
 ```flx
-fn read_line() -> String uses { Fs }
+fn read_line() -> Option<String> uses { Fs }
 ```
 
-Read one line from stdin, trailing newline stripped; "" at EOF.
+Read one line from stdin: Some(line) with the newline stripped, None at EOF.
 
-KNOWN LIMITATION: a blank line and end-of-input both return `""`, so they
-cannot be told apart from in-language. For byte-exact input handling,
-declare `extern fn getchar() -> I32 uses { Fs }` and read to a true EOF
-(-1). An Option-returning read is the roadmap.
+A blank line is `Some("")` and end of input is `None` — distinguishable, so
+reading every line loses nothing. A final line with no trailing newline is
+still returned (then `None` on the next call). A line containing an embedded
+NUL byte is truncated at the NUL (strings are NUL-terminated). Bytes are
+read losslessly — no encoding is assumed.
 
 **Sketch: a read loop (interactive — not run here)** — illustration only, not checked:
 
 ```flx
-mut line = read_line()
-while !is_empty(line) {
-  println("got: " ++ line)
-  line = read_line()
+mut going = true
+while going {
+  match read_line() {
+    Some(line) => { println("got: " ++ line) }
+    None => { going = false }
+  }
 }
 ```
 
-*status: partial*
+*since 0.0.1 · status: implemented*

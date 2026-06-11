@@ -140,6 +140,57 @@ assert_eq(char_at("hello", 1), "e")
 assert_eq(char_at("hello", 99), "")
 ```
 
+## from_byte
+
+```flx
+fn from_byte(b: I64) -> String
+```
+
+A one-byte string from a byte value (panics outside 1..255).
+
+The inverse of `byte_at`. Byte 0 is rejected — strings are NUL-terminated,
+so a string cannot carry it. Bytes >= 0x80 are raw bytes, not characters:
+a multi-byte UTF-8 character needs `from_bytes` (or `++` the pieces).
+
+**Example: builds bytes back into strings** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(from_byte(65), "A")
+assert_eq(from_byte(0xE9), "\xe9")
+assert_eq(from_byte(195) ++ from_byte(169), "é")
+assert_eq(byte_at(from_byte(255), 0), 255)
+```
+
+See also: `from_bytes`, `byte_at`
+
+## from_bytes
+
+```flx
+fn from_bytes(bs: List<I64>) -> String
+```
+
+A string from a whole List<I64> of bytes (panics on any byte outside 1..255).
+
+`from_bytes([])` is `""`. Round-trips with `byte_at`: collecting a string's
+bytes and rebuilding yields an equal string.
+
+**Example: builds strings from byte lists** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(from_bytes([104, 105]), "hi")
+assert_eq(from_bytes([195, 169]), "é")
+assert_eq(from_bytes([]), "")
+mut bs: List<I64> = []
+mut i = 0
+while i < length("flex") {
+  List.push(bs, byte_at("flex", i))
+  i = i + 1
+}
+assert_eq(from_bytes(bs), "flex")
+```
+
+See also: `from_byte`
+
 ## split
 
 ```flx

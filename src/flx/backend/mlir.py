@@ -373,7 +373,9 @@ class FunctionLowerer:
     # --- strings: {ptr, i64 length} backed by a module-level global -----------
 
     def _lower_string(self, expr: ast.StringLit) -> str:
-        data = expr.value.encode("utf-8")
+        # surrogateescape: \xNN escapes >= 0x80 cook to surrogates in the AST
+        # value; emission turns them back into the raw bytes they stand for.
+        data = expr.value.encode("utf-8", "surrogateescape")
         name = f"@__flx_str_{self._str_count}"
         self._str_count += 1
         escaped = "".join(
@@ -416,6 +418,39 @@ class FunctionLowerer:
         self._emit(f"func.call @{symbol}({args}) : ({types}) -> ()")
         out = self._fresh()
         self._emit(f"{out} = llvm.load {slot} : !llvm.ptr -> !llvm.struct<(ptr, i64)>")
+        return out
+
+    def _lower_read_line(self) -> str:
+        """Fs.read_line() -> Option<String>: the runtime reports EOF as a flag,
+        and the Option {i32 tag, i64 slot} is assembled here exactly as a
+        Some(s)/None constructor pair would build it (None=0, Some=1; a String
+        payload is a boxed {ptr, len} cell)."""
+        str_mty = "!llvm.struct<(ptr, i64)>"
+        one = self._fresh()
+        self._emit(f"{one} = llvm.mlir.constant(1 : i64) : i64")
+        slot = self._fresh()
+        self._emit(f"{slot} = llvm.alloca {one} x {str_mty} : (i64) -> !llvm.ptr")
+        got = self._fresh()
+        self._emit(f"{got} = func.call @__flx_read_line_opt({slot}) : (!llvm.ptr) -> i64")
+        s = self._fresh()
+        self._emit(f"{s} = llvm.load {slot} : !llvm.ptr -> {str_mty}")
+        boxed = self._box(s, str_mty)
+        zero = self._const("0", "i64")
+        is_some = self._fresh()
+        self._emit(f"{is_some} = arith.cmpi ne, {got}, {zero} : i64")
+        some_tag = self._const("1", "i32")
+        none_tag = self._const("0", "i32")
+        tag = self._fresh()
+        self._emit(f"{tag} = arith.select {is_some}, {some_tag}, {none_tag} : i32")
+        payload = self._fresh()
+        self._emit(f"{payload} = arith.select {is_some}, {boxed}, {zero} : i64")
+        opt_mty = "!llvm.struct<(i32, i64)>"
+        undef = self._fresh()
+        self._emit(f"{undef} = llvm.mlir.undef : {opt_mty}")
+        with_tag = self._fresh()
+        self._emit(f"{with_tag} = llvm.insertvalue {tag}, {undef}[0] : {opt_mty}")
+        out = self._fresh()
+        self._emit(f"{out} = llvm.insertvalue {payload}, {with_tag}[1] : {opt_mty}")
         return out
 
     # --- slots: memref for scalars, llvm.alloca for aggregates ----------------
@@ -948,7 +983,7 @@ class FunctionLowerer:
                     self._emit(f"func.call @{runtime_fn}({ptr}, {length}) : (!llvm.ptr, i64) -> ()")
                     return None
                 if obj.name == "Fs" and method == "read_line":
-                    return self._str_runtime("__flx_read_line", [], [])
+                    return self._lower_read_line()
                 if obj.name == "Time" and method == "monotonic_ms":
                     out = self._fresh()
                     self._emit(f"{out} = func.call @__flx_monotonic_ms() : () -> i64")
@@ -975,6 +1010,12 @@ class FunctionLowerer:
                         ["!llvm.ptr", "i64", "i64", "i64"],
                         [ptr, length, start, count],
                     )
+                if obj.name == "Str" and method == "from_byte":
+                    b = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
+                    return self._str_runtime("__flx_from_byte", ["i64"], [b])
+                if obj.name == "Str" and method == "from_bytes":
+                    xs = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
+                    return self._str_runtime("__flx_from_bytes", ["!llvm.ptr"], [xs])
                 if obj.name == "Env" and method == "argv":
                     out = self._fresh()
                     self._emit(f"{out} = func.call @__flx_argv() : () -> !llvm.ptr")

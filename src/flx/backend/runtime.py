@@ -95,8 +95,10 @@ void __flx_print(const char *p, long long n) {
     fwrite(p, 1, (size_t)n, stdout);
     fflush(stdout);
 }
-// One line from stdin, trailing newline stripped; "" at EOF (Fs.read_line).
-void __flx_read_line(FlxStr *out) {
+// One line from stdin for Fs.read_line(): returns 1 with *out filled (trailing
+// newline stripped), or 0 at end of input — the lowering builds Some/None from
+// the flag, so a blank line (1, "") and EOF (0) are distinguishable.
+long long __flx_read_line_opt(FlxStr *out) {
     char *line = NULL;
     size_t cap = 0;
     long long n = (long long)getline(&line, &cap, stdin);
@@ -104,7 +106,7 @@ void __flx_read_line(FlxStr *out) {
         free(line);
         out->ptr = "";
         out->len = 0;
-        return;
+        return 0;
     }
     if (line[n - 1] == '\\n') n--;
     line[n] = 0;
@@ -113,6 +115,7 @@ void __flx_read_line(FlxStr *out) {
     // truncated at the first NUL on BOTH backends.
     out->ptr = line;
     out->len = (long long)strlen(line);
+    return 1;
 }
 // Monotonic wall clock in milliseconds (Time.monotonic_ms).
 long long __flx_monotonic_ms(void) {
@@ -239,6 +242,34 @@ void __flx_substr(const char *p, long long n, long long start, long long count, 
     out->ptr = buf;
     out->len = count;
 }
+// Byte -> String construction (Std.Str from_byte/from_bytes). Bytes must be
+// 1..255: byte 0 is the NUL terminator and cannot be carried by a string.
+static void __flx_byte_check(long long b) {
+    if (b < 1 || b > 255) {
+        char msg[64];
+        snprintf(msg, sizeof msg, "byte %lld is outside 1..255 (strings are NUL-terminated)", b);
+        __flx_runtime_fail(msg);
+    }
+}
+void __flx_from_byte(long long b, FlxStr *out) {
+    __flx_byte_check(b);
+    char *buf = (char *)__flx_box(2);
+    buf[0] = (char)b;
+    buf[1] = 0;
+    out->ptr = buf;
+    out->len = 1;
+}
+void __flx_from_bytes(void *lp, FlxStr *out) {
+    FlxList *l = (FlxList *)lp;
+    char *buf = (char *)__flx_box(l->len + 1);
+    for (long long i = 0; i < l->len; i++) {
+        __flx_byte_check(l->data[i]);
+        buf[i] = (char)l->data[i];
+    }
+    buf[l->len] = 0;
+    out->ptr = buf;
+    out->len = l->len;
+}
 // Program arguments, captured by the run shim's main(). Env.argv() yields the
 // USER arguments only (argv[0] is the executable path, which differs across
 // backends, so it is deliberately excluded).
@@ -267,7 +298,7 @@ BASE_RUNTIME_DECLS = (
     "func.func private @__flx_imod(i64, i64) -> i64\n"
     "func.func private @__flx_log(!llvm.ptr, i64)\n"
     "func.func private @__flx_print(!llvm.ptr, i64)\n"
-    "func.func private @__flx_read_line(!llvm.ptr)\n"
+    "func.func private @__flx_read_line_opt(!llvm.ptr) -> i64\n"
     "func.func private @__flx_monotonic_ms() -> i64\n"
     "func.func private @__flx_int_to_str(i64, !llvm.ptr)\n"
     "func.func private @__flx_str_concat(!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr)\n"
@@ -280,6 +311,8 @@ BASE_RUNTIME_DECLS = (
     "func.func private @__flx_list_len(!llvm.ptr) -> i64\n"
     "func.func private @__flx_byte_at(!llvm.ptr, i64, i64) -> i64\n"
     "func.func private @__flx_substr(!llvm.ptr, i64, i64, i64, !llvm.ptr)\n"
+    "func.func private @__flx_from_byte(i64, !llvm.ptr)\n"
+    "func.func private @__flx_from_bytes(!llvm.ptr, !llvm.ptr)\n"
     "func.func private @__flx_argv() -> !llvm.ptr\n"
     "func.func private @__flx_f64_to_str(f64, !llvm.ptr)\n"
     "func.func private @__flx_f64_to_i64(f64) -> i64\n"

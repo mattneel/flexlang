@@ -131,16 +131,18 @@ class Lexer:
                 if self.i >= len(self.source):
                     raise self._error("unterminated string literal", start)
                 esc = self._advance()
+                if esc == "x":
+                    chars.append(self._hex_escape(start))
+                    continue
                 # NB: no \0 — strings are NUL-terminated, so an embedded NUL
                 # would split the string's strlen extent from its stored length.
                 known = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\"}
                 if esc not in known:
                     # An unknown escape used to silently drop the backslash
-                    # ("\x41" became "x41") — mangling data is worse than an error.
-                    hint = " (\\xNN byte escapes are not supported yet)" if esc == "x" else ""
+                    # ("\q" became "q") — mangling data is worse than an error.
                     raise self._error(
-                        f'unknown string escape "\\{esc}"{hint}; '
-                        'the escapes are \\n \\t \\r \\" \\\\',
+                        f'unknown string escape "\\{esc}"; '
+                        'the escapes are \\n \\t \\r \\" \\\\ \\xNN',
                         start,
                     )
                 chars.append(known[esc])
@@ -148,7 +150,35 @@ class Lexer:
                 raise self._error("unterminated string literal", start)
             else:
                 chars.append(ch)
-        return Token(TokenKind.STRING, "".join(chars), self._span(start))
+        text = "".join(chars)
+        if not text.isascii():
+            # One canonical representation per byte sequence: \xNN bytes cook to
+            # surrogates, and adjacent escapes can complete a valid UTF-8
+            # sequence ("\xc3\xa9" IS "é" on the wire) — re-decode so equal byte
+            # strings are equal Python strings, the form read_line/argv produce.
+            text = text.encode("utf-8", "surrogateescape").decode("utf-8", "surrogateescape")
+        return Token(TokenKind.STRING, text, self._span(start))
+
+    def _hex_escape(self, start: Pos) -> str:
+        """A \\xNN byte escape: exactly two hex digits, any byte except NUL.
+        Bytes >= 0x80 cook to their surrogateescape form — the same lossless
+        representation bytes from stdin, argv, and extern calls carry."""
+        digits = ""
+        for _ in range(2):
+            if self.i < len(self.source) and self._peek() in "0123456789abcdefABCDEF":
+                digits += self._advance()
+        if len(digits) != 2:
+            raise self._error(
+                '\\x needs exactly two hex digits, e.g. "\\x41"',
+                start,
+            )
+        value = int(digits, 16)
+        if value == 0:
+            raise self._error(
+                "\\x00 is not allowed: strings are NUL-terminated, so a string cannot carry byte 0",
+                start,
+            )
+        return chr(value) if value < 0x80 else chr(0xDC00 + value)
 
     def _triple_string(self, start: Pos) -> Token:
         """A \"\"\"...\"\"\" block: raw text (no escapes — doc prose keeps its
