@@ -52,9 +52,7 @@ class Expander:
     # --- items ----------------------------------------------------------------
 
     def expand_item(self, item: ast.Item) -> ast.Item:
-        if isinstance(item, ast.FnDecl):
-            return _replace(item, body=self.expand_block(item.body))
-        if isinstance(item, ast.TestDecl):
+        if isinstance(item, (ast.FnDecl, ast.TestDecl, ast.TargetDecl)):
             return _replace(item, body=self.expand_block(item.body))
         return item
 

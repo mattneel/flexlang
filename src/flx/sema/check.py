@@ -181,9 +181,6 @@ class Checker:
         # package.flx). Kept out of ordinary programs so user record literals
         # can never accidentally resolve to them.
         self._builtin_records = builtin_records or {}
-        # Build mode: `target` declarations present (a build.flx). Enables the
-        # build intrinsics (`sh`, `flx.*`), which ordinary programs cannot call.
-        self._build_mode = bool(module.targets)
         self.module = module
         # Visibility: which module declared each top-level name, which are `pub`,
         # and which module each FILE belongs to. Empty for a single-file program
@@ -557,6 +554,13 @@ class Checker:
 
     def _register_targets(self) -> None:
         for target in self.module.targets:
+            if target.name in ("sh", "flx", "default"):
+                self._err(
+                    "BUILD006",
+                    f"{target.name!r} is reserved and cannot be a target name",
+                    target.span,
+                )
+                continue
             if target.name in self.functions or target.name in self.generic_fns:
                 self._err_duplicate("target", target.name, target.span)
             # A target is callable from other targets as `name()?`; calling it
@@ -564,6 +568,9 @@ class Checker:
             # graph exactly like ordinary calls.
             self.functions[target.name] = FnType((), self._target_result(target.span))
             self.fn_effects[target.name] = set(target.effects)
+        defaults = [it for it in self.module.items if isinstance(it, ast.DefaultTargetDecl)]
+        if len(defaults) > 1:
+            self._err("BUILD007", "`target default` is declared more than once", defaults[1].span)
         default = self.module.default_target
         if default is not None and default not in {t.name for t in self.module.targets}:
             self._err("BUILD002", f"default target {default!r} is not a target", self.module.span)
@@ -843,7 +850,7 @@ class Checker:
                 else:
                     self._err("TYPE006", "to_str expects 1 argument", expr.span)
                 return STRING
-            if callee.name == "sh" and self._build_mode:
+            if callee.name == "sh" and self.in_target:
                 # Build intrinsic: run a shell command; Ok on exit 0, Err otherwise.
                 if len(expr.args) == 1:
                     self._expect(
@@ -865,7 +872,7 @@ class Checker:
                 self._require_effects(self.fn_effects.get(callee.name, set()), expr.span)
                 return fn_ty.ret
         if isinstance(callee, ast.MemberExpr) and isinstance(callee.obj, ast.NameExpr):
-            if callee.obj.name == "flx" and self._build_mode:
+            if callee.obj.name == "flx" and self.in_target:
                 # Build intrinsics that drive the compiler itself on a glob of
                 # files: flx.check / flx.test / flx.run / flx.expand / flx.build.
                 if callee.name not in _FLX_BUILD_OPS:

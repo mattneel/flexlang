@@ -37,7 +37,7 @@ from pathlib import Path
 from flx import interp
 from flx.diagnostics import Diagnostic, FlexError
 from flx.macro import expand
-from flx.sema.check import check
+from flx.sema.specialize import check_and_monomorphize
 from flx.syntax.parser import parse
 from flx.types import STRING, ListType, RecordType
 
@@ -86,11 +86,17 @@ def load_manifest(manifest_path: Path) -> PackageManifest:
     """Parse, type-check, and purely evaluate a `package.flx`."""
     try:
         source = manifest_path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise _err("PKG001", f"cannot read {manifest_path}: {exc}") from None
 
     module = expand(parse(source, str(manifest_path)))
-    result = check(module, builtin_records=BUILTIN_RECORDS)
+    if module.targets:
+        raise _err(
+            "PKG006",
+            f"{manifest_path} declares build targets",
+            help="a manifest is pure data; put targets in build.flx",
+        )
+    result = check_and_monomorphize(module, builtin_records=BUILTIN_RECORDS)
 
     fn = result.module.functions and {f.name: f for f in result.module.functions}.get("manifest")
     fn_ty = result.functions.get("manifest")
@@ -110,7 +116,15 @@ def load_manifest(manifest_path: Path) -> PackageManifest:
     if fn_ty.ret != MANIFEST_TYPE:
         raise _err("PKG002", f"manifest() must return Manifest, not {fn_ty.ret}")
 
-    value = interp.Interpreter(result).call(fn, [])
+    # Purity (no effects) is proven by the checker; termination is enforced by a
+    # step budget — a manifest must be data, not a workload. Faults surface as
+    # clean diagnostics, never tracebacks.
+    interp._ensure_recursion_headroom()
+    try:
+        value = interp.Interpreter(result, max_steps=1_000_000).call(fn, [])
+    except (interp.FlexRuntimeError, RecursionError) as exc:
+        reason = "stack overflow (recursion too deep)" if isinstance(exc, RecursionError) else exc
+        raise _err("PKG005", f"error while evaluating {manifest_path}: {reason}") from None
     assert isinstance(value, dict)  # guaranteed by the Manifest return type
     deps = tuple(PackageDep(d["name"], d["path"]) for d in value["dependencies"])
     return PackageManifest(

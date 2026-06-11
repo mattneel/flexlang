@@ -107,6 +107,18 @@ def test_question_propagation_fails_test(
     assert "0 passed, 1 failed" in out
 
 
+def test_infinite_recursion_is_clean(tmp_path: object, capfd: pytest.CaptureFixture[str]) -> None:
+    from pathlib import Path
+
+    # The depth guard must fire before Python's own recursion limit, so the user
+    # sees a clean stack-overflow error rather than a RecursionError traceback.
+    src = "fn deep(n: I64) -> I64 = { deep(n + 1) }\nfn main() -> I64 = { deep(0) }\n"
+    flx = Path(str(tmp_path)) / "rec.flx"
+    flx.write_text(src, encoding="utf-8")
+    assert driver.cmd_run(str(flx), interpret=True) == 1
+    assert "stack overflow" in capfd.readouterr().err
+
+
 def test_runtime_division_by_zero_is_clean(
     tmp_path: object, capfd: pytest.CaptureFixture[str]
 ) -> None:

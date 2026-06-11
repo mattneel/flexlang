@@ -29,8 +29,8 @@ from flx.types import I64, UNIT, Type
 def _read(path: str) -> str | None:
     try:
         return Path(path).read_text(encoding="utf-8")
-    except OSError as exc:
-        print(f"flx: {exc}", file=sys.stderr)
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"flx: {path}: {exc}", file=sys.stderr)
         return None
 
 
@@ -98,6 +98,21 @@ def _frontend(
         return loaded, {}
     try:
         module = expand(loaded.module)
+        if module.targets and Path(path).name != "build.flx":
+            first = module.targets[0]
+            return (
+                FlexError(
+                    [
+                        Diagnostic(
+                            "BUILD004",
+                            "target declarations are only allowed in build.flx",
+                            first.span,
+                            help="run targets with `flx build`",
+                        )
+                    ]
+                ),
+                loaded.sources,
+            )
         result = check_and_monomorphize(
             module, loaded.decl_module, loaded.public, loaded.file_module
         )

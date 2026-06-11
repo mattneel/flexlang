@@ -57,6 +57,10 @@ def load_program(entry_path: str, extra_roots: tuple[Path, ...] = ()) -> Program
             return  # already loaded (also breaks import cycles)
         try:
             src = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            raise FlexError(
+                [Diagnostic("MOD001", f"{path} is not valid UTF-8", import_span)]
+            ) from None
         except OSError:
             what = "cannot read file" if import_span is None else "cannot find imported module"
             raise FlexError([Diagnostic("MOD001", f"{what} {path}", import_span)]) from None

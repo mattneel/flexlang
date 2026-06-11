@@ -178,6 +178,90 @@ def test_keyword_named_target_is_callable(
     assert "build ok: ci" in capfd.readouterr().out
 
 
+def test_cyclic_targets_reported_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    _build_dir(
+        tmp_path,
+        "module Build\ntarget default = a\ntarget a { b()? }\ntarget b { a()? }\n",
+        monkeypatch,
+    )
+    assert run_build() == 1
+    assert "target cycle detected: a -> b -> a" in capfd.readouterr().err
+
+
+def test_sh_not_available_in_build_helper_fns() -> None:
+    # Build intrinsics are scoped to TARGET BODIES; a helper fn cannot wrap sh.
+    src = (
+        "module Build\n"
+        'fn helper() -> I64 uses { Process } = { let r = sh("true")\n  0 }\n'
+        'target t uses { Process } { sh("true")? }\n'
+    )
+    assert "NAME001" in _codes(src)
+
+
+def test_targets_rejected_outside_build_flx(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    # Importing a module that declares targets must not flip a program into
+    # build mode.
+    from flx import driver
+
+    lib = tmp_path / "Lib"
+    lib.mkdir()
+    (lib / "B.flx").write_text(
+        'module Lib.B\ntarget x uses { Process } { sh("true")? }\n', encoding="utf-8"
+    )
+    main = tmp_path / "main.flx"
+    main.write_text("module Main\nimport Lib.B\nfn main() -> I64 = { 0 }\n", encoding="utf-8")
+    assert driver.cmd_check(str(main)) == 1
+    assert "BUILD004" in capfd.readouterr().err
+
+
+def test_reserved_target_names_rejected() -> None:
+    assert "BUILD006" in _codes('module Build\ntarget sh uses { Process } { sh("true")? }\n')
+
+
+def test_duplicate_default_rejected() -> None:
+    src = (
+        "module Build\ntarget default = a\ntarget default = b\n"
+        'target a uses { Process } { sh("true")? }\n'
+        'target b uses { Process } { sh("true")? }\n'
+    )
+    assert "BUILD007" in _codes(src)
+
+
+def test_macros_expand_inside_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    _build_dir(
+        tmp_path,
+        (
+            "module Build\n"
+            "macro noisy(c) = quote { sh(unquote(c))? }\n"
+            "target default = t\n"
+            'target t uses { Process } { noisy("true") }\n'
+        ),
+        monkeypatch,
+    )
+    assert run_build() == 0
+
+
+def test_file_named_like_target_does_not_hijack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    from flx.cli import main
+
+    _build_dir(
+        tmp_path,
+        'module Build\ntarget check uses { Process } { sh("true")? }\n',
+        monkeypatch,
+    )
+    (tmp_path / "check").write_text("not a flex file", encoding="utf-8")
+    assert main(["build", "check"]) == 0
+    assert "build ok: check" in capfd.readouterr().out
+
+
 def test_package_demo_example(capfd: pytest.CaptureFixture[str]) -> None:
     # The in-repo demo package: app depends on mathlib by path.
     from flx import driver

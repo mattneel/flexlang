@@ -34,6 +34,7 @@ from __future__ import annotations
 import glob as globmod
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from flx import driver, interp
@@ -60,11 +61,16 @@ class BuildInterpreter(interp.Interpreter):
         super().__init__(checked)
         self.targets = {t.name: t for t in checked.module.targets}
         self.memo: dict[str, interp.Variant] = {}
+        self.running: list[str] = []  # targets currently executing (cycle guard)
 
     def run_target(self, name: str) -> interp.Variant:
         cached = self.memo.get(name)
         if cached is not None:
             return cached
+        if name in self.running:
+            chain = " -> ".join([*self.running, name])
+            return _err(f"target cycle detected: {chain}")
+        self.running.append(name)
         print(f"-> target {name}")
         target = self.targets[name]
         try:
@@ -76,6 +82,8 @@ class BuildInterpreter(interp.Interpreter):
             result = value if isinstance(value, interp.Variant) else _OK
         except interp._TestFail as fail:
             result = _err(fail.reason.strip() or "target failed")
+        finally:
+            self.running.pop()
         self.memo[name] = result
         return result
 
@@ -107,10 +115,12 @@ class BuildInterpreter(interp.Interpreter):
         files = sorted(globmod.glob(pattern, recursive=True))
         if not files:
             return _err(f"no files match {pattern!r}")
-        commands = {
+        # run/test execute on the interpreter, matching the CLI's default backend
+        # (native stays an explicit choice, never an implicit one in builds).
+        commands: dict[str, Callable[[str], int]] = {
             "check": driver.cmd_check,
-            "test": driver.cmd_test,
-            "run": driver.cmd_run,
+            "test": lambda f: driver.cmd_test(f, interpret=True),
+            "run": lambda f: driver.cmd_run(f, interpret=True),
             "expand": driver.cmd_expand,
             "build": driver.cmd_build,
         }

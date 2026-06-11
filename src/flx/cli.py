@@ -8,6 +8,7 @@ in incrementally as the compiler is built out.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -150,10 +151,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         # The CLI is interpreter-first: default to the interpreter unless --native.
         return driver.cmd_run(args.path, interpret=not args.native, native=args.native)
     if args.command == "build":
-        # A .flx file path compiles a native executable. Otherwise `flx build`
-        # drives ./build.flx: `flx build [target] [--explain]`, falling back to a
-        # native build of the package entry when there is no build.flx.
-        if args.path is not None and (args.path.endswith(".flx") or Path(args.path).is_file()):
+        # An explicit .flx file (or path) compiles a native executable. A bare
+        # word is a target name in ./build.flx: `flx build [target] [--explain]`,
+        # falling back to a native build of the package entry when there is no
+        # build.flx. A file in the cwd that merely shares a target's name does
+        # not hijack the target.
+        looks_like_path = args.path is not None and (
+            args.path.endswith(".flx") or os.sep in args.path
+        )
+        if looks_like_path:
             return driver.cmd_build(args.path, args.output)
         from flx import build as build_runner
 

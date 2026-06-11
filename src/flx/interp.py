@@ -26,7 +26,10 @@ if TYPE_CHECKING:
 
 _I64_MASK = (1 << 64) - 1
 _I64_SIGN = 1 << 63
-_DEPTH_LIMIT = 5000
+# Each Flex call frame costs several Python frames, so this must be small enough
+# that our clean "stack overflow" guard fires before Python's own recursion
+# limit (raised to 20k by _ensure_recursion_headroom) would.
+_DEPTH_LIMIT = 2000
 
 
 def _wrap(value: int) -> int:
@@ -101,7 +104,7 @@ _UNWRAP = {"Ok", "Some"}
 
 
 class Interpreter:
-    def __init__(self, checked: CheckResult) -> None:
+    def __init__(self, checked: CheckResult, max_steps: int | None = None) -> None:
         self.checked = checked
         self.functions = {fn.name: fn for fn in checked.module.functions}
         self.constructors = checked.constructors
@@ -115,6 +118,10 @@ class Interpreter:
                     self.enum_index[variant.name] = i
         self.in_test = False
         self.depth = 0
+        # Optional execution budget (used when evaluating manifests, which must
+        # terminate): counted per evaluated expression; None = unbounded.
+        self.max_steps = max_steps
+        self.steps = 0
 
     # --- entry points ---------------------------------------------------------
 
@@ -205,6 +212,10 @@ class Interpreter:
     # --- expressions ----------------------------------------------------------
 
     def eval(self, expr: ast.Expr, env: _Env) -> object:
+        if self.max_steps is not None:
+            self.steps += 1
+            if self.steps > self.max_steps:
+                raise FlexRuntimeError("evaluation exceeded the step limit")
         if isinstance(expr, ast.IntLit):
             return expr.value
         if isinstance(expr, ast.BoolLit):
@@ -433,9 +444,17 @@ def _ensure_recursion_headroom() -> None:
 
 def run_main(checked: CheckResult) -> int:
     _ensure_recursion_headroom()
-    return Interpreter(checked).run_main()
+    try:
+        return Interpreter(checked).run_main()
+    except RecursionError:
+        # Deep non-call nesting can blow Python's stack before our own call-depth
+        # guard fires; surface it as the same clean runtime error either way.
+        raise FlexRuntimeError("stack overflow (recursion too deep)") from None
 
 
 def run_tests(checked: CheckResult, test_filter: str | None = None) -> int:
     _ensure_recursion_headroom()
-    return Interpreter(checked).run_tests(test_filter)
+    try:
+        return Interpreter(checked).run_tests(test_filter)
+    except RecursionError:
+        raise FlexRuntimeError("stack overflow (recursion too deep)") from None

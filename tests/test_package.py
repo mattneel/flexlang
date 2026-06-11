@@ -153,6 +153,79 @@ def test_check_validates_manifest_file(tmp_path: Path, capfd: pytest.CaptureFixt
     assert "valid manifest (mathlib 0.2.0)" in capfd.readouterr().out
 
 
+# --- robustness (adversarial-review findings) ----------------------------------
+
+
+def test_nonterminating_manifest_hits_step_limit(tmp_path: Path) -> None:
+    src = (
+        "module Package\n"
+        "fn spin() -> I64 = { mut i = 0\n  while i >= 0 { i = i + 1 }\n  i }\n"
+        "fn manifest() -> Manifest = { let w = spin()\n"
+        '  { name = "x", version = "0", entry = "main.flx", dependencies = [] } }\n'
+    )
+    _write(tmp_path, {"package.flx": src})
+    with pytest.raises(FlexError) as exc:
+        load_manifest(tmp_path / "package.flx")
+    assert exc.value.diagnostics[0].code == "PKG005"
+
+
+def test_manifest_runtime_fault_is_clean(tmp_path: Path) -> None:
+    src = (
+        "module Package\n"
+        "fn manifest() -> Manifest = { let boom = 1 / 0\n"
+        '  { name = "x", version = "0", entry = "main.flx", dependencies = [] } }\n'
+    )
+    _write(tmp_path, {"package.flx": src})
+    with pytest.raises(FlexError) as exc:
+        load_manifest(tmp_path / "package.flx")
+    assert exc.value.diagnostics[0].code == "PKG005"
+
+
+def test_manifest_recursion_is_clean(tmp_path: Path) -> None:
+    src = (
+        "module Package\n"
+        "fn deep(n: I64) -> I64 = { deep(n + 1) }\n"
+        "fn manifest() -> Manifest = { let w = deep(0)\n"
+        '  { name = "x", version = "0", entry = "main.flx", dependencies = [] } }\n'
+    )
+    _write(tmp_path, {"package.flx": src})
+    with pytest.raises(FlexError) as exc:
+        load_manifest(tmp_path / "package.flx")
+    assert exc.value.diagnostics[0].code == "PKG005"
+
+
+def test_manifest_may_use_generics(tmp_path: Path) -> None:
+    src = (
+        "module Package\n"
+        "fn id<T>(x: T) -> T = { x }\n"
+        "fn manifest() -> Manifest = {\n"
+        '  { name = id("gen"), version = "0.1.0", entry = "main.flx", dependencies = [] }\n'
+        "}\n"
+    )
+    _write(tmp_path, {"package.flx": src})
+    assert load_manifest(tmp_path / "package.flx").name == "gen"
+
+
+def test_manifest_may_not_declare_targets(tmp_path: Path) -> None:
+    src = (
+        "module Package\n"
+        'target evil uses { Process } { sh("true")? }\n'
+        "fn manifest() -> Manifest = "
+        '{ { name = "x", version = "0", entry = "main.flx", dependencies = [] } }\n'
+    )
+    _write(tmp_path, {"package.flx": src})
+    with pytest.raises(FlexError) as exc:
+        load_manifest(tmp_path / "package.flx")
+    assert exc.value.diagnostics[0].code == "PKG006"
+
+
+def test_non_utf8_manifest_is_clean(tmp_path: Path) -> None:
+    (tmp_path / "package.flx").write_bytes(b"\xff\xfe garbage")
+    with pytest.raises(FlexError) as exc:
+        load_manifest(tmp_path / "package.flx")
+    assert exc.value.diagnostics[0].code == "PKG001"
+
+
 def test_ordinary_programs_cannot_see_manifest_types(tmp_path: Path) -> None:
     # Manifest/Dependency are builtin ONLY for package files: a user record
     # literal with the same shape must not resolve to them.
