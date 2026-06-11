@@ -30,9 +30,14 @@ than mis-marshalled:
 | Flex | C |
 |---|---|
 | `I64` parameter / return | `long long` |
+| `I32` parameter / return | `int` — sign-extended to `I64` on the Flex side |
 | `String` parameter | `const char *` (NUL-terminated; every Flex string is) |
 | `String` return | `char *` — wrapped back into a Flex string; **NULL becomes `""`** |
 | `Unit` return | `void` |
+
+A C function that returns `int` **must** be declared `I32` — reading a 32-bit
+return as 64 bits is garbage in its high bits (a negative `strcmp` would come
+back positive). `I32` exists only in extern signatures.
 
 No records, ADTs, `Bool`, or generics across the boundary, and **no variadic
 functions** — declaring `printf` with a fixed arity is undefined behavior on

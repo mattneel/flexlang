@@ -21,6 +21,7 @@ RUN_EXIT = {
     "add": 42,
     "effects": 42,
     "ffi": 42,
+    "std": 42,
     "hello": 42,
     "macros": 67,
     "records": 142,

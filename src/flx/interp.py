@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from flx.syntax import ast
-from flx.types import STRING, UNIT
 
 if TYPE_CHECKING:
     from flx.sema.check import CheckResult
@@ -423,7 +422,8 @@ class Interpreter:
         return self.call(func, [self.eval(a, env) for a in expr.args])
 
     def _call_extern(self, name: str, args: list[object]) -> object:
-        fn_ty = self.checked.functions[name]
+        param_kinds, ret_kind = self.checked.extern_abi[name]
+        ctype_of = {"i64": ctypes.c_longlong, "i32": ctypes.c_int, "str": ctypes.c_char_p}
         cfn = self._extern_cache.get(name)
         if cfn is None:
             try:
@@ -432,25 +432,21 @@ class Interpreter:
                 raise FlexRuntimeError(
                     f"extern symbol {name!r} not found in this process"
                 ) from None
-            cfn.argtypes = [
-                ctypes.c_char_p if p is STRING else ctypes.c_longlong for p in fn_ty.params
-            ]
-            if fn_ty.ret is STRING:
-                cfn.restype = ctypes.c_char_p
-            elif fn_ty.ret is UNIT:
-                cfn.restype = None
-            else:
-                cfn.restype = ctypes.c_longlong
+            cfn.argtypes = [ctype_of[k] for k in param_kinds]
+            cfn.restype = None if ret_kind == "unit" else ctype_of[ret_kind]
             self._extern_cache[name] = cfn
         cargs: list[object] = []
-        for v, p in zip(args, fn_ty.params, strict=True):
-            if p is STRING:
+        for v, kind in zip(args, param_kinds, strict=True):
+            if kind == "str":
                 # surrogateescape round-trips arbitrary bytes that earlier came
                 # back from C, so what we hand to C is byte-identical to native.
                 cargs.append(str(v).encode("utf-8", "surrogateescape"))
-            else:  # I64 (the checker admits nothing else)
+            else:
                 assert isinstance(v, int)
-                cargs.append(_wrap(v))
+                wrapped = _wrap(v)
+                if kind == "i32":  # truncate exactly as native arith.trunci does
+                    wrapped = ((wrapped + (1 << 31)) & 0xFFFFFFFF) - (1 << 31)
+                cargs.append(wrapped)
         # Python and libc buffer stdout independently inside this one process:
         # flush ours before the call and libc's after, so interleaved output
         # appears in call order — exactly as it would from a native binary.
@@ -461,13 +457,14 @@ class Interpreter:
             raise FlexRuntimeError(f"extern call {name!r} failed: {exc}") from None
         finally:
             _fflush_libc()
-        if fn_ty.ret is STRING:
+        if ret_kind == "str":
             # A NULL char* comes back as the empty string (no null pointers in
             # Flex); non-UTF-8 bytes are preserved losslessly via surrogateescape
             # so length and round-trips match the native backend byte-for-byte.
             return result.decode("utf-8", "surrogateescape") if result is not None else ""
-        if fn_ty.ret is UNIT:
+        if ret_kind == "unit":
             return None
+        # i32 results arrive sign-extended by ctypes (c_int), matching native extsi.
         assert isinstance(result, int)
         return _wrap(result)
 

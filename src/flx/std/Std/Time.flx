@@ -1,0 +1,7 @@
+module Std.Time
+
+// Wall-clock time. `time(0)` passes a NULL time_t*, the standard C idiom.
+
+extern fn time(out: I64) -> I64 uses { Time }
+
+pub fn unix_time() -> I64 uses { Time } = { time(0) }

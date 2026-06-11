@@ -1,0 +1,21 @@
+module Main
+
+// The standard library is Flex code shipped with the compiler — `import Std.*`
+// works everywhere, including a bare `uvx --from flexlang flx run`. It layers
+// pure Flex (Std.Math) over declared-effect libc externs (Std.Env, Std.Proc).
+
+import Std.Math
+import Std.Str
+import Std.Env
+
+fn main() -> I64 uses { Process } = {
+  let greeting = get_or("FLX_GREETING", "hello")
+  clamp(pow(2, 10), 0, 30) + length(greeting) + abs(0 - 7)
+}
+
+test "std math and strings" {
+  assert_eq(pow(3, 4), 81)
+  assert_eq(clamp(0 - 5, 0, 10), 0)
+  assert("flex".eq("flex"))
+  assert_eq(cmp("a", "b"), 0 - 1)
+}

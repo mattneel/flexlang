@@ -154,7 +154,11 @@ ok Main / add works
   trust declaration the effect system holds callers to). I64/String cross the
   ABI; works on both backends — the interpreter calls libc via `ctypes`, so
   even `uvx … flx run` can call C with no toolchain
-  ([FFI — Calling C](https://mattneel.github.io/flexlang/ffi.html)).
+  ([FFI — Calling C](https://mattneel.github.io/flexlang/ffi.html));
+- **standard library** — written in Flex, shipped in the package, importable
+  everywhere (`import Std.Math`): `Std.Math`/`Str`/`Env`/`Time`/`Proc`, with
+  string equality via `impl Eq for String`
+  ([Standard Library](https://mattneel.github.io/flexlang/std.html)).
 
 ### Prototype / partial
 
@@ -167,12 +171,13 @@ ok Main / add works
 
 ### Planned
 
-- versioned/registry dependencies, a standard library, the borrow checker, and
+- versioned/registry dependencies, `Std.Fs`/collections (need the allocation
+  story), the borrow checker, and
   the `emit-hir`/`emit-mir`/`explain-*` subcommands (still stubs) — see
   `docs/MVP.md` §3.2.
 
 See `examples/` for `add`, `result`, `records`, `effects`, `regions`, `macros`,
-`traits`, `ffi`, and the two-package `package-demo/`.
+`traits`, `ffi`, `std`, and the two-package `package-demo/`.
 
 ## Syntax highlighting
 

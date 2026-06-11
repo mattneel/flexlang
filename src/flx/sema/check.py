@@ -143,6 +143,11 @@ class CheckResult:
     # C-ABI foreign functions: called by their unmangled symbol name; the native
     # backend declares them, the interpreter dispatches them through ctypes.
     extern_fns: set[str] = field(default_factory=set)
+    # Per-extern C-level ABI: (param kinds, return kind), each kind one of
+    # "i64" | "i32" | "str" | "unit". I32 exists ONLY at the boundary (C `int`,
+    # sign-extended to I64 on the Flex side) — reading a 32-bit return as 64
+    # bits is garbage, so the width must be declared, not guessed.
+    extern_abi: dict[str, tuple[tuple[str, ...], str]] = field(default_factory=dict)
     # generic function templates (name -> decl) and the instantiations demanded
     # by call sites. The monomorphizer turns these into concrete functions.
     generic_fns: dict[str, ast.FnDecl] = field(default_factory=dict)
@@ -219,6 +224,10 @@ class Checker:
         self.instantiations: set[tuple[str, tuple[str, ...]]] = set()
         self.inst_subst: dict[tuple[str, tuple[str, ...]], dict[str, Type]] = {}
         self.extern_fns: set[str] = set()
+        self.extern_abi: dict[str, tuple[tuple[str, ...], str]] = {}
+        # Which modules declared each extern: every declaring module may use it
+        # (a private extern redeclared in two modules is usable from both).
+        self.extern_decl_modules: dict[str, set[str]] = {}
 
     # --- entry ----------------------------------------------------------------
 
@@ -298,6 +307,7 @@ class Checker:
             set(self.ctors),
             self.method_targets,
             extern_fns=self.extern_fns,
+            extern_abi=self.extern_abi,
             generic_fns=self.generic_fns,
             instantiations=self.instantiations,
             inst_subst=self.inst_subst,
@@ -506,6 +516,8 @@ class Checker:
     def _name_visible(self, name: str) -> bool:
         if self.current_module is None or name in self.public:
             return True
+        if self.current_module in self.extern_decl_modules.get(name, ()):
+            return True  # this module declared the extern itself
         owner = self.decl_module.get(name)
         return owner is None or owner == self.current_module
 
@@ -558,35 +570,84 @@ class Checker:
         for ext in self.module.externs:
             self.current_module = self._module_of(ext.span)
             self._check_extern_name(ext)
+            # The C ABI surface is deliberately small: I64 (long long), I32
+            # (C `int`, sign-extended to I64 on the Flex side), and String
+            # (NUL-terminated char*) in; those plus Unit out. Everything else is
+            # rejected rather than mis-marshalled. I32 exists only here — a C
+            # function returning `int` MUST be declared I32, or its high 32 bits
+            # are garbage.
+            params: list[Type] = []
+            param_kinds: list[str] = []
+            for param in ext.params:
+                if param.type.name == "I32" and not param.type.args:
+                    params.append(I64)
+                    param_kinds.append("i32")
+                    continue
+                pty = self._resolve_type(param.type)
+                if pty is I64:
+                    param_kinds.append("i64")
+                elif pty is STRING:
+                    param_kinds.append("str")
+                else:
+                    if pty is not ERROR:
+                        self._err(
+                            "FFI002",
+                            f"extern parameter {param.name!r} has type {pty}; "
+                            "only I64, I32, and String cross the C ABI",
+                            param.span,
+                        )
+                    pty = ERROR
+                    param_kinds.append("i64")
+                params.append(pty)
+            if ext.return_type is not None and ext.return_type.name == "I32":
+                ret: Type = I64
+                ret_kind = "i32"
+            else:
+                ret = self._resolve_type(ext.return_type) if ext.return_type else UNIT
+                if ret is I64:
+                    ret_kind = "i64"
+                elif ret is STRING:
+                    ret_kind = "str"
+                elif ret is UNIT:
+                    ret_kind = "unit"
+                else:
+                    if ret is not ERROR:
+                        self._err(
+                            "FFI002",
+                            f"extern return type {ret} is not supported; "
+                            "only I64, I32, String, and Unit cross the C ABI",
+                            ext.span,
+                        )
+                    ret = ERROR
+                    ret_kind = "i64"
+            fn_ty = FnType(tuple(params), ret)
+            abi = (tuple(param_kinds), ret_kind)
+            if ext.name in self.extern_fns:
+                # C-style redeclaration: declaring the same symbol again is fine
+                # iff the signature, ABI widths, AND asserted effects agree
+                # exactly — two modules may each privately declare `strlen`.
+                if (
+                    self.functions.get(ext.name) != fn_ty
+                    or self.extern_abi.get(ext.name) != abi
+                    or self.fn_effects.get(ext.name) != set(ext.effects)
+                ):
+                    self._err(
+                        "FFI004",
+                        f"conflicting declarations for extern {ext.name!r}",
+                        ext.span,
+                        help="every declaration of a C symbol must agree on signature and effects",
+                    )
+                if self.current_module is not None:
+                    self.extern_decl_modules.setdefault(ext.name, set()).add(self.current_module)
+                continue
             if ext.name in self.functions or ext.name in self.generic_fns:
                 self._err_duplicate("function", ext.name, ext.span)
-            # The C ABI surface is deliberately small: I64 and String (passed as a
-            # NUL-terminated char*) in; I64, String, or Unit out. Everything else
-            # is rejected rather than mis-marshalled.
-            params: list[Type] = []
-            for param in ext.params:
-                pty = self._resolve_type(param.type)
-                if pty not in (I64, STRING) and pty is not ERROR:
-                    self._err(
-                        "FFI002",
-                        f"extern parameter {param.name!r} has type {pty}; "
-                        "only I64 and String cross the C ABI",
-                        param.span,
-                    )
-                    pty = ERROR
-                params.append(pty)
-            ret = self._resolve_type(ext.return_type) if ext.return_type else UNIT
-            if ret not in (I64, STRING, UNIT) and ret is not ERROR:
-                self._err(
-                    "FFI002",
-                    f"extern return type {ret} is not supported; "
-                    "only I64, String, and Unit cross the C ABI",
-                    ext.span,
-                )
-                ret = ERROR
-            self.functions[ext.name] = FnType(tuple(params), ret)
+            self.functions[ext.name] = fn_ty
             self.fn_effects[ext.name] = set(ext.effects)
             self.extern_fns.add(ext.name)
+            self.extern_abi[ext.name] = abi
+            if self.current_module is not None:
+                self.extern_decl_modules.setdefault(ext.name, set()).add(self.current_module)
 
     def _check_extern_name(self, ext: ast.ExternFnDecl) -> None:
         """An extern's name IS the C symbol it links: it must be a plain C

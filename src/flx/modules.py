@@ -43,10 +43,18 @@ def _decl_name(item: ast.Item) -> str | None:
     return None
 
 
+def std_root() -> Path:
+    """The standard library shipped inside the compiler package: a plain module
+    tree (`Std/...`, written in Flex) that is always importable."""
+    return Path(__file__).resolve().parent / "std"
+
+
 def load_program(entry_path: str, extra_roots: tuple[Path, ...] = ()) -> ProgramInfo:
     """Load the program rooted at `entry_path`. Imports resolve against the entry
     file's directory first, then each extra root (package dependency directories,
-    in manifest order). A module found in more than one root is MOD004."""
+    in manifest order). A module found in more than one root is MOD004. The
+    bundled standard library is the lowest-precedence fallback root: user code
+    and dependencies can shadow `Std.*` deliberately, never ambiguously."""
     roots = [Path(entry_path).resolve().parent, *[Path(r).resolve() for r in extra_roots]]
     sources: dict[str, str] = {}
     order: list[ast.Module] = []
@@ -105,6 +113,8 @@ def load_program(entry_path: str, extra_roots: tuple[Path, ...] = ()) -> Program
                 raise FlexError(
                     [Diagnostic("MOD004", f"import {imp!r} is ambiguous: {listing}", span)]
                 )
+            if not found and (std_root() / rel).is_file():
+                found = [std_root() / rel]  # the stdlib is the fallback root
             child = found[0] if found else roots[0] / rel
             visit(child, imp, span)
 

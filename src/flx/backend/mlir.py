@@ -85,6 +85,7 @@ class FunctionLowerer:
         self.constructors = checked.constructors
         self.method_targets = checked.method_targets
         self.extern_fns = checked.extern_fns
+        self.extern_abi = checked.extern_abi
         self.globals: list[str] = []  # module-level string constants (not reset)
         self._str_count = 0
         self.lines: list[str] = []
@@ -794,32 +795,42 @@ class FunctionLowerer:
         return out
 
     def _lower_extern_call(self, name: str, expr: ast.CallExpr) -> str | None:
-        """Call a C function by its unmangled symbol. Strings cross the ABI as
-        their (NUL-terminated) data pointer; a returned char* is wrapped back
-        into a Flex String by the runtime (NULL becomes \"\")."""
-        fn_ty = self.functions[name]
+        """Call a C function by its unmangled symbol with its declared C-level
+        ABI. Strings cross as their (NUL-terminated) data pointer; a returned
+        char* is wrapped back into a Flex String (NULL becomes \"\"); I32 params
+        truncate from i64 and I32 results sign-extend back to i64."""
+        param_kinds, ret_kind = self.extern_abi[name]
         args: list[str] = []
         types: list[str] = []
-        for arg_expr, pty in zip(expr.args, fn_ty.params, strict=True):
+        for arg_expr, kind in zip(expr.args, param_kinds, strict=True):
             value = self.lower_expr(arg_expr)
             assert value is not None
-            if pty is STRING:
+            if kind == "str":
                 ptr, _length = self._string_parts(value)
                 args.append(ptr)
                 types.append("!llvm.ptr")
+            elif kind == "i32":
+                narrowed = self._fresh()
+                self._emit(f"{narrowed} = arith.trunci {value} : i64 to i32")
+                args.append(narrowed)
+                types.append("i32")
             else:
                 args.append(value)
                 types.append("i64")
         arg_list = ", ".join(args)
         type_list = ", ".join(types)
-        if fn_ty.ret is UNIT:
+        if ret_kind == "unit":
             self._emit(f"func.call @{name}({arg_list}) : ({type_list}) -> ()")
             return None
         out = self._fresh()
-        cret = "!llvm.ptr" if fn_ty.ret is STRING else "i64"
+        cret = _EXTERN_MLIR_TYPE[ret_kind]
         self._emit(f"{out} = func.call @{name}({arg_list}) : ({type_list}) -> {cret}")
-        if fn_ty.ret is STRING:
+        if ret_kind == "str":
             return self._str_runtime("flx_cstr_wrap", ["!llvm.ptr"], [out])
+        if ret_kind == "i32":
+            widened = self._fresh()
+            self._emit(f"{widened} = arith.extsi {out} : i32 to i64")
+            return widened
         return out
 
     def _emit_call(self, symbol: str, args: list[str | None], fn_ty: FnType) -> str | None:
@@ -884,13 +895,16 @@ class FunctionLowerer:
         return None
 
 
+_EXTERN_MLIR_TYPE = {"i64": "i64", "i32": "i32", "str": "!llvm.ptr"}
+
+
 def _extern_decls(checked: CheckResult) -> str:
     """C-ABI declarations for `extern fn`s, by their unmangled symbol names."""
     lines = []
     for name in sorted(checked.extern_fns):
-        fn_ty = checked.functions[name]
-        params = ", ".join("!llvm.ptr" if p is STRING else "i64" for p in fn_ty.params)
-        ret = "" if fn_ty.ret is UNIT else " -> " + ("!llvm.ptr" if fn_ty.ret is STRING else "i64")
+        param_kinds, ret_kind = checked.extern_abi[name]
+        params = ", ".join(_EXTERN_MLIR_TYPE[k] for k in param_kinds)
+        ret = "" if ret_kind == "unit" else f" -> {_EXTERN_MLIR_TYPE[ret_kind]}"
         lines.append(f"func.func private @{name}({params}){ret}\n")
     return "".join(lines)
 

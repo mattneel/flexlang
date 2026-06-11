@@ -6,7 +6,7 @@ module Main
 extern fn llabs(n: I64) -> I64
 extern fn strlen(s: String) -> I64
 extern fn getenv(name: String) -> String
-extern fn puts(s: String) -> I64 uses { Process }
+extern fn puts(s: String) -> I32 uses { Process }
 
 fn main() -> I64 uses { Process } = {
   let r = puts("hello from libc")

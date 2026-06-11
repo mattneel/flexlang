@@ -67,7 +67,7 @@ def test_unsupported_return_type_rejected() -> None:
 
 def test_extern_effects_propagate_to_callers() -> None:
     src = (
-        "extern fn puts(s: String) -> I64 uses { Process }\n"
+        "extern fn puts(s: String) -> I32 uses { Process }\n"
         'fn main() -> I64 = { let r = puts("hi")\n 0 }\n'
     )
     assert "EFFECT001" in _codes(src)
@@ -86,7 +86,7 @@ def test_extern_arity_checked() -> None:
 def test_bare_function_reference_rejected() -> None:
     # No first-class function values: an alias would also sidestep effect checks.
     src = (
-        "extern fn puts(s: String) -> I64 uses { Process }\n"
+        "extern fn puts(s: String) -> I32 uses { Process }\n"
         'fn main() -> I64 = { let f = puts\n let r = f("hi")\n 0 }\n'
     )
     assert "NAME003" in _codes(src)
@@ -226,7 +226,7 @@ def test_abort_parity(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None
 @native
 def test_extern_with_effect_prints_via_c(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
     src = (
-        "extern fn puts(s: String) -> I64 uses { Process }\n"
+        "extern fn puts(s: String) -> I32 uses { Process }\n"
         'fn main() -> I64 uses { Process } = { let r = puts("hi from C")\n 0 }\n'
     )
     path = _write(tmp_path, src)

@@ -1,0 +1,5 @@
+module Std.Proc
+
+extern fn getpid() -> I32 uses { Process }
+
+pub fn pid() -> I64 uses { Process } = { getpid() }
