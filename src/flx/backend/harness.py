@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from flx.backend.runtime import BASE_RUNTIME_C
 
-# Test-only assertion-failure reporters (the shared runtime — flx_log,
+# Test-only assertion-failure reporters (the shared runtime — __flx_log,
 # __flx_match_fail — comes from BASE_RUNTIME_C, prepended below).
 _RUNTIME = r"""#include <stdio.h>
 
@@ -22,6 +22,18 @@ void __flx_assert_eq_fail(long long actual, long long expected) {
 }
 void __flx_assert_ne_fail(long long a, long long b) {
     printf("  assert_ne failed: both are %lld\n", a);
+}
+void __flx_assert_streq_fail(const char *a, long long an, const char *b, long long bn) {
+    printf("  assert_eq failed: actual \"");
+    fwrite(a, 1, (size_t)an, stdout);
+    printf("\", expected \"");
+    fwrite(b, 1, (size_t)bn, stdout);
+    printf("\"\n");
+}
+void __flx_assert_strne_fail(const char *a, long long an) {
+    printf("  assert_ne failed: both are \"");
+    fwrite(a, 1, (size_t)an, stdout);
+    printf("\"\n");
 }
 void __flx_explicit_fail(void) {
     printf("  explicit failure\n");
@@ -64,7 +76,7 @@ def generate_harness(tests: list[tuple[int, str]]) -> str:
     plural = "" if n == 1 else "s"
     lines = [BASE_RUNTIME_C, _RUNTIME]
     for i, _ in tests:
-        lines.append(f"extern int flx_test_{i}(void);")
+        lines.append(f"extern int __flx_test_{i}(void);")
     lines.append("")
     lines.append("int main(void) {")
     lines.append(f'    printf("running {n} test{plural}\\n\\n");')
@@ -73,7 +85,7 @@ def generate_harness(tests: list[tuple[int, str]]) -> str:
         # Pass the label as a printf ARGUMENT (not in the format string), so any
         # '%' in a test name is inert rather than a conversion specifier.
         label = _c_string(full_label)
-        lines.append(f"    if (flx_test_{i}() == 0) {{")
+        lines.append(f"    if (__flx_test_{i}() == 0) {{")
         lines.append(f'        printf("ok %s\\n", "{label}");')
         lines.append("        passed++;")
         lines.append("    } else {")

@@ -128,6 +128,8 @@ def _expr(expr: ast.Expr) -> str:
     if isinstance(expr, ast.IfExpr):
         base = f"if {_expr(expr.cond)} {{...}}"
         return base + " else {...}" if expr.else_block else base
+    if isinstance(expr, ast.UnitLit):
+        return "()"
     if isinstance(expr, ast.ListExpr):
         return "[" + ", ".join(_expr(i) for i in expr.items) + "]"
     if isinstance(expr, ast.RecordExpr):

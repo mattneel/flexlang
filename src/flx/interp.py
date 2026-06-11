@@ -269,6 +269,8 @@ class Interpreter:
             raise FlexRuntimeError(f"no field .{expr.name}")
         if isinstance(expr, ast.CallExpr):
             return self._call(expr, env)
+        if isinstance(expr, ast.UnitLit):
+            return None
         if isinstance(expr, ast.ListExpr):
             return [self.eval(item, env) for item in expr.items]
         if isinstance(expr, ast.RecordExpr):
@@ -391,15 +393,29 @@ class Interpreter:
             obj = callee.obj
             if isinstance(obj, ast.NameExpr) and obj.name == "Log":
                 message = str(self.eval(expr.args[0], env))
+                end = "" if callee.name == "print" else "\n"  # flx_print vs flx_log
                 try:
-                    print(message)  # flx_log writes the message + a newline
+                    print(message, end=end, flush=True)
                 except UnicodeEncodeError:
                     # Bytes that came from C via surrogateescape: write them raw,
-                    # exactly as native flx_log would.
+                    # exactly as native flx_log/flx_print would.
                     sys.stdout.flush()
-                    sys.stdout.buffer.write(message.encode("utf-8", "surrogateescape") + b"\n")
+                    raw = message.encode("utf-8", "surrogateescape") + end.encode()
+                    sys.stdout.buffer.write(raw)
                     sys.stdout.buffer.flush()
                 return None
+            if isinstance(obj, ast.NameExpr) and obj.name == "Fs" and callee.name == "read_line":
+                sys.stdout.flush()
+                line = sys.stdin.readline()
+                return line[:-1] if line.endswith("\n") else line  # "" at EOF
+            if (
+                isinstance(obj, ast.NameExpr)
+                and obj.name == "Time"
+                and (callee.name == "monotonic_ms")
+            ):
+                import time as _time
+
+                return _wrap(_time.monotonic_ns() // 1_000_000)
             if callee.name in self.constructors:  # qualified ctor, e.g. E.Code(x)
                 payload = self.eval(expr.args[0], env) if expr.args else None
                 return Variant(callee.name, payload)
@@ -498,6 +514,11 @@ class Interpreter:
         return None
 
     def _eq_reason(self, kind: str, a: object, b: object) -> str:
+        if isinstance(a, str) and isinstance(b, str):
+            # Mirrors the native string reporters exactly.
+            if kind == "assert_eq":
+                return f'  assert_eq failed: actual "{a}", expected "{b}"'
+            return f'  assert_ne failed: both are "{a}"'
         sa, sb = self._scalar(a), self._scalar(b)
         if sa is None or sb is None:
             return "  assertion failed"

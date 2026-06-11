@@ -1,0 +1,11 @@
+module Std.IO
+
+// Console IO. Output is the Log capability; reading stdin is the Fs capability
+// (standard input is a stream read). `read_line` returns one line with the
+// trailing newline stripped, and "" at end of input.
+
+pub fn print(s: String) -> Unit uses { Log } = { Log.print(s) }
+
+pub fn println(s: String) -> Unit uses { Log } = { Log.info(s) }
+
+pub fn read_line() -> String uses { Fs } = { Fs.read_line() }

@@ -5,3 +5,6 @@ module Std.Time
 extern fn time(out: I64) -> I64 uses { Time }
 
 pub fn unix_time() -> I64 uses { Time } = { time(0) }
+
+// Monotonic milliseconds — for measuring durations, not telling the time.
+pub fn monotonic_ms() -> I64 uses { Time } = { Time.monotonic_ms() }

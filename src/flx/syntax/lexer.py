@@ -137,6 +137,10 @@ class Lexer:
             ch = self._advance()
             if ch != "_":
                 digits.append(ch)
+        if digits == ["0"] and self.i < len(self.source) and self._peek() in ("x", "X", "b", "B"):
+            raise self._error(
+                "hexadecimal and binary literals are not supported yet (use decimal)", start
+            )
         return Token(TokenKind.INT, "".join(digits), self._span(start))
 
     def _ident(self) -> Token:

@@ -124,6 +124,9 @@ _INTRINSICS: dict[tuple[str, str], tuple[str, tuple[Type, ...], Type]] = {
     ("Log", "info"): ("Log", (STRING,), UNIT),
     ("Log", "warn"): ("Log", (STRING,), UNIT),
     ("Log", "error"): ("Log", (STRING,), UNIT),
+    ("Log", "print"): ("Log", (STRING,), UNIT),  # no trailing newline
+    ("Fs", "read_line"): ("Fs", (), STRING),  # one line from stdin, "" at EOF
+    ("Time", "monotonic_ms"): ("Time", (), I64),
 }
 
 
@@ -868,6 +871,8 @@ class Checker:
             return self._infer_record(expr)
         if isinstance(expr, ast.RecordUpdateExpr):
             return self._infer_record_update(expr)
+        if isinstance(expr, ast.UnitLit):
+            return UNIT
         if isinstance(expr, ast.ListExpr):
             return self._infer_list(expr, expected)
         if isinstance(expr, ast.MemberExpr):
@@ -1013,6 +1018,14 @@ class Checker:
             self._expect(STRING, right, expr.right.span, "right operand of `++`")
             return STRING
         if op in _ARITH:
+            if op == "+" and (left is STRING or right is STRING):
+                self._err(
+                    "TYPE003",
+                    "`+` does not concatenate strings",
+                    expr.span,
+                    help='use `++`: "a" ++ "b"',
+                )
+                return STRING if left is STRING and right is STRING else ERROR
             self._expect(I64, left, expr.left.span, f"left operand of `{op}`")
             self._expect(I64, right, expr.right.span, f"right operand of `{op}`")
             return I64
@@ -1028,8 +1041,9 @@ class Checker:
             if not _same(left, right):
                 self._err("TYPE003", f"cannot compare {left} with {right}", expr.span)
             elif not _is_comparable(left):
+                help_text = "import Std.Str and compare with .eq()" if left is STRING else None
                 self._err(
-                    "TYPE019", f"`{op}` is not supported for {left} (contains a String)", expr.span
+                    "TYPE019", f"`{op}` is not supported for {left}", expr.span, help=help_text
                 )
             return BOOL
         return ERROR
@@ -1306,9 +1320,12 @@ class Checker:
                 b = self._check_expr(call.args[1], a)
                 if not _same(a, b):
                     self._err("TYPE003", f"cannot compare {a} with {b}", call.span)
+                elif a is STRING and ("Eq", "String") in self.impls:
+                    pass  # compared through the Eq trait (import Std.Str)
                 elif not _is_comparable(a):
+                    help_text = "import Std.Str to compare strings" if a is STRING else None
                     self._err(
-                        "TYPE019", f"{name} is not supported for {a} (contains a String)", call.span
+                        "TYPE019", f"{name} is not supported for {a}", call.span, help=help_text
                     )
         elif name in ("fail", "panic"):
             for arg in call.args:

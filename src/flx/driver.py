@@ -87,7 +87,17 @@ def _load(path: str, roots: tuple[Path, ...] = ()) -> ProgramInfo | FlexError:
     except FlexError as err:
         return err
     except RecursionError:
-        return FlexError([Diagnostic("PAR003", "input is too deeply nested")])
+        return FlexError(
+            [
+                Diagnostic(
+                    "PAR003",
+                    "input is too deeply nested",
+                    None,
+                    help="this can be caused by a recursive type definition, "
+                    "which is not supported yet",
+                )
+            ]
+        )
 
 
 def _frontend(
@@ -120,7 +130,17 @@ def _frontend(
     except FlexError as err:
         return err, loaded.sources
     except RecursionError:
-        return FlexError([Diagnostic("PAR003", "input is too deeply nested")]), loaded.sources
+        return FlexError(
+            [
+                Diagnostic(
+                    "PAR003",
+                    "input is too deeply nested",
+                    None,
+                    help="this can be caused by a recursive type definition, "
+                    "which is not supported yet",
+                )
+            ]
+        ), loaded.sources
 
 
 def _use_native(interpret: bool, native: bool) -> bool | None:
@@ -244,18 +264,22 @@ def cmd_run(path: str | None = None, interpret: bool = False, native: bool = Fal
         return 1
     if not choice:
         try:
-            return interp.run_main(result)
+            code = interp.run_main(result)
         except interp.FlexRuntimeError as exc:
             sys.stdout.flush()  # emit buffered output before the error (match native)
             print(f"flx: runtime error: {exc}", file=sys.stderr)
             return 1
+        print(f"flx: exited with code {code}", file=sys.stderr)
+        return code
 
     try:
         mlir_text = emit_module(result)
         shim = _run_shim(main.ret)
         with tempfile.TemporaryDirectory() as tmp:
             exe = build_executable(mlir_text, shim, Path(tmp) / "program", Path(tmp))
-            return run_executable(exe)
+            code = run_executable(exe)
+            print(f"flx: exited with code {code}", file=sys.stderr)
+            return code
     except BackendError as exc:
         print(f"flx: backend error: {exc}", file=sys.stderr)
         return 1

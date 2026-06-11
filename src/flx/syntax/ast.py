@@ -99,6 +99,13 @@ class FieldInit:
 
 
 @dataclass(frozen=True)
+class UnitLit(Expr):
+    """`()` — the unit value."""
+
+    span: Span
+
+
+@dataclass(frozen=True)
 class ListExpr(Expr):
     items: list[Expr]
     span: Span

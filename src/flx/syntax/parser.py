@@ -110,6 +110,8 @@ class Parser:
     def _describe(self, tok: Token) -> str:
         if tok.kind is TokenKind.EOF:
             return "end of file"
+        if tok.kind.name.startswith("KW_"):
+            return f"the reserved keyword {tok.text!r}"
         return f"{tok.text!r}"
 
     def _error(self, message: str, span: Span) -> FlexError:
@@ -516,6 +518,11 @@ class Parser:
                 continue
             if kind is TokenKind.DOT and min_bp < _POSTFIX_BP and same_line:
                 self._advance()
+                if isinstance(lhs, ast.IntLit) and self._at(TokenKind.INT):
+                    raise self._error(
+                        "floating-point literals are not supported yet (Flex has no float type)",
+                        tok.span,
+                    )
                 # `test` stays usable as a member name (e.g. the build intrinsic
                 # `flx.test(...)`) even though it lexes as a keyword.
                 if self._at(TokenKind.KW_TEST):
@@ -524,6 +531,8 @@ class Parser:
                     name_tok = self._expect(TokenKind.IDENT, "a member name")
                 lhs = ast.MemberExpr(lhs, name_tok.text, lhs.span.to(name_tok.span))
                 continue
+            if kind is TokenKind.LBRACKET and min_bp < _POSTFIX_BP and same_line:
+                raise self._error("indexing (`value[i]`) is not supported yet", tok.span)
             if kind is TokenKind.QUESTION and min_bp < _POSTFIX_BP:
                 self._advance()
                 lhs = ast.TryExpr(lhs, lhs.span.to(tok.span))
@@ -575,7 +584,10 @@ class Parser:
             op = "-" if tok.kind is TokenKind.MINUS else "!"
             return ast.UnaryExpr(op, operand, tok.span.to(operand.span))
         if tok.kind is TokenKind.LPAREN:
-            self._advance()
+            start = self._advance().span
+            if self._at(TokenKind.RPAREN):  # the unit literal `()`
+                end = self._advance().span
+                return ast.UnitLit(start.to(end))
             inner = self._expr()
             self._expect(TokenKind.RPAREN, "')'")
             return inner
@@ -659,6 +671,11 @@ class Parser:
         while not self._at(TokenKind.RBRACE) and not self._at(TokenKind.EOF):
             pattern = self._pattern()
             self._expect(TokenKind.FAT_ARROW, "'=>'")
+            if self._at(TokenKind.LBRACE) and not self._record_ahead():
+                raise self._error(
+                    "match arm bodies must be single expressions (blocks are not supported yet)",
+                    self._peek().span,
+                )
             body = self._expr()
             arms.append(ast.MatchArm(pattern, body, pattern.span.to(body.span)))
         end = self._expect(TokenKind.RBRACE, "'}'").span

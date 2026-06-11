@@ -33,14 +33,16 @@ an effect-free function is EFFECT001, exactly like any other call.
 |---|---|---|
 | `Std.Math` | `abs`, `min`, `max`, `clamp`, `sign`, `pow` (64-bit wrapping integer math) | pure |
 | `Std.Str` | `length` (bytes), `is_empty`, `eq`, `ne`, `cmp`, plus `impl Eq for String` and `impl Show for String` | pure |
+| `Std.IO` | `print` (no newline), `println`, `read_line` (one stdin line; `""` at EOF) | `Log` / `Fs` |
 | `Std.Env` | `get_or(name, default)`, `has(name)` | `Process` |
-| `Std.Time` | `unix_time()` | `Time` |
+| `Std.Time` | `unix_time()`, `monotonic_ms()` (for measuring durations) | `Time` |
 | `Std.Proc` | `pid()` | `Process` |
 
 The headline: **importing `Std.Str` gives every `String` real equality** —
 `"a".eq("b")` dispatches through the trait system to `strcmp`, on both
-backends. It also unlocks `derive(Eq)` on records with `String` fields, which
-compare field-wise through the trait. (`length` is the UTF-8 *byte* length; `getenv`-backed `Env` cannot
+backends. It also unlocks `derive(Eq)` on records with `String` fields (field-wise
+through the trait) and `assert_eq`/`assert_ne` on strings, with failures that
+print both values. (`length` is the UTF-8 *byte* length; `getenv`-backed `Env` cannot
 distinguish unset from empty, as in C.)
 
 ## How it's built

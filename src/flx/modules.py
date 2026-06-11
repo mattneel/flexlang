@@ -122,6 +122,16 @@ def load_program(entry_path: str, extra_roots: tuple[Path, ...] = ()) -> Program
                 )
             if not found and (std_root() / rel).is_file():
                 found = [std_root() / rel]  # the stdlib is the fallback root
+            if not found and imp.startswith("Std."):
+                raise FlexError(
+                    [
+                        Diagnostic(
+                            "MOD001",
+                            f"the standard library has no module {imp!r} (yet)",
+                            span,
+                        )
+                    ]
+                )
             child = found[0] if found else roots[0] / rel
             visit(child, imp, span)
 

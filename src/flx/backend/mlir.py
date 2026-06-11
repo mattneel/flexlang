@@ -25,7 +25,7 @@ from flx.types import BOOL, I64, STRING, UNIT, AdtType, FnType, RecordType, Type
 _ARITH_OP = {"+": "addi", "-": "subi", "*": "muli"}
 # `/` and `%` go through guarded runtime calls (see runtime.py): raw arith.divsi /
 # arith.remsi are UB on a zero divisor and on INT64_MIN / -1.
-_DIV_OP = {"/": "@flx_idiv", "%": "@flx_imod"}
+_DIV_OP = {"/": "@__flx_idiv", "%": "@__flx_imod"}
 _CMP_PRED = {"<": "slt", "<=": "sle", ">": "sgt", ">=": "sge", "==": "eq", "!=": "ne"}
 _BUILTINS = {"assert", "assert_eq", "assert_ne", "fail", "panic"}
 
@@ -34,6 +34,8 @@ _RUNTIME_DECLS = (
     "func.func private @__flx_assert_fail()\n"
     "func.func private @__flx_assert_eq_fail(i64, i64)\n"
     "func.func private @__flx_assert_ne_fail(i64, i64)\n"
+    "func.func private @__flx_assert_streq_fail(!llvm.ptr, i64, !llvm.ptr, i64)\n"
+    "func.func private @__flx_assert_strne_fail(!llvm.ptr, i64)\n"
     "func.func private @__flx_explicit_fail()\n"
     "func.func private @__flx_fail_msg(!llvm.ptr, i64)\n"
 )
@@ -196,7 +198,7 @@ class FunctionLowerer:
         if not self.terminated:
             zero = self._const("0", "i32")
             self._terminator(f"func.return {zero} : i32")
-        header = f"func.func @flx_test_{index}() -> i32 {{"
+        header = f"func.func @__flx_test_{index}() -> i32 {{"
         return "\n".join([header, *self.lines, "}"])
 
     # --- blocks / statements --------------------------------------------------
@@ -264,6 +266,8 @@ class FunctionLowerer:
             return self._const(str(expr.value), "i64")
         if isinstance(expr, ast.BoolLit):
             return self._const("1" if expr.value else "0", "i1")
+        if isinstance(expr, ast.UnitLit):
+            return None
         if isinstance(expr, ast.StringLit):
             return self._lower_string(expr)
         if isinstance(expr, ast.NameExpr):
@@ -301,7 +305,7 @@ class FunctionLowerer:
 
     def _lower_string(self, expr: ast.StringLit) -> str:
         data = expr.value.encode("utf-8")
-        name = f"@flx_str_{self._str_count}"
+        name = f"@__flx_str_{self._str_count}"
         self._str_count += 1
         escaped = "".join(
             chr(b) if 0x20 <= b < 0x7F and b not in (0x22, 0x5C) else f"\\{b:02X}"
@@ -593,7 +597,7 @@ class FunctionLowerer:
             lp, ll = self._string_parts(left)
             rp, rl = self._string_parts(right)
             return self._str_runtime(
-                "flx_str_concat", ["!llvm.ptr", "i64", "!llvm.ptr", "i64"], [lp, ll, rp, rl]
+                "__flx_str_concat", ["!llvm.ptr", "i64", "!llvm.ptr", "i64"], [lp, ll, rp, rl]
             )
         if op in ("==", "!="):
             # Structural equality (works for scalars, records, and ADTs).
@@ -665,11 +669,21 @@ class FunctionLowerer:
                 assert isinstance(adt, AdtType)
                 return self._lower_ctor(adt, expr.callee.name, expr.args)
             obj = expr.callee.obj
-            if isinstance(obj, ast.NameExpr) and obj.name == "Log" and expr.args:
-                value = self.lower_expr(expr.args[0])
-                assert value is not None
-                ptr, length = self._string_parts(value)
-                self._emit(f"func.call @flx_log({ptr}, {length}) : (!llvm.ptr, i64) -> ()")
+            if isinstance(obj, ast.NameExpr):
+                method = expr.callee.name
+                if obj.name == "Log" and expr.args:
+                    value = self.lower_expr(expr.args[0])
+                    assert value is not None
+                    ptr, length = self._string_parts(value)
+                    runtime_fn = "__flx_print" if method == "print" else "__flx_log"
+                    self._emit(f"func.call @{runtime_fn}({ptr}, {length}) : (!llvm.ptr, i64) -> ()")
+                    return None
+                if obj.name == "Fs" and method == "read_line":
+                    return self._str_runtime("__flx_read_line", [], [])
+                if obj.name == "Time" and method == "monotonic_ms":
+                    out = self._fresh()
+                    self._emit(f"{out} = func.call @__flx_monotonic_ms() : () -> i64")
+                    return out
             return None
         if not isinstance(expr.callee, ast.NameExpr):
             raise BackendError("only direct function calls are supported")
@@ -685,7 +699,7 @@ class FunctionLowerer:
         if name == "to_str":  # prelude: I64 -> String
             arg = self.lower_expr(expr.args[0])
             assert arg is not None
-            return self._str_runtime("flx_int_to_str", ["i64"], [arg])
+            return self._str_runtime("__flx_int_to_str", ["i64"], [arg])
         if name in self.constructors:  # variant constructor, e.g. Ok(x)
             adt = self._ty_of(expr)
             assert isinstance(adt, AdtType)
@@ -712,6 +726,34 @@ class FunctionLowerer:
             assert left is not None and right is not None
             operand_type = self._ty_of(call.args[0])
             operand_ty = mlir_type(operand_type)
+            if operand_type is STRING:
+                # Strings compare through the Eq impl (the checker required it),
+                # and failures print the actual values.
+                equal = self._fresh()
+                self._emit(
+                    f"{equal} = func.call @flx_t$Eq$0$String$eq({left}, {right}) : "
+                    f"({operand_ty}, {operand_ty}) -> i1"
+                )
+                if name == "assert_eq":
+                    ok_cond = equal
+                else:
+                    one = self._const("1", "i1")
+                    ok_cond = self._fresh()
+                    self._emit(f"{ok_cond} = arith.xori {equal}, {one} : i1")
+                lp, ll = self._string_parts(left)
+                if name == "assert_eq":
+                    rp, rl = self._string_parts(right)
+                    self._assert_branch(
+                        ok_cond,
+                        "@__flx_assert_streq_fail",
+                        f"{lp}, {ll}, {rp}, {rl}",
+                        "!llvm.ptr, i64, !llvm.ptr, i64",
+                    )
+                else:
+                    self._assert_branch(
+                        ok_cond, "@__flx_assert_strne_fail", f"{lp}, {ll}", "!llvm.ptr, i64"
+                    )
+                return None
             equal = self._emit_equal(left, right, operand_type)
             if name == "assert_eq":
                 ok_cond = equal
@@ -826,7 +868,7 @@ class FunctionLowerer:
         cret = _EXTERN_MLIR_TYPE[ret_kind]
         self._emit(f"{out} = func.call @{name}({arg_list}) : ({type_list}) -> {cret}")
         if ret_kind == "str":
-            return self._str_runtime("flx_cstr_wrap", ["!llvm.ptr"], [out])
+            return self._str_runtime("__flx_cstr_wrap", ["!llvm.ptr"], [out])
         if ret_kind == "i32":
             widened = self._fresh()
             self._emit(f"{widened} = arith.extsi {out} : i32 to i64")

@@ -13,7 +13,7 @@ subcommands are scaffolded today and implemented incrementally.
 | `flx test [path]` | Discover, compile, and run tests | ✅ |
 | `flx expand <file>` | Show comptime/macro/derive expansion | ✅ |
 | `flx highlight <file>` | Syntax-highlight `.flx` | ✅ |
-| `flx build <file> -o <bin>` | Build a native executable | stub |
+| `flx build <file> -o <bin>` | Build a native executable | working |
 | `flx emit-hir <file>` | Emit typed HIR | stub |
 | `flx emit-mir <file>` | Emit MIR | stub |
 | `flx explain-effects <file>` | Explain effects | stub |

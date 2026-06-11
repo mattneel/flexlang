@@ -31,7 +31,7 @@ native = pytest.mark.skipif(not _tools_available(), reason="LLVM/MLIR toolchain 
 def test_harness_header_singular() -> None:
     c = generate_harness([(0, "Main / add works")])
     assert 'printf("running 1 test\\n\\n")' in c
-    assert "extern int flx_test_0(void);" in c
+    assert "extern int __flx_test_0(void);" in c
     # Name is passed as a printf argument (not in the format string) for safety.
     assert 'printf("ok %s\\n", "Main / add works")' in c
 
@@ -47,9 +47,9 @@ def test_harness_passes_name_as_arg_and_escapes() -> None:
 def test_harness_header_plural_and_indices() -> None:
     c = generate_harness([(0, "Math / a"), (2, "Math / c")])
     assert 'printf("running 2 tests\\n\\n")' in c
-    assert "extern int flx_test_0(void);" in c
-    assert "extern int flx_test_2(void);" in c
-    assert "extern int flx_test_1(void);" not in c  # index 1 filtered out
+    assert "extern int __flx_test_0(void);" in c
+    assert "extern int __flx_test_2(void);" in c
+    assert "extern int __flx_test_1(void);" not in c  # index 1 filtered out
 
 
 # --- native test runs (skipped without toolchain) -----------------------------
