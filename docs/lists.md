@@ -109,7 +109,9 @@ goes to the program (a leading `--` is stripped).
 ## Not yet
 
 - `xs[i] = v` assignment syntax — use `List.set(xs, i, v)`.
-- First-class functions, so no `map`/`filter` yet (M4).
 - `pop`, `slice`, sorting — the surface is deliberately small while the
   allocation story (regions) matures. Lists are heap-allocated and reclaimed
   at process exit.
+
+(`map`/`filter`/`fold` arrived with function values — see
+[Numbers, Bits, and Function Values](numerics.md).)

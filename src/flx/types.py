@@ -104,6 +104,7 @@ class ErrorType(Type):
 
 
 I64 = PrimType("I64")
+F64 = PrimType("F64")
 BOOL = PrimType("Bool")
 UNIT = PrimType("Unit")
 STRING = PrimType("String")
@@ -113,6 +114,7 @@ ERROR = ErrorType()
 # Type names usable in annotations for the MVP.
 PRIMITIVES: dict[str, Type] = {
     "I64": I64,
+    "F64": F64,
     "Bool": BOOL,
     "Unit": UNIT,
     "String": STRING,

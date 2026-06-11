@@ -23,6 +23,18 @@ void __flx_assert_eq_fail(long long actual, long long expected) {
 void __flx_assert_ne_fail(long long a, long long b) {
     printf("  assert_ne failed: both are %lld\n", a);
 }
+void __flx_f64_fmt(char *, size_t, double);
+void __flx_assert_feq_fail(double actual, double expected) {
+    char a[32], e[32];
+    __flx_f64_fmt(a, sizeof a, actual);
+    __flx_f64_fmt(e, sizeof e, expected);
+    printf("  assert_eq failed: actual %s, expected %s\n", a, e);
+}
+void __flx_assert_fne_fail(double a) {
+    char buf[32];
+    __flx_f64_fmt(buf, sizeof buf, a);
+    printf("  assert_ne failed: both are %s\n", buf);
+}
 void __flx_assert_streq_fail(const char *a, long long an, const char *b, long long bn) {
     printf("  assert_eq failed: actual \"");
     fwrite(a, 1, (size_t)an, stdout);

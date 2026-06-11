@@ -110,6 +110,8 @@ def _dump_stmt(stmt: ast.Stmt, depth: int, out: list[str]) -> None:
 def _expr(expr: ast.Expr) -> str:
     if isinstance(expr, ast.IntLit):
         return str(expr.value)
+    if isinstance(expr, ast.FloatLit):
+        return repr(expr.value)
     if isinstance(expr, ast.BoolLit):
         return "true" if expr.value else "false"
     if isinstance(expr, ast.StringLit):

@@ -5,6 +5,7 @@
 - [Specification](MVP.md)
 - [ADTs and Pattern Matching](adts.md)
 - [Lists and Iteration](lists.md)
+- [Numbers, Bits, and Function Values](numerics.md)
 - [Traits and Generics](traits.md)
 - [Packages and Builds](packages.md)
 - [FFI — Calling C](ffi.md)

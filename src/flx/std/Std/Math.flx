@@ -29,3 +29,19 @@ pub fn pow(base: I64, exp: I64) -> I64 = {
     result
   }
 }
+
+// --- floating point (libm) ------------------------------------------------------
+// F64 follows IEEE-754: x / 0.0 is inf or nan, comparisons are false on nan.
+// Convert explicitly: to_f64(n), to_i64(x) (truncates; panics on nan/inf).
+
+pub extern fn sqrt(x: F64) -> F64
+pub extern fn sin(x: F64) -> F64
+pub extern fn cos(x: F64) -> F64
+pub extern fn floor(x: F64) -> F64
+pub extern fn ceil(x: F64) -> F64
+pub extern fn fabs(x: F64) -> F64
+pub extern fn log(x: F64) -> F64
+pub extern fn exp(x: F64) -> F64
+
+pub fn fmin(a: F64, b: F64) -> F64 = { if a < b { a } else { b } }
+pub fn fmax(a: F64, b: F64) -> F64 = { if a > b { a } else { b } }

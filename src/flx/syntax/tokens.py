@@ -11,6 +11,7 @@ from flx.diagnostics import Span
 class TokenKind(Enum):
     # literals / identifiers
     INT = auto()
+    FLOAT = auto()
     STRING = auto()
     IDENT = auto()
 
@@ -71,6 +72,10 @@ class TokenKind(Enum):
     GE = auto()
     PLUS = auto()
     PLUS_PLUS = auto()  # ++ (string concatenation)
+    AMP = auto()  # & (bitwise and)
+    CARET = auto()  # ^ (bitwise xor)
+    SHL = auto()  # <<
+    SHR = auto()  # >> (arithmetic)
     MINUS = auto()
     STAR = auto()
     SLASH = auto()

@@ -15,6 +15,7 @@ from flx.syntax import ast
 from flx.types import (
     BOOL,
     ERROR,
+    F64,
     I64,
     PRIMITIVES,
     REGION,
@@ -63,6 +64,9 @@ def _type_enc(ty: Type) -> str:
     Bool>` (three args) encode to different argument lists rather than collapsing
     to one ``$``-joined string. `$` is illegal in source identifiers, so the name
     tokens never clash with the numeric arity tokens."""
+    if isinstance(ty, FnType):
+        fn_inner = "$".join(_type_enc(t) for t in [*ty.params, ty.ret])
+        return f"{len(ty.params) + 1}$->${fn_inner}"  # '->' is not a source name
     if isinstance(ty, AdtType) and ty.type_args:
         inner = "$".join(_type_enc(a) for a in ty.type_args)
         return f"{len(ty.type_args)}${ty.name}${inner}"
@@ -112,6 +116,7 @@ _EFFECT_MODULES = {"Fs", "Http", "Db", "Log", "Time", "Alloc", "Random", "Proces
 _FLX_BUILD_OPS = {"check", "test", "run", "expand", "build"}
 
 _ARITH = {"+", "-", "*", "/", "%"}
+_BITWISE = {"&", "|", "^", "<<", ">>"}
 _COMPARE = {"<", "<=", ">", ">="}
 _EQUALITY = {"==", "!="}
 _BOOLEAN = {"&&", "||"}
@@ -302,6 +307,14 @@ class Checker:
             user_records.append(record)
         for record in user_records:
             fields = tuple((f.name, self._resolve_type(f.type)) for f in record.fields)
+            for fname, fty in fields:
+                if isinstance(fty, FnType):
+                    self._err(
+                        "TYPE025",
+                        f"field {fname!r} has a function type; function values "
+                        "cannot be stored in records yet",
+                        record.span,
+                    )
             object.__setattr__(self.record_types[record.name], "fields", fields)
         # A record that reaches itself through record fields alone is infinite
         # in size — only an ADT payload (which boxes) can break the cycle.
@@ -683,6 +696,8 @@ class Checker:
                 pty = self._resolve_type(param.type)
                 if pty is I64:
                     param_kinds.append("i64")
+                elif pty is F64:
+                    param_kinds.append("f64")
                 elif pty is STRING:
                     param_kinds.append("str")
                 else:
@@ -690,7 +705,7 @@ class Checker:
                         self._err(
                             "FFI002",
                             f"extern parameter {param.name!r} has type {pty}; "
-                            "only I64, I32, and String cross the C ABI",
+                            "only I64, I32, F64, and String cross the C ABI",
                             param.span,
                         )
                     pty = ERROR
@@ -707,6 +722,8 @@ class Checker:
                 ret = self._resolve_type(ext.return_type) if ext.return_type else UNIT
                 if ret is I64:
                     ret_kind = "i64"
+                elif ret is F64:
+                    ret_kind = "f64"
                 elif ret is STRING:
                     ret_kind = "str"
                 elif ret is UNIT:
@@ -716,7 +733,7 @@ class Checker:
                         self._err(
                             "FFI002",
                             f"extern return type {ret} is not supported; "
-                            "only I64, I32, String, and Unit cross the C ABI",
+                            "only I64, I32, F64, String, and Unit cross the C ABI",
                             ext.span,
                         )
                     ret = ERROR
@@ -783,6 +800,7 @@ class Checker:
             name in params
             or name in PRIMITIVES
             or name == "List"
+            or name == "->"
             or name in self.record_types
             or name in self.adt_templates
             or (allow_self and name == "Self")
@@ -791,7 +809,9 @@ class Checker:
             self._err("TYPE001", f"unknown type {name!r}", te.span)
             return
         arity: int | None = None
-        if name == "List":
+        if name == "->":
+            arity = None  # any param count; args are [params..., ret]
+        elif name == "List":
             arity = 1
         elif name in self.adt_templates:
             arity = len(self.adt_templates[name][0])
@@ -819,7 +839,7 @@ class Checker:
                 f"extern name {name!r} collides with the Flex runtime namespace",
                 ext.span,
             )
-        elif name in _BUILTINS or name in ("to_str", "sh", "flx"):
+        elif name in _BUILTINS or name in ("to_str", "to_f64", "to_i64", "sh", "flx"):
             self._err("FFI003", f"extern name {name!r} collides with a Flex builtin", ext.span)
         elif name in self.ctors:
             self._err("FFI003", f"extern name {name!r} collides with a constructor", ext.span)
@@ -895,6 +915,13 @@ class Checker:
             if annotated is not None:
                 self._expect(annotated, value_ty, stmt.value.span, "bound value")
                 value_ty = annotated  # the annotation wins (e.g. `[]` stays typed)
+            if isinstance(stmt, ast.MutStmt) and isinstance(value_ty, FnType):
+                self._err(
+                    "TYPE025",
+                    "function values cannot be stored in `mut` bindings yet",
+                    stmt.value.span,
+                    help="bind with `let`, or pass the function as an argument",
+                )
             self.scope.define(stmt.name, _Binding(value_ty, mutable=isinstance(stmt, ast.MutStmt)))
             return UNIT
         if isinstance(stmt, ast.AssignStmt):
@@ -963,6 +990,8 @@ class Checker:
                     expr.span,
                 )
             return I64
+        if isinstance(expr, ast.FloatLit):
+            return F64
         if isinstance(expr, ast.BoolLit):
             return BOOL
         if isinstance(expr, ast.StringLit):
@@ -1114,13 +1143,38 @@ class Checker:
             return binding.type
         if expr.name in self.ctors:  # bare variant, e.g. None / Red
             return self._infer_ctor(expr.name, [], expected, expr.span)
-        if expr.name in self.functions or expr.name in self.generic_fns:
-            # Functions are not first-class values yet: neither backend can
-            # represent one, and an indirect call would sidestep effect checking.
-            # Direct calls never reach here (they resolve inside _infer_call).
+        if expr.name in self.extern_fns:
             self._err(
                 "NAME003",
-                f"{expr.name!r} is a function, not a value",
+                f"{expr.name!r} is an extern and cannot be passed as a value "
+                "(its C ABI marshalling only happens at direct calls)",
+                expr.span,
+                help=f"wrap it: fn my_{expr.name}(...) = {{ {expr.name}(...) }}",
+            )
+            return ERROR
+        if expr.name in self.functions:
+            # A PURE top-level function is a value of its function type — an
+            # indirect call through it can demand no effects, so the effect
+            # system stays sound. Effectful functions stay call-only (a value
+            # would launder their effects past the checker). Direct calls
+            # never reach here (they resolve inside _infer_call).
+            if self.fn_effects.get(expr.name):
+                effects = ", ".join(sorted(self.fn_effects[expr.name]))
+                self._err(
+                    "NAME003",
+                    f"{expr.name!r} uses {{ {effects} }} and cannot be passed as "
+                    "a value (function types are pure)",
+                    expr.span,
+                    help=f"call it directly: {expr.name}(...)",
+                )
+                return ERROR
+            self._check_visible(expr.name, expr.span)
+            return self.functions[expr.name]
+        if expr.name in self.generic_fns:
+            self._err(
+                "NAME003",
+                f"{expr.name!r} is generic and cannot be passed as a value "
+                "(pass a monomorphic function)",
                 expr.span,
                 help=f"call it directly: {expr.name}(...)",
             )
@@ -1140,6 +1194,8 @@ class Checker:
             return I64
         operand = self._check_expr(expr.operand)
         if expr.op == "-":
+            if operand is F64:
+                return F64
             self._expect(I64, operand, expr.operand.span, "operand of unary `-`")
             return I64
         self._expect(BOOL, operand, expr.operand.span, "operand of `!`")
@@ -1166,12 +1222,21 @@ class Checker:
                     help='use `++`: "a" ++ "b"',
                 )
                 return STRING if left is STRING and right is STRING else ERROR
+            if left is F64 or right is F64:
+                self._expect_numeric(F64, left, expr.left.span, op)
+                self._expect_numeric(F64, right, expr.right.span, op)
+                return F64
+            self._expect_numeric(I64, left, expr.left.span, op)
+            self._expect_numeric(I64, right, expr.right.span, op)
+            return I64
+        if op in _BITWISE:
             self._expect(I64, left, expr.left.span, f"left operand of `{op}`")
             self._expect(I64, right, expr.right.span, f"right operand of `{op}`")
             return I64
         if op in _COMPARE:
-            self._expect(I64, left, expr.left.span, f"left operand of `{op}`")
-            self._expect(I64, right, expr.right.span, f"right operand of `{op}`")
+            operand = F64 if left is F64 or right is F64 else I64
+            self._expect_numeric(operand, left, expr.left.span, op)
+            self._expect_numeric(operand, right, expr.right.span, op)
             return BOOL
         if op in _BOOLEAN:
             self._expect(BOOL, left, expr.left.span, f"left operand of `{op}`")
@@ -1188,17 +1253,52 @@ class Checker:
             return BOOL
         return ERROR
 
+    def _expect_numeric(self, expected: Type, actual: Type, span: Span | None, op: str) -> None:
+        if actual is ERROR or actual is expected:
+            return
+        help_text = None
+        if {expected, actual} == {I64, F64}:
+            help_text = "Flex has no implicit numeric conversion; use to_f64(n) or to_i64(x)"
+        self._err(
+            "TYPE003",
+            f"operand of `{op}` has type {actual}, expected {expected}",
+            span,
+            help=help_text,
+        )
+
     def _infer_call(self, expr: ast.CallExpr, expected: Type | None) -> Type:
         callee = expr.callee
-        if isinstance(callee, ast.NameExpr):
+        # A local binding shadows every name-based dispatch (builtins, ctors,
+        # global functions): a function-typed parameter named like a global
+        # must call the PARAMETER, on every backend.
+        if isinstance(callee, ast.NameExpr) and self.scope.lookup(callee.name) is None:
             if callee.name in _BUILTINS:
                 return self._check_builtin(callee.name, expr)
-            if callee.name == "to_str":  # prelude: I64 -> String
+            if callee.name == "to_str":  # prelude: I64 | F64 -> String
                 if len(expr.args) == 1:
-                    self._expect(I64, self._check_expr(expr.args[0]), expr.args[0].span, "argument")
+                    arg_ty = self._check_expr(expr.args[0])
+                    if arg_ty not in (I64, F64, ERROR):
+                        self._err(
+                            "TYPE003",
+                            f"to_str takes an I64 or F64, found {arg_ty}",
+                            expr.args[0].span,
+                        )
                 else:
                     self._err("TYPE006", "to_str expects 1 argument", expr.span)
                 return STRING
+            if callee.name == "to_f64":  # prelude: I64 -> F64
+                if len(expr.args) == 1:
+                    self._expect(I64, self._check_expr(expr.args[0]), expr.args[0].span, "argument")
+                else:
+                    self._err("TYPE006", "to_f64 expects 1 argument", expr.span)
+                return F64
+            if callee.name == "to_i64":  # prelude: F64 -> I64 (truncates; panics
+                # on NaN/infinity/out-of-range — there is no honest answer)
+                if len(expr.args) == 1:
+                    self._expect(F64, self._check_expr(expr.args[0]), expr.args[0].span, "argument")
+                else:
+                    self._err("TYPE006", "to_i64 expects 1 argument", expr.span)
+                return I64
             if callee.name == "sh" and self.in_target:
                 # Build intrinsic: run a shell command; Ok on exit 0, Err otherwise.
                 if len(expr.args) == 1:
@@ -1405,6 +1505,10 @@ class Checker:
             return
         if isinstance(at, ListType) and pe.name == "List" and len(pe.args) == 1:
             self._unify_typeexpr(pe.args[0], at.elem, params, subst)
+            return
+        if isinstance(at, FnType) and pe.name == "->" and len(pe.args) == len(at.params) + 1:
+            for sub_pe, sub_at in zip(pe.args, [*at.params, at.ret], strict=True):
+                self._unify_typeexpr(sub_pe, sub_at, params, subst)
 
     def _infer_try(self, expr: ast.TryExpr) -> Type:
         inner = self._check_expr(expr.expr)
@@ -1460,6 +1564,13 @@ class Checker:
             self.scope.pop()
             if not value_used:
                 continue  # statement position: arm types need not agree
+            if isinstance(body_ty, FnType):
+                self._err(
+                    "TYPE025",
+                    "a `match` cannot yield a function value yet",
+                    arm.span,
+                )
+                body_ty = ERROR
             if result is None:
                 result = body_ty
             elif not _same(result, body_ty):
@@ -1652,6 +1763,14 @@ class Checker:
                 self._check_block(expr.else_block, None, False)
             return UNIT
         then_ty = self._check_block(expr.then_block, expected)
+        if isinstance(then_ty, FnType):
+            self._err(
+                "TYPE025",
+                "an `if` cannot yield a function value yet",
+                expr.span,
+                help="select with a direct call in each branch instead",
+            )
+            return ERROR
         if expr.else_block is None:
             # Value position with no else: there is no value on the false path.
             if then_ty is not UNIT and then_ty is not ERROR and not _diverges(expr.then_block):
@@ -1684,11 +1803,23 @@ class Checker:
             return self._subst[type_expr.name]
         if type_expr.name in PRIMITIVES and not type_expr.args:
             return PRIMITIVES[type_expr.name]
+        if type_expr.name == "->":
+            resolved = [self._resolve_type(a) for a in type_expr.args]
+            return FnType(tuple(resolved[:-1]), resolved[-1])
         if type_expr.name == "List":
             if len(type_expr.args) != 1:
                 self._err("TYPE013", "List expects exactly 1 type argument", type_expr.span)
                 return ERROR
-            return ListType(self._resolve_type(type_expr.args[0]))
+            elem = self._resolve_type(type_expr.args[0])
+            if isinstance(elem, FnType):
+                self._err(
+                    "TYPE025",
+                    "function values cannot be stored in lists yet",
+                    type_expr.span,
+                    help="pass functions as arguments; storing them is the roadmap",
+                )
+                return ERROR
+            return ListType(elem)
         if type_expr.name in self.record_types and not type_expr.args:
             self._check_visible(type_expr.name, type_expr.span)
             return self.record_types[type_expr.name]
@@ -1741,6 +1872,14 @@ class Checker:
                 VariantDef(vname, tuple(self._resolve_type(pe) for pe in payload))
                 for vname, payload in variants
             )
+            for vdef in defs:
+                if any(isinstance(t, FnType) for t in vdef.payload):
+                    self._err(
+                        "TYPE025",
+                        f"variant {vdef.name!r} carries a function type; function "
+                        "values cannot be stored in ADT payloads yet",
+                        span,
+                    )
         finally:
             self._inst_depth -= 1
             self._subst = saved
@@ -1800,7 +1939,7 @@ def _is_comparable(ty: Type) -> bool:
     """Whether `==`/`!=`/assert_eq can be lowered for this type (no strings yet).
     ADTs qualify only when every payload is slot-inline: a boxed payload would
     compare as a pointer natively, which is not structural equality."""
-    if ty is STRING or isinstance(ty, ListType):
+    if ty is STRING or isinstance(ty, (ListType, FnType)):
         return False
     if isinstance(ty, RecordType):
         return all(_is_comparable(t) for _, t in ty.fields)

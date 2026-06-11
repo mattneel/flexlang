@@ -37,6 +37,12 @@ class IntLit(Expr):
 
 
 @dataclass(frozen=True)
+class FloatLit(Expr):
+    value: float
+    span: Span
+
+
+@dataclass(frozen=True)
 class BoolLit(Expr):
     value: bool
     span: Span

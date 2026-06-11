@@ -174,14 +174,16 @@ def test_plus_on_strings_hints_concat() -> None:
     assert "does not concatenate" in text and "++" in text
 
 
-def test_float_literal_diagnostic() -> None:
-    text = _codes_and_text("fn main() -> I64 = { let x = 12.5\n 0 }")
-    assert "floating-point literals are not supported" in text
+def test_float_literals_work(tmp_path: Path) -> None:
+    # M1 could only diagnose floats; M4 made F64 real.
+    src = "fn main() -> I64 = { let x = 12.5\n to_i64(x * 2.0) }\n"
+    assert driver.cmd_run(_write(tmp_path, src), interpret=True) == 25
 
 
-def test_hex_literal_diagnostic() -> None:
-    text = _codes_and_text("fn main() -> I64 = { let x = 0xFF\n 0 }")
-    assert "hexadecimal and binary literals are not supported" in text
+def test_hex_literals_work(tmp_path: Path) -> None:
+    # M1 could only diagnose hex; M4 made 0x/0b literals real.
+    src = "fn main() -> I64 = { 0xFF & 0b1111 }\n"
+    assert driver.cmd_run(_write(tmp_path, src), interpret=True) == 15
 
 
 def test_indexing_strings_rejected_with_hint() -> None:

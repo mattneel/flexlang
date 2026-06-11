@@ -106,7 +106,7 @@ def _derive_eq(type_name: str, sp: Span, exp: Expander) -> ast.FnDecl:
 
 
 def _render(value: ast.Expr, type_name: str, sp: Span) -> ast.Expr:
-    if type_name == "I64":
+    if type_name in ("I64", "F64"):
         return ast.CallExpr(_name("to_str", sp), [value], sp)
     if type_name == "Bool":
         then = ast.Block([ast.ExprStmt(ast.StringLit("true", sp), sp)], sp)

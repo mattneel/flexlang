@@ -16,6 +16,7 @@ an ADT value -> :class:`Variant`. Control flow that escapes an expression — ea
 from __future__ import annotations
 
 import ctypes
+import math
 import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -34,6 +35,48 @@ _I64_SIGN = 1 << 63
 # that our clean "stack overflow" guard fires before Python's own recursion
 # limit (raised to 20k by _ensure_recursion_headroom) would.
 _DEPTH_LIMIT = 2000
+
+
+def _float_binary(op: str, a: float, b: float) -> object:
+    """IEEE-754 semantics, matching native arith.{addf,subf,mulf,divf,remf} and
+    cmpf: division by zero yields inf/nan (Python raises, so it's emulated) and
+    remainder is C fmod."""
+    if op == "+":
+        return a + b
+    if op == "-":
+        return a - b
+    if op == "*":
+        return a * b
+    if op == "/":
+        if b == 0.0:
+            if a == 0.0 or math.isnan(a):
+                return math.nan
+            return math.copysign(math.inf, a) * math.copysign(1.0, b)
+        return a / b
+    if op == "%":
+        if b == 0.0 or math.isnan(a) or math.isinf(a):
+            return math.nan
+        return math.fmod(a, b)
+    if op == "<":
+        return a < b
+    if op == "<=":
+        return a <= b
+    if op == ">":
+        return a > b
+    if op == ">=":
+        return a >= b
+    raise FlexRuntimeError(f"bad float operator {op!r}")
+
+
+def _f64_str(x: float) -> str:
+    """Shortest %g string that round-trips, via the same try-15/16/17 loop the
+    native runtime runs — Python's %-formatting IS C printf, so the two
+    backends produce identical text by construction."""
+    for precision in (15, 16, 17):
+        s = "%.*g" % (precision, x)  # noqa: UP031 — C-printf parity is the point
+        if float(s) == x or x != x:  # NaN never compares equal; "%g" is "nan"
+            return s
+    return s  # unreachable: 17 significant digits always round-trip
 
 
 def _wrap(value: int) -> int:
@@ -314,6 +357,8 @@ class Interpreter:
                 raise FlexRuntimeError("evaluation exceeded the step limit")
         if isinstance(expr, ast.IntLit):
             return expr.value
+        if isinstance(expr, ast.FloatLit):
+            return expr.value
         if isinstance(expr, ast.BoolLit):
             return expr.value
         if isinstance(expr, ast.StringLit):
@@ -323,6 +368,9 @@ class Interpreter:
                 return env.get(expr.name)
             if expr.name in self.constructors:
                 return Variant(expr.name)
+            if expr.name in self.functions:
+                # A bare (pure) function reference — the checker approved it.
+                return self.functions[expr.name]
             raise FlexRuntimeError(f"unbound name {expr.name!r}")
         if isinstance(expr, ast.UnaryExpr):
             return self._unary(expr, env)
@@ -380,6 +428,8 @@ class Interpreter:
     def _unary(self, expr: ast.UnaryExpr, env: _Env) -> object:
         v = self.eval(expr.operand, env)
         if expr.op == "-":
+            if isinstance(v, float):
+                return -v
             assert isinstance(v, int)
             return _wrap(-v)
         if expr.op == "!":
@@ -400,8 +450,10 @@ class Interpreter:
             return left == right
         if op == "!=":
             return left != right
-        # The remaining operators are integer arithmetic/comparison, which the
-        # checker only admits on I64 operands.
+        if isinstance(left, float) or isinstance(right, float):
+            return _float_binary(op, float(left), float(right))  # type: ignore[arg-type]
+        # The remaining operators are integer arithmetic/comparison/bitwise,
+        # which the checker only admits on I64 operands.
         assert isinstance(left, int) and isinstance(right, int)
         if op == "+":
             return _wrap(left + right)
@@ -409,6 +461,18 @@ class Interpreter:
             return _wrap(left - right)
         if op == "*":
             return _wrap(left * right)
+        if op == "&":
+            return _wrap(left & right)
+        if op == "|":
+            return _wrap(left | right)
+        if op == "^":
+            return _wrap(left ^ right)
+        if op == "<<":
+            # Shift counts are masked to 0..63 (wasm/Java-style), the same rule
+            # the native lowering applies — no poison, no platform variance.
+            return _wrap(left << (right & 63))
+        if op == ">>":
+            return _wrap(left >> (right & 63))  # Python >> is arithmetic
         if op in ("/", "%"):
             if right == 0:
                 raise FlexRuntimeError("division by zero")
@@ -547,10 +611,29 @@ class Interpreter:
 
         assert isinstance(callee, ast.NameExpr)
         name = callee.name
+        if env.has(name):
+            # A function VALUE (a parameter or let-bound reference) shadows the
+            # global namespaces — call through it.
+            bound = env.get(name)
+            if isinstance(bound, ast.FnDecl):
+                return self.call(bound, [self.eval(a, env) for a in expr.args])
         if name in _BUILTINS:
             return self._builtin(name, expr, env)
         if name == "to_str":
-            return str(self.eval(expr.args[0], env))
+            value = self.eval(expr.args[0], env)
+            if isinstance(value, float):
+                return _f64_str(value)
+            return str(value)
+        if name == "to_f64":
+            n = self.eval(expr.args[0], env)
+            assert isinstance(n, int)
+            return float(n)
+        if name == "to_i64":
+            x = self.eval(expr.args[0], env)
+            assert isinstance(x, float)
+            if not math.isfinite(x) or not (-(2.0**63) <= x < 2.0**63):
+                raise FlexRuntimeError(f"cannot convert {_f64_str(x)} to I64")
+            return int(x)  # truncates toward zero
         if name in self.constructors:
             return Variant(name, self._ctor_payload(expr.args, env))
         if name in self.extern_fns:
@@ -598,7 +681,12 @@ class Interpreter:
 
     def _call_extern(self, name: str, args: list[object]) -> object:
         param_kinds, ret_kind = self.checked.extern_abi[name]
-        ctype_of = {"i64": ctypes.c_longlong, "i32": ctypes.c_int, "str": ctypes.c_char_p}
+        ctype_of = {
+            "i64": ctypes.c_longlong,
+            "i32": ctypes.c_int,
+            "str": ctypes.c_char_p,
+            "f64": ctypes.c_double,
+        }
         cfn = self._extern_cache.get(name)
         if cfn is None:
             try:
@@ -616,6 +704,9 @@ class Interpreter:
                 # surrogateescape round-trips arbitrary bytes that earlier came
                 # back from C, so what we hand to C is byte-identical to native.
                 cargs.append(str(v).encode("utf-8", "surrogateescape"))
+            elif kind == "f64":
+                assert isinstance(v, float)
+                cargs.append(v)
             else:
                 assert isinstance(v, int)
                 wrapped = _wrap(v)
@@ -639,6 +730,9 @@ class Interpreter:
             return result.decode("utf-8", "surrogateescape") if result is not None else ""
         if ret_kind == "unit":
             return None
+        if ret_kind == "f64":
+            assert isinstance(result, float)
+            return result
         # i32 results arrive sign-extended by ctypes (c_int), matching native extsi.
         assert isinstance(result, int)
         return _wrap(result)
@@ -661,13 +755,15 @@ class Interpreter:
         message = self.eval(expr.args[0], env) if expr.args else None
         raise _TestFail(f"  {message}" if message is not None else "  explicit failure")
 
-    def _scalar(self, value: object) -> int | None:
+    def _scalar(self, value: object) -> int | str | None:
         """The i64 the native harness would compare for an assert failure, or None
         for an aggregate (record / ADT-with-payload) it reports generically."""
         if value is None:
             return 0  # unit materializes as i64 0 natively
         if isinstance(value, bool):
             return 1 if value else 0
+        if isinstance(value, float):
+            return _f64_str(value)
         if isinstance(value, int):
             return value
         if isinstance(value, Variant) and value.payload is None and value.tag in self.enum_index:

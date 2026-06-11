@@ -15,14 +15,21 @@ runtime shim (``main``, ``printf``, …). Tests are emitted by
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass
 
 from flx.backend.runtime import BASE_RUNTIME_DECLS
 from flx.sema.check import CheckResult
 from flx.syntax import ast
-from flx.types import BOOL, I64, STRING, UNIT, AdtType, FnType, ListType, RecordType, Type
+from flx.types import BOOL, F64, I64, STRING, UNIT, AdtType, FnType, ListType, RecordType, Type
 
 _ARITH_OP = {"+": "addi", "-": "subi", "*": "muli"}
+_BIT_OP = {"&": "andi", "|": "ori", "^": "xori"}
+# Float arithmetic is plain IEEE-754 (divf/remf yield inf/nan, no traps), so it
+# needs no guarded runtime calls. Comparisons are ORDERED (false on NaN), and
+# != lowers as !(oeq) — i.e. une — matching the interpreter and C.
+_FARITH_OP = {"+": "addf", "-": "subf", "*": "mulf", "/": "divf", "%": "remf"}
+_FCMP_PRED = {"<": "olt", "<=": "ole", ">": "ogt", ">=": "oge"}
 # `/` and `%` go through guarded runtime calls (see runtime.py): raw arith.divsi /
 # arith.remsi are UB on a zero divisor and on INT64_MIN / -1.
 _DIV_OP = {"/": "@__flx_idiv", "%": "@__flx_imod"}
@@ -34,6 +41,8 @@ _RUNTIME_DECLS = (
     "func.func private @__flx_assert_fail()\n"
     "func.func private @__flx_assert_eq_fail(i64, i64)\n"
     "func.func private @__flx_assert_ne_fail(i64, i64)\n"
+    "func.func private @__flx_assert_feq_fail(f64, f64)\n"
+    "func.func private @__flx_assert_fne_fail(f64)\n"
     "func.func private @__flx_assert_streq_fail(!llvm.ptr, i64, !llvm.ptr, i64)\n"
     "func.func private @__flx_assert_strne_fail(!llvm.ptr, i64)\n"
     "func.func private @__flx_explicit_fail()\n"
@@ -44,6 +53,8 @@ _RUNTIME_DECLS = (
 def mlir_type(ty: Type) -> str:
     if ty is I64:
         return "i64"
+    if ty is F64:
+        return "f64"
     if ty is BOOL:
         return "i1"
     if ty is UNIT:
@@ -62,6 +73,10 @@ def mlir_type(ty: Type) -> str:
         return "!llvm.struct<(i32, i64)>"
     if isinstance(ty, ListType):
         return "!llvm.ptr"  # a heap header: {i64 len, i64 cap, i64* data}
+    if isinstance(ty, FnType):
+        params = ", ".join(mlir_type(t) for t in ty.params)
+        ret = "()" if ty.ret is UNIT else mlir_type(ty.ret)
+        return f"({params}) -> {ret}"
     raise BackendError(f"type {ty} has no MLIR representation yet")
 
 
@@ -81,6 +96,7 @@ def _payload_inline(ty: Type) -> bool:
     storable, NOT comparable — the checker still rejects `==` on lists)."""
     return (
         ty is I64
+        or ty is F64
         or ty is BOOL
         or ty is UNIT
         or isinstance(ty, ListType)
@@ -308,6 +324,9 @@ class FunctionLowerer:
     def lower_expr(self, expr: ast.Expr) -> str | None:
         if isinstance(expr, ast.IntLit):
             return self._const(str(expr.value), "i64")
+        if isinstance(expr, ast.FloatLit):
+            bits = struct.unpack("<Q", struct.pack("<d", expr.value))[0]
+            return self._const(f"0x{bits:016X}", "f64")  # hex = exact raw bits
         if isinstance(expr, ast.BoolLit):
             return self._const("1" if expr.value else "0", "i1")
         if isinstance(expr, ast.UnitLit):
@@ -430,6 +449,13 @@ class FunctionLowerer:
             adt = self._ty_of(expr)
             assert isinstance(adt, AdtType)
             return self._lower_ctor(adt, expr.name, [])
+        ty = self.types.get(id(expr))
+        if isinstance(ty, FnType) and expr.name in self.functions:
+            local = next((f for f in self.scopes if expr.name in f), None)
+            if local is None:  # a bare (pure) top-level function reference
+                out = self._fresh()
+                self._emit(f"{out} = func.constant @flx_{expr.name} : {mlir_type(ty)}")
+                return out
         binding = self._lookup(expr.name)
         if binding.kind == "val":
             return binding.ref
@@ -571,6 +597,10 @@ class FunctionLowerer:
             out = self._fresh()
             self._emit(f"{out} = arith.extui {value} : i1 to i64")
             return out
+        if ty is F64:
+            out = self._fresh()
+            self._emit(f"{out} = arith.bitcast {value} : f64 to i64")
+            return out
         if isinstance(ty, ListType):
             out = self._fresh()
             self._emit(f"{out} = llvm.ptrtoint {value} : !llvm.ptr to i64")
@@ -582,6 +612,10 @@ class FunctionLowerer:
         if ty is BOOL:
             out = self._fresh()
             self._emit(f"{out} = arith.trunci {value} : i64 to i1")
+            return out
+        if ty is F64:
+            out = self._fresh()
+            self._emit(f"{out} = arith.bitcast {value} : i64 to f64")
             return out
         if isinstance(ty, ListType):
             out = self._fresh()
@@ -797,7 +831,9 @@ class FunctionLowerer:
             return self._const(str(-(1 << 63)), "i64")
         operand = self.lower_expr(expr.operand)
         out = self._fresh()
-        if expr.op == "-":
+        if expr.op == "-" and self._ty_of(expr.operand) is F64:
+            self._emit(f"{out} = arith.negf {operand} : f64")
+        elif expr.op == "-":
             zero = self._const("0", "i64")
             self._emit(f"{out} = arith.subi {zero}, {operand} : i64")
         else:
@@ -827,7 +863,22 @@ class FunctionLowerer:
             self._emit(f"{out} = arith.xori {equal}, {one} : i1")
             return out
         out = self._fresh()
-        if op in _DIV_OP:
+        is_float = self._ty_of(expr.left) is F64
+        if op in ("<<", ">>"):
+            # Shift counts are masked to 0..63 (matching the interpreter):
+            # LLVM shifts by >= bit-width are poison.
+            c63 = self._const("63", "i64")
+            masked = self._fresh()
+            self._emit(f"{masked} = arith.andi {right}, {c63} : i64")
+            shift = "shli" if op == "<<" else "shrsi"
+            self._emit(f"{out} = arith.{shift} {left}, {masked} : i64")
+        elif op in _BIT_OP:
+            self._emit(f"{out} = arith.{_BIT_OP[op]} {left}, {right} : i64")
+        elif is_float and op in _FARITH_OP:
+            self._emit(f"{out} = arith.{_FARITH_OP[op]} {left}, {right} : f64")
+        elif is_float and op in _FCMP_PRED:
+            self._emit(f"{out} = arith.cmpf {_FCMP_PRED[op]}, {left}, {right} : f64")
+        elif op in _DIV_OP:
             self._emit(f"{out} = func.call {_DIV_OP[op]}({left}, {right}) : (i64, i64) -> i64")
         elif op in _ARITH_OP:
             self._emit(f"{out} = arith.{_ARITH_OP[op]} {left}, {right} : i64")
@@ -932,6 +983,21 @@ class FunctionLowerer:
         if not isinstance(expr.callee, ast.NameExpr):
             raise BackendError("only direct function calls are supported")
         name = expr.callee.name
+        # A function VALUE in scope (a parameter or let-bound reference)
+        # shadows the global namespaces — call through it indirectly.
+        local_fn = next((f[name] for f in reversed(self.scopes) if name in f), None)
+        callee_ty = self.types.get(id(expr.callee))
+        if local_fn is not None and isinstance(callee_ty, FnType):
+            args = [self._materialize(self.lower_expr(a), a) for a in expr.args]
+            assert local_fn.kind == "val", "fn values are SSA-only (no slots)"
+            arg_list = ", ".join(args)
+            fty = mlir_type(callee_ty)
+            if callee_ty.ret is UNIT:
+                self._emit(f"func.call_indirect {local_fn.ref}({arg_list}) : {fty}")
+                return None
+            out = self._fresh()
+            self._emit(f"{out} = func.call_indirect {local_fn.ref}({arg_list}) : {fty}")
+            return out
         # Bounded-generic call -> direct call to the monomorphized specialization.
         symbol = self.method_targets.get(id(expr))
         if symbol is not None:
@@ -940,10 +1006,24 @@ class FunctionLowerer:
             return self._emit_call(f"flx_{symbol}", args, spec_ty)
         if name in self.extern_fns:
             return self._lower_extern_call(name, expr)
-        if name == "to_str":  # prelude: I64 -> String
+        if name == "to_str":  # prelude: I64 | F64 -> String
             arg = self.lower_expr(expr.args[0])
             assert arg is not None
+            if self._ty_of(expr.args[0]) is F64:
+                return self._str_runtime("__flx_f64_to_str", ["f64"], [arg])
             return self._str_runtime("__flx_int_to_str", ["i64"], [arg])
+        if name == "to_f64":
+            arg = self.lower_expr(expr.args[0])
+            assert arg is not None
+            out = self._fresh()
+            self._emit(f"{out} = arith.sitofp {arg} : i64 to f64")
+            return out
+        if name == "to_i64":
+            arg = self.lower_expr(expr.args[0])
+            assert arg is not None
+            out = self._fresh()
+            self._emit(f"{out} = func.call @__flx_f64_to_i64({arg}) : (f64) -> i64")
+            return out
         if name in self.constructors:  # variant constructor, e.g. Ok(x)
             adt = self._ty_of(expr)
             assert isinstance(adt, AdtType)
@@ -997,6 +1077,19 @@ class FunctionLowerer:
                         ok_cond, "@__flx_assert_strne_fail", f"{lp}, {ll}", "!llvm.ptr, i64"
                     )
                 return None
+            if operand_type is F64:
+                equal = self._fresh()
+                self._emit(f"{equal} = arith.cmpf oeq, {left}, {right} : f64")
+                if name == "assert_eq":
+                    self._assert_branch(
+                        equal, "@__flx_assert_feq_fail", f"{left}, {right}", "f64, f64"
+                    )
+                else:
+                    one = self._const("1", "i1")
+                    ok = self._fresh()
+                    self._emit(f"{ok} = arith.xori {equal}, {one} : i1")
+                    self._assert_branch(ok, "@__flx_assert_fne_fail", f"{left}", "f64")
+                return None
             equal = self._emit_equal(left, right, operand_type)
             if name == "assert_eq":
                 ok_cond = equal
@@ -1043,6 +1136,10 @@ class FunctionLowerer:
     def _emit_equal(self, left: str, right: str, ty: Type) -> str:
         """Structural equality producing an i1 (scalars, ADTs, and records)."""
         mty = mlir_type(ty)
+        if ty is F64:
+            out = self._fresh()
+            self._emit(f"{out} = arith.cmpf oeq, {left}, {right} : f64")
+            return out
         if not _is_aggregate(mty):
             out = self._fresh()
             self._emit(f"{out} = arith.cmpi eq, {left}, {right} : {mty}")
@@ -1099,6 +1196,9 @@ class FunctionLowerer:
                 self._emit(f"{narrowed} = arith.trunci {value} : i64 to i32")
                 args.append(narrowed)
                 types.append("i32")
+            elif kind == "f64":
+                args.append(value)
+                types.append("f64")
             else:
                 args.append(value)
                 types.append("i64")
@@ -1180,7 +1280,7 @@ class FunctionLowerer:
         return None
 
 
-_EXTERN_MLIR_TYPE = {"i64": "i64", "i32": "i32", "str": "!llvm.ptr"}
+_EXTERN_MLIR_TYPE = {"i64": "i64", "i32": "i32", "str": "!llvm.ptr", "f64": "f64"}
 
 
 def _extern_decls(checked: CheckResult) -> str:

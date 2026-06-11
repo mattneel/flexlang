@@ -1,0 +1,44 @@
+// Numerics + function values: F64 through libm, bitwise ops, map/filter/fold.
+//   flx run examples/numerics.flx
+module Main
+
+import Std.IO
+import Std.List
+import Std.Math
+
+fn square(x: F64) -> F64 = { x * x }
+fn is_set(bit: I64) -> Bool = { 0b101101 & (1 << bit) != 0 }
+fn fadd(a: F64, b: F64) -> F64 = { a + b }
+
+fn main() -> I64 uses { Log } = {
+  // A right triangle: sqrt over the FFI, F64 end to end.
+  let hyp = sqrt(square(3.0) + square(4.0))
+  println("hypotenuse " ++ to_str(hyp))
+
+  // Bit picking with shifts and masks.
+  mut set_bits: List<I64> = []
+  for bit in range(0, 6) {
+    if is_set(bit) { List.push(set_bits, bit) }
+  }
+  println("set bits " ++ to_str(List.len(set_bits)))
+
+  // map/filter/fold over floats.
+  let sums = fold(map([1.5, 2.5, 4.0], square), 0.0, fadd)
+  println("sum of squares " ++ to_str(sums))
+
+  to_i64(hyp)
+}
+
+test "float math" {
+  assert_eq(sqrt(16.0), 4.0)
+  assert_eq(to_i64(floor(2.9)), 2)
+  assert_eq(0xFF & 0x0F, 15)
+  assert_eq(1 << 10, 1024)
+}
+
+test "higher-order" {
+  let total = fold(range(1, 11), 0, add_i)
+  assert_eq(total, 55)
+}
+
+fn add_i(a: I64, b: I64) -> I64 = { a + b }

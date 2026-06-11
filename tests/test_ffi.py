@@ -83,15 +83,18 @@ def test_extern_arity_checked() -> None:
     assert "TYPE005" in _codes(src)
 
 
-def test_bare_function_reference_rejected() -> None:
-    # No first-class function values: an alias would also sidestep effect checks.
+def test_extern_and_effectful_references_rejected() -> None:
+    # Function VALUES exist since M4, but only for pure Flex functions: externs
+    # (ABI marshalling is call-site-only) and effectful functions (a value
+    # would launder effects) stay call-only.
     src = (
         "extern fn puts(s: String) -> I32 uses { Process }\n"
         'fn main() -> I64 = { let f = puts\n let r = f("hi")\n 0 }\n'
     )
     assert "NAME003" in _codes(src)
     assert "NAME003" in _codes(
-        "fn helper() -> I64 = { 41 }\nfn main() -> I64 = { let g = helper\n g() }\n"
+        'fn shouty() -> I64 uses { Log } = { Log.info("x")\n 41 }\n'
+        "fn main() -> I64 uses { Log } = { let g = shouty\n g() }\n"
     )
 
 

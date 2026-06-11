@@ -26,15 +26,22 @@ _INFIX_BP: dict[TokenKind, int] = {
     TokenKind.LE: 5,
     TokenKind.GT: 5,
     TokenKind.GE: 5,
-    TokenKind.PLUS: 6,
-    TokenKind.MINUS: 6,
-    TokenKind.PLUS_PLUS: 6,
-    TokenKind.STAR: 7,
-    TokenKind.SLASH: 7,
-    TokenKind.PERCENT: 7,
+    # Bitwise ops bind TIGHTER than comparisons (Rust-style, avoiding the
+    # classic C `a & b == c` trap) and looser than arithmetic.
+    TokenKind.PIPE: 6,
+    TokenKind.CARET: 7,
+    TokenKind.AMP: 8,
+    TokenKind.SHL: 9,
+    TokenKind.SHR: 9,
+    TokenKind.PLUS: 10,
+    TokenKind.MINUS: 10,
+    TokenKind.PLUS_PLUS: 10,
+    TokenKind.STAR: 11,
+    TokenKind.SLASH: 11,
+    TokenKind.PERCENT: 11,
 }
-_UNARY_BP = 8
-_POSTFIX_BP = 9
+_UNARY_BP = 12
+_POSTFIX_BP = 13
 
 # Guard against runaway recursion on adversarial deeply-nested input.
 _MAX_DEPTH = 200
@@ -54,11 +61,17 @@ _OP_TEXT: dict[TokenKind, str] = {
     TokenKind.STAR: "*",
     TokenKind.SLASH: "/",
     TokenKind.PERCENT: "%",
+    TokenKind.AMP: "&",
+    TokenKind.PIPE: "|",
+    TokenKind.CARET: "^",
+    TokenKind.SHL: "<<",
+    TokenKind.SHR: ">>",
 }
 
 # Tokens that can begin an expression (used to decide if `return` has a value).
 _EXPR_START = {
     TokenKind.INT,
+    TokenKind.FLOAT,
     TokenKind.STRING,
     TokenKind.IDENT,
     TokenKind.KW_TRUE,
@@ -116,6 +129,16 @@ class Parser:
 
     def _error(self, message: str, span: Span) -> FlexError:
         return FlexError([Diagnostic("PAR001", message, span)])
+
+    def _close_type_angle(self) -> Span:
+        """Consume a closing `>` in type position. `Foo<Bar<T>>` lexes its tail
+        as one `>>` (the shift operator); split it: consume one half now and
+        leave a synthesized `>` for the enclosing close."""
+        if self._at(TokenKind.SHR):
+            shr = self._peek()
+            self.tokens[self.pos] = Token(TokenKind.GT, ">", shr.span)
+            return shr.span
+        return self._expect(TokenKind.GT, "'>'").span
 
     # --- module / declarations ------------------------------------------------
 
@@ -207,7 +230,7 @@ class Parser:
             params.append(self._type_param())
             while self._eat(TokenKind.COMMA):
                 params.append(self._type_param())
-            self._expect(TokenKind.GT, "'>'")
+            self._close_type_angle()
         return params
 
     def _type_param(self) -> ast.TypeParam:
@@ -266,6 +289,26 @@ class Parser:
         return ast.Param(name_tok.text, ty, name_tok.span.to(ty.span or name_tok.span))
 
     def _type(self) -> ast.TypeExpr:
+        if self._at(TokenKind.LPAREN):
+            # A function type `(T1, T2) -> R`, encoded as TypeExpr("->",
+            # [T1, T2, R]). `->` cannot be a source identifier, so the head
+            # never collides with a user type name.
+            start = self._advance().span
+            params: list[ast.TypeExpr] = []
+            if not self._at(TokenKind.RPAREN):
+                params.append(self._type())
+                while self._eat(TokenKind.COMMA):
+                    params.append(self._type())
+            self._expect(TokenKind.RPAREN, "')'")
+            self._expect(TokenKind.ARROW, "'->' (function types are written (T) -> U)")
+            ret = self._type()
+            if self._at(TokenKind.KW_USES):
+                raise self._error(
+                    "effectful function types are not supported yet (function values must be pure)",
+                    self._peek().span,
+                )
+            span = start.to(ret.span or start)
+            return ast.TypeExpr("->", [*params, ret], span)
         name_tok = self._expect(TokenKind.IDENT, "a type")
         args: list[ast.TypeExpr] = []
         span = name_tok.span
@@ -274,7 +317,7 @@ class Parser:
             args.append(self._type())
             while self._eat(TokenKind.COMMA):
                 args.append(self._type())
-            end = self._expect(TokenKind.GT, "'>'").span
+            end = self._close_type_angle()
             span = name_tok.span.to(end)
         return ast.TypeExpr(name_tok.text, args, span)
 
@@ -373,7 +416,7 @@ class Parser:
             params.append(self._expect(TokenKind.IDENT, "a type parameter").text)
             while self._eat(TokenKind.COMMA):
                 params.append(self._expect(TokenKind.IDENT, "a type parameter").text)
-            self._expect(TokenKind.GT, "'>'")
+            self._close_type_angle()
         return params
 
     def _record_decl(
@@ -548,11 +591,6 @@ class Parser:
                 continue
             if kind is TokenKind.DOT and min_bp < _POSTFIX_BP and same_line:
                 self._advance()
-                if isinstance(lhs, ast.IntLit) and self._at(TokenKind.INT):
-                    raise self._error(
-                        "floating-point literals are not supported yet (Flex has no float type)",
-                        tok.span,
-                    )
                 # `test` stays usable as a member name (e.g. the build intrinsic
                 # `flx.test(...)`) even though it lexes as a keyword.
                 if self._at(TokenKind.KW_TEST):
@@ -602,7 +640,16 @@ class Parser:
         tok = self._peek()
         if tok.kind is TokenKind.INT:
             self._advance()
-            return ast.IntLit(int(tok.text), tok.span)
+            value = int(tok.text, 0)  # handles 0x/0b prefixes
+            if tok.text[:2].lower() in ("0x", "0b"):
+                if value >= 1 << 64:
+                    raise self._error(f"literal {tok.text} does not fit in 64 bits", tok.span)
+                if value >= 1 << 63:
+                    value -= 1 << 64  # bit patterns reinterpret as signed I64
+            return ast.IntLit(value, tok.span)
+        if tok.kind is TokenKind.FLOAT:
+            self._advance()
+            return ast.FloatLit(float(tok.text), tok.span)
         if tok.kind is TokenKind.STRING:
             self._advance()
             return ast.StringLit(tok.text, tok.span)
@@ -719,6 +766,12 @@ class Parser:
 
     def _pattern(self) -> ast.Pattern:
         tok = self._peek()
+        if tok.kind is TokenKind.FLOAT:
+            raise self._error(
+                "float literal patterns are not supported (compare explicitly; "
+                "floating-point equality is rarely what a pattern means)",
+                tok.span,
+            )
         if tok.kind is TokenKind.INT:
             self._advance()
             return ast.LiteralPattern(int(tok.text), tok.span)

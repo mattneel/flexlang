@@ -190,6 +190,32 @@ void __flx_list_set(void *lp, long long i, long long v) {
 long long __flx_list_len(void *lp) {
     return ((FlxList *)lp)->len;
 }
+// Shortest %g representation that round-trips (the interpreter runs the same
+// 15/16/17 loop through Python's C-printf formatting, so the text matches).
+void __flx_f64_fmt(char *buf, size_t cap, double x) {
+    for (int prec = 15; prec <= 17; prec++) {
+        snprintf(buf, cap, "%.*g", prec, x);
+        if (strtod(buf, NULL) == x || x != x) return;  // NaN: "%g" prints "nan"
+    }
+}
+void __flx_f64_to_str(double x, FlxStr *out) {
+    char *buf = (char *)__flx_box(32);
+    __flx_f64_fmt(buf, 32, x);
+    out->ptr = buf;
+    out->len = (long long)strlen(buf);
+}
+// Checked F64 -> I64 truncation: NaN/infinity/out-of-range has no honest
+// answer (LLVM fptosi would be poison), so it panics like indexing does.
+long long __flx_f64_to_i64(double x) {
+    if (!(x == x) || x >= 9223372036854775808.0 || x < -9223372036854775808.0) {
+        char msg[64];
+        char num[32];
+        __flx_f64_fmt(num, sizeof num, x);
+        snprintf(msg, sizeof msg, "cannot convert %s to I64", num);
+        __flx_runtime_fail(msg);
+    }
+    return (long long)x;
+}
 // Byte-indexed string primitives (Std.Str): byte_at panics out of bounds,
 // substr clamps. Strings are byte strings; UTF-8 awareness is the roadmap.
 long long __flx_byte_at(const char *p, long long n, long long i) {
@@ -249,4 +275,6 @@ BASE_RUNTIME_DECLS = (
     "func.func private @__flx_byte_at(!llvm.ptr, i64, i64) -> i64\n"
     "func.func private @__flx_substr(!llvm.ptr, i64, i64, i64, !llvm.ptr)\n"
     "func.func private @__flx_argv() -> !llvm.ptr\n"
+    "func.func private @__flx_f64_to_str(f64, !llvm.ptr)\n"
+    "func.func private @__flx_f64_to_i64(f64) -> i64\n"
 )

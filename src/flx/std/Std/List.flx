@@ -16,3 +16,26 @@ pub fn range(a: I64, b: I64) -> List<I64> = {
   }
   out
 }
+
+// Higher-order helpers. Function arguments must be PURE (function types carry
+// no effects yet), monomorphic, top-level functions.
+
+pub fn map<T, U>(xs: List<T>, f: (T) -> U) -> List<U> = {
+  mut out: List<U> = []
+  for x in xs { List.push(out, f(x)) }
+  out
+}
+
+pub fn filter<T>(xs: List<T>, keep: (T) -> Bool) -> List<T> = {
+  mut out: List<T> = []
+  for x in xs {
+    if keep(x) { List.push(out, x) }
+  }
+  out
+}
+
+pub fn fold<T, A>(xs: List<T>, init: A, f: (A, T) -> A) -> A = {
+  mut acc = init
+  for x in xs { acc = f(acc, x) }
+  acc
+}

@@ -21,6 +21,8 @@ _OPERATORS: list[tuple[str, TokenKind]] = [
     ("&&", TokenKind.AMP_AMP),
     ("||", TokenKind.PIPE_PIPE),
     ("++", TokenKind.PLUS_PLUS),
+    ("<<", TokenKind.SHL),
+    (">>", TokenKind.SHR),
     ("(", TokenKind.LPAREN),
     (")", TokenKind.RPAREN),
     ("{", TokenKind.LBRACE),
@@ -40,6 +42,8 @@ _OPERATORS: list[tuple[str, TokenKind]] = [
     ("/", TokenKind.SLASH),
     ("%", TokenKind.PERCENT),
     ("!", TokenKind.BANG),
+    ("&", TokenKind.AMP),
+    ("^", TokenKind.CARET),
     ("|", TokenKind.PIPE),
     ("?", TokenKind.QUESTION),
 ]
@@ -138,10 +142,50 @@ class Lexer:
             if ch != "_":
                 digits.append(ch)
         if digits == ["0"] and self.i < len(self.source) and self._peek() in ("x", "X", "b", "B"):
-            raise self._error(
-                "hexadecimal and binary literals are not supported yet (use decimal)", start
+            base = self._advance().lower()
+            allowed = "0123456789abcdefABCDEF" if base == "x" else "01"
+            body: list[str] = []
+            while self.i < len(self.source) and (self._peek() in allowed or self._peek() == "_"):
+                ch = self._advance()
+                if ch != "_":
+                    body.append(ch)
+            if not body:
+                raise self._error(f"0{base} must be followed by digits", start)
+            return Token(TokenKind.INT, f"0{base}{''.join(body)}", self._span(start))
+        # A '.' followed by a digit makes a float (a '.' followed by a name is
+        # member access on an integer); so does a bare exponent (1e9).
+        is_float = False
+        if (
+            self.i + 1 < len(self.source)
+            and self._peek() == "."
+            and self.source[self.i + 1].isdigit()
+        ):
+            is_float = True
+            digits.append(self._advance())  # '.'
+            while self.i < len(self.source) and (self._peek().isdigit() or self._peek() == "_"):
+                ch = self._advance()
+                if ch != "_":
+                    digits.append(ch)
+        if (
+            self.i < len(self.source)
+            and self._peek() in ("e", "E")
+            and (
+                (self.i + 1 < len(self.source) and self.source[self.i + 1].isdigit())
+                or (
+                    self.i + 2 < len(self.source)
+                    and self.source[self.i + 1] in ("+", "-")
+                    and self.source[self.i + 2].isdigit()
+                )
             )
-        return Token(TokenKind.INT, "".join(digits), self._span(start))
+        ):
+            is_float = True
+            digits.append(self._advance())  # 'e'
+            if self._peek() in ("+", "-"):
+                digits.append(self._advance())
+            while self.i < len(self.source) and self._peek().isdigit():
+                digits.append(self._advance())
+        kind = TokenKind.FLOAT if is_float else TokenKind.INT
+        return Token(kind, "".join(digits), self._span(start))
 
     def _ident(self) -> Token:
         start = self._pos()
