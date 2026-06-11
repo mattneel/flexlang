@@ -36,12 +36,16 @@ def test_string_equality_rejected() -> None:
     assert "TYPE019" in _codes('test "t" { assert_eq("a", "a") }')
 
 
-def test_nested_ctor_pattern_rejected() -> None:
+def test_nested_ctor_pattern_accepted() -> None:
+    # MATCH004 retired in M2: nested constructor patterns are real now. An arm
+    # with a refutable sub-pattern doesn't cover its variant, so a catch-all
+    # is still demanded.
     src = (
         "type E = | Zero | Neg\n"
-        "fn f(r: Result<I64, E>) -> I64 = { match r { Ok(v) => v\n Err(Zero) => 1 } }"
+        "fn f(r: Result<I64, E>) -> I64 = "
+        "{ match r { Ok(v) => v\n Err(Zero) => 1\n _ => 2 } }"
     )
-    assert "MATCH004" in _codes(src)
+    check(parse(src))
 
 
 def test_duplicate_match_arm_rejected() -> None:

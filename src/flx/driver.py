@@ -93,8 +93,7 @@ def _load(path: str, roots: tuple[Path, ...] = ()) -> ProgramInfo | FlexError:
                     "PAR003",
                     "input is too deeply nested",
                     None,
-                    help="this can be caused by a recursive type definition, "
-                    "which is not supported yet",
+                    help="simplify the expression or split it into intermediate `let`s",
                 )
             ]
         )
@@ -136,8 +135,7 @@ def _frontend(
                     "PAR003",
                     "input is too deeply nested",
                     None,
-                    help="this can be caused by a recursive type definition, "
-                    "which is not supported yet",
+                    help="simplify the expression or split it into intermediate `let`s",
                 )
             ]
         ), loaded.sources

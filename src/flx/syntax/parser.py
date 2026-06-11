@@ -694,16 +694,32 @@ class Parser:
             pattern = self._pattern()
             self._expect(TokenKind.FAT_ARROW, "'=>'")
             if self._at(TokenKind.LBRACE) and not self._record_ahead():
-                raise self._error(
-                    "match arm bodies must be single expressions (blocks are not supported yet)",
-                    self._peek().span,
-                )
-            body = self._expr()
+                block = self._block()
+                body: ast.Expr = ast.BlockExpr(block, block.span)
+            else:
+                body = self._expr()
             arms.append(ast.MatchArm(pattern, body, pattern.span.to(body.span)))
         end = self._expect(TokenKind.RBRACE, "'}'").span
         return ast.MatchExpr(scrutinee, arms, start.to(end))
 
     def _pattern(self) -> ast.Pattern:
+        tok = self._peek()
+        if tok.kind is TokenKind.INT:
+            self._advance()
+            return ast.LiteralPattern(int(tok.text), tok.span)
+        if tok.kind is TokenKind.MINUS and self._peek_at(1).kind is TokenKind.INT:
+            self._advance()
+            num = self._advance()
+            return ast.LiteralPattern(-int(num.text), tok.span.to(num.span))
+        if tok.kind in (TokenKind.KW_TRUE, TokenKind.KW_FALSE):
+            self._advance()
+            return ast.LiteralPattern(tok.kind is TokenKind.KW_TRUE, tok.span)
+        if tok.kind is TokenKind.STRING:
+            raise self._error(
+                "string literal patterns are not supported yet "
+                "(bind the value and compare with .eq())",
+                tok.span,
+            )
         tok = self._expect(TokenKind.IDENT, "a pattern")
         if tok.text == "_":
             return ast.WildcardPattern(tok.span)

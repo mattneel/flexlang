@@ -330,6 +330,8 @@ class Interpreter:
             return updated
         if isinstance(expr, ast.RegionExpr):
             return self.exec_block(expr.body, env)  # regions are shallow at runtime
+        if isinstance(expr, ast.BlockExpr):
+            return self.exec_block(expr.body, env)
         if isinstance(expr, ast.TryExpr):
             return self._try(expr, env)
         if isinstance(expr, ast.MatchExpr):
@@ -394,6 +396,15 @@ class Interpreter:
                 return value.payload
         raise FlexRuntimeError("`?` applied to a non-Result/Option value")
 
+    def _ctor_payload(self, args: list[ast.Expr], env: _Env) -> object:
+        """A variant's runtime payload: None (no fields), the bare value (one
+        field), or a tuple (multi-field) — mirroring the native layouts."""
+        if not args:
+            return None
+        if len(args) == 1:
+            return self.eval(args[0], env)
+        return tuple(self.eval(a, env) for a in args)
+
     def _match(self, expr: ast.MatchExpr, env: _Env) -> object:
         value = self.eval(expr.scrutinee, env)
         for arm in expr.arms:
@@ -411,12 +422,20 @@ class Interpreter:
         if isinstance(pat, ast.BindPattern):
             out[pat.name] = value
             return True
+        if isinstance(pat, ast.LiteralPattern):
+            return value == pat.value
         if isinstance(pat, ast.CtorPattern):
             if not isinstance(value, Variant) or value.tag != pat.name:
                 return False
             if not pat.args:
                 return True
-            return self._match_pattern(pat.args[0], value.payload, out)
+            if len(pat.args) == 1:
+                return self._match_pattern(pat.args[0], value.payload, out)
+            payload = value.payload
+            assert isinstance(payload, tuple)
+            return all(
+                self._match_pattern(p, v, out) for p, v in zip(pat.args, payload, strict=True)
+            )
         raise FlexRuntimeError(f"cannot interpret pattern {type(pat).__name__}")
 
     # --- calls ----------------------------------------------------------------
@@ -462,8 +481,7 @@ class Interpreter:
 
                 return _wrap(_time.monotonic_ns() // 1_000_000)
             if callee.name in self.constructors:  # qualified ctor, e.g. E.Code(x)
-                payload = self.eval(expr.args[0], env) if expr.args else None
-                return Variant(callee.name, payload)
+                return Variant(callee.name, self._ctor_payload(expr.args, env))
             raise FlexRuntimeError(f"cannot interpret call to .{callee.name}")
 
         assert isinstance(callee, ast.NameExpr)
@@ -473,8 +491,7 @@ class Interpreter:
         if name == "to_str":
             return str(self.eval(expr.args[0], env))
         if name in self.constructors:
-            payload = self.eval(expr.args[0], env) if expr.args else None
-            return Variant(name, payload)
+            return Variant(name, self._ctor_payload(expr.args, env))
         if name in self.extern_fns:
             return self._call_extern(name, [self.eval(a, env) for a in expr.args])
         func = self.functions.get(name)

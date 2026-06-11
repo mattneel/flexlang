@@ -190,11 +190,12 @@ def test_indexing_diagnostic() -> None:
     assert "indexing" in text and "not supported" in text
 
 
-def test_match_arm_block_diagnostic() -> None:
-    text = _codes_and_text(
-        "type C = | A | B\nfn main() -> I64 = { match A { A => { 1 }  B => 2 } }"
+def test_match_arm_blocks_work(tmp_path: Path) -> None:
+    # M1 rejected block arm bodies with a diagnostic; M2 made them legal.
+    src = (
+        "type C = | A | B\nfn main() -> I64 = { match A { A => { let x = 3\n  x * 2 }  B => 2 } }\n"
     )
-    assert "match arm bodies must be single expressions" in text
+    assert driver.cmd_run(_write(tmp_path, src), interpret=True) == 6
 
 
 def test_reserved_keyword_described() -> None:
@@ -208,13 +209,13 @@ def test_missing_std_module_message(tmp_path: Path, capfd: pytest.CaptureFixture
     assert "standard library has no module 'Std.Fs'" in capfd.readouterr().err
 
 
-def test_recursive_type_hint(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
+def test_recursive_types_check(tmp_path: Path) -> None:
+    # M1 could only hint at this; M2 made recursive ADTs real.
     src = (
         "type N = | Zero | Succ(N)\n"
         "fn main() -> I64 = { match Succ(Zero) { Zero => 0  Succ(n) => 1 } }\n"
     )
-    assert driver.cmd_check(_write(tmp_path, src)) == 1
-    assert "recursive type definition" in capfd.readouterr().err
+    assert driver.cmd_check(_write(tmp_path, src)) == 0
 
 
 def test_run_reports_exit_code_on_stderr(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:

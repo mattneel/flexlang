@@ -199,6 +199,14 @@ class CtorPattern(Pattern):
 
 
 @dataclass(frozen=True)
+class LiteralPattern(Pattern):
+    """An I64 or Bool literal in pattern position, e.g. `Some(0)`."""
+
+    value: int | bool
+    span: Span
+
+
+@dataclass(frozen=True)
 class MatchArm:
     pattern: Pattern
     body: Expr
@@ -209,6 +217,15 @@ class MatchArm:
 class MatchExpr(Expr):
     scrutinee: Expr
     arms: list[MatchArm]
+    span: Span
+
+
+@dataclass(frozen=True)
+class BlockExpr(Expr):
+    """A `{ ... }` block in expression position (match arm bodies); its value is
+    the trailing expression."""
+
+    body: Block
     span: Span
 
 

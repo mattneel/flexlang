@@ -212,6 +212,10 @@ class Checker:
         self.record_types: dict[str, RecordType] = {}
         # ADT templates: name -> (type params, [(variant name, payload TypeExprs)]).
         self.adt_templates: dict[str, tuple[list[str], list[tuple[str, list[ast.TypeExpr]]]]] = {}
+        # One AdtType object per (name, type_args): entries are cached BEFORE
+        # their variants resolve, so recursive payloads tie back to the same
+        # object instead of recursing forever.
+        self._adt_cache: dict[tuple[str, tuple[Type, ...]], AdtType] = {}
         self.ctors: dict[str, tuple[str, int]] = {}  # variant name -> (adt name, index)
         self._subst: dict[str, Type] = {}  # active type-parameter substitution
         # traits / impls
@@ -241,14 +245,6 @@ class Checker:
     def check(self) -> CheckResult:
         for adt in self.module.adts:
             self._check_type_name(adt.name, adt.span)
-            for variant in adt.variants:
-                if len(variant.payload) > 1:
-                    self._err(
-                        "TYPE022",
-                        f"variant {variant.name!r} has a multi-field payload, "
-                        "which is not supported yet",
-                        variant.span,
-                    )
             if adt.name in self.adt_templates:
                 self._err_duplicate("type", adt.name, adt.span)
             self.adt_templates[adt.name] = (
@@ -577,7 +573,9 @@ class Checker:
             seen.add(param.name)
             self.scope.define(param.name, _Binding(ptype, mutable=False))
         self.return_type = fn_ty.ret
-        body_ty = self._check_block(fn.body, fn_ty.ret)
+        # A Unit function's tail value is discarded, so a statement-position
+        # if/match there needs no agreeing branch types.
+        body_ty = self._check_block(fn.body, fn_ty.ret, fn_ty.ret is not UNIT)
         # A body that's guaranteed to `return` needs no tail value; its returns
         # are type-checked individually.
         if fn_ty.ret is not UNIT and not _diverges(fn.body):
@@ -596,7 +594,7 @@ class Checker:
         self.current_module = self._module_of(test.span)
         self.declared_effects = set(test.effects)
         self.return_type = UNIT
-        self._check_block(test.body)
+        self._check_block(test.body, None, False)
 
     def _register_externs(self) -> None:
         for ext in self.module.externs:
@@ -780,18 +778,27 @@ class Checker:
 
     # --- statements / blocks --------------------------------------------------
 
-    def _check_block(self, block: ast.Block, expected: Type | None = None) -> Type:
+    def _check_block(
+        self, block: ast.Block, expected: Type | None = None, value_used: bool = True
+    ) -> Type:
         self.scope.push()
         result: Type = UNIT
         last = block.stmts[-1] if block.stmts else None
         for stmt in block.stmts:
-            result = self._check_stmt(stmt, expected if stmt is last else None)
+            is_last = stmt is last
+            # Only the tail statement's value can be consumed; whether it IS
+            # consumed is the block's own value_used.
+            result = self._check_stmt(
+                stmt, expected if is_last else None, value_used if is_last else False
+            )
         # The block's value is its trailing expression, else Unit.
         value = result if block.tail is not None else UNIT
         self.scope.pop()
         return value
 
-    def _check_stmt(self, stmt: ast.Stmt, expected: Type | None = None) -> Type:
+    def _check_stmt(
+        self, stmt: ast.Stmt, expected: Type | None = None, value_used: bool = True
+    ) -> Type:
         if isinstance(stmt, ast.LetStmt):
             self.scope.define(stmt.name, _Binding(self._check_expr(stmt.value), mutable=False))
             return UNIT
@@ -803,7 +810,7 @@ class Checker:
             return UNIT
         if isinstance(stmt, ast.WhileStmt):
             self._expect(BOOL, self._check_expr(stmt.cond), stmt.cond.span, "while condition")
-            self._check_block(stmt.body)
+            self._check_block(stmt.body, None, False)
             return UNIT
         if isinstance(stmt, ast.ForStmt):
             self._err("TYPE021", "`for` is only supported inside comptime for now", stmt.span)
@@ -816,7 +823,7 @@ class Checker:
             self._expect(self.return_type, actual, span, "return value")
             return UNIT
         if isinstance(stmt, ast.ExprStmt):
-            return self._check_expr(stmt.expr, expected)
+            return self._check_expr(stmt.expr, expected, value_used)
         return UNIT
 
     def _check_assign(self, stmt: ast.AssignStmt) -> None:
@@ -837,12 +844,14 @@ class Checker:
 
     # --- expressions ----------------------------------------------------------
 
-    def _check_expr(self, expr: ast.Expr, expected: Type | None = None) -> Type:
-        ty = self._infer(expr, expected)
+    def _check_expr(
+        self, expr: ast.Expr, expected: Type | None = None, value_used: bool = True
+    ) -> Type:
+        ty = self._infer(expr, expected, value_used)
         self.expr_types[id(expr)] = ty
         return ty
 
-    def _infer(self, expr: ast.Expr, expected: Type | None) -> Type:
+    def _infer(self, expr: ast.Expr, expected: Type | None, value_used: bool = True) -> Type:
         if isinstance(expr, ast.IntLit):
             if expr.value > _I64_MAX:
                 self._err(
@@ -864,7 +873,9 @@ class Checker:
         if isinstance(expr, ast.CallExpr):
             return self._infer_call(expr, expected)
         if isinstance(expr, ast.IfExpr):
-            return self._infer_if(expr, expected)
+            return self._infer_if(expr, expected, value_used)
+        if isinstance(expr, ast.BlockExpr):
+            return self._check_block(expr.body, expected, value_used)
         if isinstance(expr, ast.RegionExpr):
             return self._infer_region(expr)
         if isinstance(expr, ast.RecordExpr):
@@ -878,7 +889,7 @@ class Checker:
         if isinstance(expr, ast.MemberExpr):
             return self._infer_member(expr)
         if isinstance(expr, ast.MatchExpr):
-            return self._infer_match(expr, expected)
+            return self._infer_match(expr, expected, value_used)
         if isinstance(expr, ast.TryExpr):
             return self._infer_try(expr)
         return ERROR
@@ -1151,14 +1162,18 @@ class Checker:
         self._check_visible(adt_name, span)  # a variant is as visible as its ADT
         params, variants = self.adt_templates[adt_name]
         payload_exprs = variants[vidx][1]
-        arg_types = [self._check_expr(a) for a in args]
         if len(args) != len(payload_exprs):
+            for a in args:
+                self._check_expr(a)
             self._err(
                 "TYPE005",
                 f"{name!r} expects {len(payload_exprs)} argument(s), got {len(args)}",
                 span,
             )
-        # Resolve type parameters from the expected type, then from arguments.
+            return ERROR
+        # Resolve type parameters from the expected type first: when that pins
+        # them all, arguments are checked WITH their expected payload types, so
+        # nested constructors (recursive types especially) keep inferring.
         subst: dict[str, Type] = {}
         if (
             isinstance(expected, AdtType)
@@ -1166,9 +1181,19 @@ class Checker:
             and len(expected.type_args) == len(params)
         ):
             subst = dict(zip(params, expected.type_args, strict=True))
+        if all(p in subst for p in params):
+            adt = self._instantiate(adt_name, [subst[p] for p in params], span)
+            payload = adt.variants[vidx].payload
+            for arg, pty in zip(args, payload, strict=False):
+                at = self._check_expr(arg, pty)
+                self._expect(pty, at, arg.span, f"argument to {name!r}")
+            return adt
+        # Otherwise infer them from the arguments, unifying each payload type
+        # expression against the argument's type (`Chain<T>` against Chain<I64>
+        # binds T = I64, not just bare `T` parameters).
+        arg_types = [self._check_expr(a) for a in args]
         for pe, at in zip(payload_exprs, arg_types, strict=False):
-            if pe.name in params and not pe.args and pe.name not in subst:
-                subst[pe.name] = at
+            self._unify_typeexpr(pe, at, params, subst)
         if any(p not in subst for p in params):
             self._err("TYPE016", f"cannot infer type arguments for {name!r} from context", span)
             return ERROR
@@ -1176,6 +1201,18 @@ class Checker:
         for arg, at, pty in zip(args, arg_types, adt.variants[vidx].payload, strict=False):
             self._expect(pty, at, arg.span, f"argument to {name!r}")
         return adt
+
+    def _unify_typeexpr(
+        self, pe: ast.TypeExpr, at: Type, params: list[str], subst: dict[str, Type]
+    ) -> None:
+        """Bind type parameters in `pe` by matching it structurally against `at`.
+        Best-effort: mismatched heads bind nothing (the later _expect reports)."""
+        if pe.name in params and not pe.args:
+            subst.setdefault(pe.name, at)
+            return
+        if isinstance(at, AdtType) and pe.name == at.name and len(pe.args) == len(at.type_args):
+            for sub_pe, sub_at in zip(pe.args, at.type_args, strict=True):
+                self._unify_typeexpr(sub_pe, sub_at, params, subst)
 
     def _infer_try(self, expr: ast.TryExpr) -> Type:
         inner = self._check_expr(expr.expr)
@@ -1198,7 +1235,9 @@ class Checker:
             )
         return payload_t
 
-    def _infer_match(self, expr: ast.MatchExpr, expected: Type | None) -> Type:
+    def _infer_match(
+        self, expr: ast.MatchExpr, expected: Type | None, value_used: bool = True
+    ) -> Type:
         scrut = self._check_expr(expr.scrutinee)
         if not isinstance(scrut, AdtType):
             for arm in expr.arms:
@@ -1217,8 +1256,10 @@ class Checker:
             self.scope.push()
             if self._bind_pattern(arm.pattern, scrut, variants, covered):
                 catchall = True
-            body_ty = self._check_expr(arm.body, expected)
+            body_ty = self._check_expr(arm.body, expected if value_used else None, value_used)
             self.scope.pop()
+            if not value_used:
+                continue  # statement position: arm types need not agree
             if result is None:
                 result = body_ty
             elif not _same(result, body_ty):
@@ -1229,7 +1270,15 @@ class Checker:
                 )
         if not catchall and covered != set(variants):
             missing = ", ".join(sorted(set(variants) - covered))
-            self._err("MATCH001", f"non-exhaustive match; missing {missing}", expr.span)
+            self._err(
+                "MATCH001",
+                f"non-exhaustive match; missing {missing}",
+                expr.span,
+                help="arms with literal or nested sub-patterns don't count toward "
+                "coverage; add a catch-all arm (`_ => ...`) or an all-binders arm",
+            )
+        if not value_used:
+            return UNIT
         return result if result is not None else UNIT
 
     def _bind_pattern(
@@ -1239,11 +1288,16 @@ class Checker:
         variants: dict[str, VariantDef],
         covered: set[str],
     ) -> bool:
+        """Type-check one arm's pattern, bind its names, and track coverage.
+        Returns True when the pattern is irrefutable (a catch-all)."""
         if isinstance(pattern, ast.WildcardPattern):
             return True
         if isinstance(pattern, ast.BindPattern):
             self.scope.define(pattern.name, _Binding(scrut_ty, mutable=False))
             return True
+        if isinstance(pattern, ast.LiteralPattern):
+            self._check_literal_pattern(pattern, scrut_ty)
+            return False
         if isinstance(pattern, ast.CtorPattern):
             variant = variants.get(pattern.name)
             if variant is None:
@@ -1256,9 +1310,6 @@ class Checker:
             owner = self.ctors.get(pattern.name)
             if owner is not None:
                 self._check_visible(owner[0], pattern.span)
-            if pattern.name in covered:
-                self._err("MATCH002", f"duplicate match arm for {pattern.name!r}", pattern.span)
-            covered.add(pattern.name)
             if len(pattern.args) != len(variant.payload):
                 self._err(
                     "TYPE005",
@@ -1266,19 +1317,56 @@ class Checker:
                     pattern.span,
                 )
             for sub, pty in zip(pattern.args, variant.payload, strict=False):
-                self._bind_subpattern(sub, pty)
+                self._check_subpattern(sub, pty)
+            # Only an arm that takes the WHOLE variant (every argument
+            # irrefutable) counts toward exhaustiveness; `Succ(Zero)` does not
+            # cover Succ. Refutable arms for an already-covered variant are
+            # unreachable, which MATCH002 reports as a duplicate.
+            if _irrefutable_args(pattern):
+                if pattern.name in covered:
+                    self._err("MATCH002", f"duplicate match arm for {pattern.name!r}", pattern.span)
+                covered.add(pattern.name)
+            elif pattern.name in covered:
+                self._err(
+                    "MATCH002",
+                    f"unreachable arm: {pattern.name!r} is already fully covered",
+                    pattern.span,
+                )
         return False
 
-    def _bind_subpattern(self, pattern: ast.Pattern, ty: Type) -> None:
+    def _check_subpattern(self, pattern: ast.Pattern, ty: Type) -> None:
         if isinstance(pattern, ast.BindPattern):
             self.scope.define(pattern.name, _Binding(ty, mutable=False))
+        elif isinstance(pattern, ast.LiteralPattern):
+            self._check_literal_pattern(pattern, ty)
         elif isinstance(pattern, ast.CtorPattern):
-            # Nested constructor patterns aren't lowered yet (the backend keys
-            # cf.switch on the outer tag only), so reject rather than mis-compile.
+            if not isinstance(ty, AdtType):
+                if ty is not ERROR:
+                    self._err(
+                        "MATCH003",
+                        f"constructor pattern {pattern.name!r} cannot match a value of type {ty}",
+                        pattern.span,
+                    )
+                return
+            variant = next((v for v in ty.variants if v.name == pattern.name), None)
+            if variant is None:
+                self._err("MATCH003", f"{pattern.name!r} is not a variant of {ty}", pattern.span)
+                return
+            if len(pattern.args) != len(variant.payload):
+                self._err(
+                    "TYPE005",
+                    f"{pattern.name!r} expects {len(variant.payload)} pattern argument(s)",
+                    pattern.span,
+                )
+            for sub, pty in zip(pattern.args, variant.payload, strict=False):
+                self._check_subpattern(sub, pty)
+
+    def _check_literal_pattern(self, pattern: ast.LiteralPattern, ty: Type) -> None:
+        lit_ty = BOOL if isinstance(pattern.value, bool) else I64
+        if not _same(ty, lit_ty):
             self._err(
-                "MATCH004",
-                "nested constructor patterns are not supported yet; "
-                "bind the payload and match it separately",
+                "TYPE003",
+                f"pattern has type {lit_ty}, but matches a value of type {ty}",
                 pattern.span,
             )
 
@@ -1336,9 +1424,16 @@ class Checker:
                 self._err("TYPE007", f"{name} expects a String message", call.args[0].span)
         return UNIT
 
-    def _infer_if(self, expr: ast.IfExpr, expected: Type | None) -> Type:
+    def _infer_if(self, expr: ast.IfExpr, expected: Type | None, value_used: bool = True) -> Type:
         cond = self._check_expr(expr.cond)
         self._expect(BOOL, cond, expr.cond.span, "if condition")
+        if not value_used:
+            # Statement position: nobody consumes the value, so the branches
+            # need not agree on a type. The whole expression is Unit.
+            self._check_block(expr.then_block, None, False)
+            if expr.else_block is not None:
+                self._check_block(expr.else_block, None, False)
+            return UNIT
         then_ty = self._check_block(expr.then_block, expected)
         if expr.else_block is None:
             return UNIT
@@ -1388,6 +1483,15 @@ class Checker:
                 span,
             )
             type_args = (type_args + [ERROR] * len(params))[: len(params)]
+        key = (adt_name, tuple(type_args))
+        cached = self._adt_cache.get(key)
+        if cached is not None:
+            return cached
+        # Cache the instantiation BEFORE resolving its payloads: a recursive
+        # payload re-demands this same key and gets this same object, so the
+        # recursion bottoms out and the knot ties back to one node.
+        adt = AdtType(adt_name, (), tuple(type_args))
+        self._adt_cache[key] = adt
         saved = self._subst
         self._subst = dict(zip(params, type_args, strict=True))
         defs = tuple(
@@ -1395,7 +1499,8 @@ class Checker:
             for vname, payload in variants
         )
         self._subst = saved
-        return AdtType(adt_name, defs, tuple(type_args))
+        object.__setattr__(adt, "variants", defs)  # settle the frozen placeholder
+        return adt
 
     def _expect(self, expected: Type, actual: Type, span: Span, what: str) -> None:
         if expected is ERROR or actual is ERROR:
@@ -1428,14 +1533,36 @@ def _same(a: Type, b: Type) -> bool:
     return a is ERROR or b is ERROR or a == b
 
 
+def _irrefutable_args(pattern: ast.CtorPattern) -> bool:
+    """Whether every constructor argument always matches (binders/wildcards
+    only), so the arm takes the whole variant. Nested constructor or literal
+    arguments are refutable — `Succ(Zero)` does not cover Succ."""
+    return all(isinstance(a, (ast.BindPattern, ast.WildcardPattern)) for a in pattern.args)
+
+
+def _slot_inline(ty: Type) -> bool:
+    """Whether an ADT payload of this type lives in the i64 payload slot by
+    VALUE natively (anything else is boxed behind a pointer)."""
+    return (
+        ty is I64
+        or ty is BOOL
+        or ty is UNIT
+        or (isinstance(ty, AdtType) and all(not v.payload for v in ty.variants))
+    )
+
+
 def _is_comparable(ty: Type) -> bool:
-    """Whether `==`/`!=`/assert_eq can be lowered for this type (no strings yet)."""
+    """Whether `==`/`!=`/assert_eq can be lowered for this type (no strings yet).
+    ADTs qualify only when every payload is slot-inline: a boxed payload would
+    compare as a pointer natively, which is not structural equality."""
     if ty is STRING or isinstance(ty, ListType):
         return False
     if isinstance(ty, RecordType):
         return all(_is_comparable(t) for _, t in ty.fields)
     if isinstance(ty, AdtType):
-        return all(_is_comparable(t) for v in ty.variants for t in v.payload)
+        return all(
+            len(v.payload) <= 1 and all(_slot_inline(t) for t in v.payload) for v in ty.variants
+        )
     return True
 
 

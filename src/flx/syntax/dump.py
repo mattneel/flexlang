@@ -144,6 +144,8 @@ def _expr(expr: ast.Expr) -> str:
     if isinstance(expr, ast.MatchExpr):
         arms = " ".join(f"{_pattern(a.pattern)} => {_expr(a.body)}" for a in expr.arms)
         return f"match {_expr(expr.scrutinee)} {{ {arms} }}"
+    if isinstance(expr, ast.BlockExpr):
+        return f"{{ {_block_value(expr.body)} }}"
     if isinstance(expr, ast.ComptimeExpr):
         return f"comptime {{ {_block_value(expr.body)} }}"
     if isinstance(expr, ast.QuoteExpr):
@@ -169,4 +171,6 @@ def _pattern(pat: ast.Pattern) -> str:
         if pat.args:
             return f"{pat.name}({', '.join(_pattern(a) for a in pat.args)})"
         return pat.name
+    if isinstance(pat, ast.LiteralPattern):
+        return "true" if pat.value is True else "false" if pat.value is False else str(pat.value)
     return "<pat>"

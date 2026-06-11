@@ -130,8 +130,12 @@ ok Main / add works
   div/mod), comparisons, short-circuit boolean ops, `if`/`else`, `while`,
   functions, calls, and the pipe operator;
 - **records** (`type T = { … }`, construction, field access, `{ r with f = v }`);
-- **ADTs** + generic `Result<T,E>`/`Option<T>` (monomorphized), **`match`** with
-  exhaustiveness checking, and the **`?`** operator;
+- **ADTs** + generic `Result<T,E>`/`Option<T>` (monomorphized) — **recursive
+  and mutually recursive types**, **multi-field payloads** (`Rect(I64, I64)`),
+  and String/record/ADT payloads on both backends (boxed natively); **`match`**
+  with exhaustiveness checking, nested constructor patterns, integer/bool
+  literal patterns, block arm bodies, and the **`?`** operator
+  ([ADTs and Pattern Matching](https://mattneel.github.io/flexlang/adts.html));
 - **traits & generics** — `trait`/`impl` with static method dispatch, `derive`d
   impls, and bounded generic functions (`fn f<T: Show>(…)`) by monomorphization
   (see [Traits and Generics](https://mattneel.github.io/flexlang/traits.html));
@@ -163,9 +167,9 @@ ok Main / add works
 ### Prototype / partial
 
 - **regions** — `region name { … }` parses and checks, but lifetime/escape
-  analysis is shallow (scalars copy out, so nothing dangles yet);
-- **native ADT payloads** — variants carrying a record or `String` payload run on
-  the interpreter but are not lowered by the native backend yet;
+  analysis is shallow (scalars copy out, so nothing dangles yet); boxed ADT
+  payloads are heap-allocated and reclaimed at process exit (region-based
+  reclamation is the roadmap);
 - **lists** — `List<T>` literals run on the interpreter (manifests need them);
   no native lowering yet.
 

@@ -1,0 +1,40 @@
+// ADTs made whole: recursive types, multi-field payloads, nested and literal
+// patterns, block arm bodies. Runs identically on both backends:
+//   flx run examples/adts.flx        (interpreter)
+//   flx run --native examples/adts.flx
+module Main
+
+import Std.IO
+
+type Expr =
+  | Num(I64)
+  | Add(Expr, Expr)
+  | Mul(Expr, Expr)
+
+fn eval(e: Expr) -> I64 = {
+  match e {
+    Num(0) => 0                       // literal pattern
+    Num(n) => n
+    Add(Num(0), rhs) => eval(rhs)     // nested pattern: 0 + x = x
+    Add(lhs, rhs) => eval(lhs) + eval(rhs)
+    Mul(lhs, rhs) => {                // block arm body
+      let l = eval(lhs)
+      let r = eval(rhs)
+      l * r
+    }
+  }
+}
+
+fn main() -> I64 uses { Log } = {
+  // (2 + 0) * (3 + 4) = 14, with the 0 + x rewrite exercised
+  let program = Mul(Add(Num(2), Num(0)), Add(Num(3), Num(4)))
+  let answer = eval(Add(Num(0), program))
+  if answer == 14 { println("eval ok: " ++ to_str(answer)) } else { println("BUG") }
+  answer
+}
+
+test "literal and nested patterns" {
+  assert_eq(eval(Num(0)), 0)
+  assert_eq(eval(Add(Num(0), Num(9))), 9)
+  assert_eq(eval(Mul(Num(3), Add(Num(1), Num(1)))), 6)
+}

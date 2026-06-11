@@ -42,13 +42,28 @@ class VariantDef:
     payload: tuple[Type, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class AdtType(Type):
-    """A monomorphic ADT instantiation (e.g. Result<I64, MathError>)."""
+    """A monomorphic ADT instantiation (e.g. Result<I64, MathError>).
+
+    Identity is NOMINAL — `name` plus `type_args` — never the variants. ADTs may
+    be recursive (a variant payload can contain the ADT itself), so structural
+    comparison or hashing through `variants` would not terminate. Type names are
+    unique per program (duplicates are TYPE002), so nominal equality is exact.
+    The checker's instantiation cache hands out one object per (name, type_args),
+    created with empty variants and settled in place to tie recursive knots."""
 
     name: str
     variants: tuple[VariantDef, ...]
     type_args: tuple[Type, ...] = ()
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, AdtType):
+            return NotImplemented
+        return self.name == other.name and self.type_args == other.type_args
+
+    def __hash__(self) -> int:
+        return hash((self.name, self.type_args))
 
     def __str__(self) -> str:
         if self.type_args:

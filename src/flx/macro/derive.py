@@ -141,19 +141,18 @@ def _show_record(record: ast.RecordDecl, sp: Span) -> ast.FnDecl:
 def _show_adt(adt: ast.AdtDecl, sp: Span) -> ast.FnDecl:
     arms: list[ast.MatchArm] = []
     for variant in adt.variants:
-        if len(variant.payload) > 1:
-            raise _err(
-                "DER001",
-                f"cannot derive Show for {adt.name!r}: variant {variant.name!r} "
-                "has a multi-field payload",
-                sp,
-            )
         if variant.payload:
-            bind = ast.CtorPattern(variant.name, [ast.BindPattern("x", sp)], sp)
-            rendered = _render(_name("x", sp), variant.payload[0].name, sp)
-            body = _concat(
-                [ast.StringLit(variant.name + "(", sp), rendered, ast.StringLit(")", sp)], sp
-            )
+            binds: list[ast.Pattern] = [
+                ast.BindPattern(f"x{i}", sp) for i in range(len(variant.payload))
+            ]
+            bind = ast.CtorPattern(variant.name, binds, sp)
+            parts: list[ast.Expr] = [ast.StringLit(variant.name + "(", sp)]
+            for i, pty in enumerate(variant.payload):
+                if i:
+                    parts.append(ast.StringLit(", ", sp))
+                parts.append(_render(_name(f"x{i}", sp), pty.name, sp))
+            parts.append(ast.StringLit(")", sp))
+            body = _concat(parts, sp)
         else:
             bind = ast.CtorPattern(variant.name, [], sp)
             body = ast.StringLit(variant.name, sp)

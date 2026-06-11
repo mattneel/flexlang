@@ -9,6 +9,7 @@ Pipeline (validated against LLVM/MLIR 22):
 
 from __future__ import annotations
 
+import functools
 import os
 import shutil
 import subprocess
@@ -60,9 +61,43 @@ def _run(cmd: list[str]) -> None:
         raise FlexError([Diagnostic("BACKEND001", f"{tool} failed:\n{detail}")])
 
 
+@functools.lru_cache(maxsize=1)
+def _host_layout() -> tuple[str, str]:
+    """The host's LLVM data layout and triple, as clang sees them. The MLIR
+    module must carry the REAL layout: mlir-translate constant-folds sizeof
+    GEPs (heap-box sizes) using the module's layout, and without one it falls
+    back to LLVM defaults (i64 aligned to 4) while clang compiles the loads
+    and stores with the host layout (i64 aligned to 8) — the folded malloc
+    size comes out smaller than what the store writes."""
+    proc = subprocess.run(
+        [_tool("clang"), "-S", "-emit-llvm", "-x", "c", os.devnull, "-o", "-"],
+        capture_output=True,
+        text=True,
+    )
+    layout = triple = ""
+    for line in proc.stdout.splitlines():
+        if line.startswith("target datalayout") and '"' in line:
+            layout = line.split('"')[1]
+        elif line.startswith("target triple") and '"' in line:
+            triple = line.split('"')[1]
+    return layout, triple
+
+
+def _wrap_module(mlir_text: str) -> str:
+    layout, triple = _host_layout()
+    attrs = []
+    if layout:
+        attrs.append(f'llvm.data_layout = "{layout}"')
+    if triple:
+        attrs.append(f'llvm.target_triple = "{triple}"')
+    if not attrs:
+        return mlir_text
+    return f"module attributes {{{', '.join(attrs)}}} {{\n{mlir_text}}}\n"
+
+
 def build_executable(mlir_text: str, c_source: str, out_path: Path, workdir: Path) -> Path:
     mlir_file = workdir / "module.mlir"
-    mlir_file.write_text(mlir_text, encoding="utf-8")
+    mlir_file.write_text(_wrap_module(mlir_text), encoding="utf-8")
 
     lowered = workdir / "module.llvm.mlir"
     _run(

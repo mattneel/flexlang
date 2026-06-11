@@ -75,6 +75,22 @@ def _is_enum(ty: AdtType) -> bool:
     return all(not v.payload for v in ty.variants)
 
 
+def _payload_inline(ty: Type) -> bool:
+    """Whether a payload of this type lives in the i64 slot by value. Everything
+    else (strings, records, non-enum ADTs — recursion included — and any
+    multi-field payload) is boxed on the heap behind the slot."""
+    return ty is I64 or ty is BOOL or ty is UNIT or (isinstance(ty, AdtType) and _is_enum(ty))
+
+
+def _payload_box_type(payload: tuple[Type, ...]) -> str:
+    """The MLIR type stored in a boxed payload's heap cell: the value itself for
+    one field, a struct of the fields otherwise."""
+    if len(payload) == 1:
+        return mlir_type(payload[0])
+    fields = ", ".join(mlir_type(t) for t in payload)
+    return f"!llvm.struct<({fields})>"
+
+
 class BackendError(Exception):
     """Raised when the AST uses a construct the MVP backend can't lower."""
 
@@ -303,6 +319,8 @@ class FunctionLowerer:
             # Shallow MVP: a region just evaluates its body inline (no real
             # scoped allocation for scalar values).
             return self.lower_block(expr.body)
+        if isinstance(expr, ast.BlockExpr):
+            return self.lower_block(expr.body)
         if isinstance(expr, ast.RecordExpr):
             return self._lower_record(expr)
         if isinstance(expr, ast.RecordUpdateExpr):
@@ -459,12 +477,7 @@ class FunctionLowerer:
         if _is_enum(adt):
             return self._const(str(vidx), "i64")
         mty = mlir_type(adt)
-        if args:
-            raw = self.lower_expr(args[0])
-            assert raw is not None
-            payload = self._widen_to_i64(raw, adt.variants[vidx].payload[0])
-        else:
-            payload = self._const("0", "i64")
+        payload = self._encode_payload(args, adt.variants[vidx].payload)
         tag = self._const(str(vidx), "i32")
         undef = self._fresh()
         self._emit(f"{undef} = llvm.mlir.undef : {mty}")
@@ -474,68 +487,105 @@ class FunctionLowerer:
         self._emit(f"{out} = llvm.insertvalue {payload}, {with_tag}[1] : {mty}")
         return out
 
+    # --- the payload slot codec -------------------------------------------------
+    # A non-enum ADT is {i32 tag, i64 slot}. The slot holds an inline scalar by
+    # value, or the address of a heap box (__flx_box) for everything else.
+
+    def _encode_payload(self, args: list[ast.Expr], payload: tuple[Type, ...]) -> str:
+        if not args:
+            return self._const("0", "i64")
+        if len(payload) == 1 and _payload_inline(payload[0]):
+            raw = self._materialize(self.lower_expr(args[0]), args[0])
+            return self._widen_to_i64(raw, payload[0])
+        box_mty = _payload_box_type(payload)
+        if len(payload) == 1:
+            value = self._materialize(self.lower_expr(args[0]), args[0])
+        else:
+            value = self._fresh()
+            self._emit(f"{value} = llvm.mlir.undef : {box_mty}")
+            for i, arg in enumerate(args):
+                field = self._materialize(self.lower_expr(arg), arg)
+                nxt = self._fresh()
+                self._emit(f"{nxt} = llvm.insertvalue {field}, {value}[{i}] : {box_mty}")
+                value = nxt
+        return self._box(value, box_mty)
+
+    def _decode_payload_field(self, slot: str, payload: tuple[Type, ...], index: int) -> str:
+        """Field `index` of a variant payload, given the i64 slot."""
+        if len(payload) == 1:
+            ty = payload[0]
+            if _payload_inline(ty):
+                return self._narrow_from_i64(slot, ty)
+            return self._unbox(slot, mlir_type(ty))
+        box_mty = _payload_box_type(payload)
+        struct = self._unbox(slot, box_mty)
+        out = self._fresh()
+        self._emit(f"{out} = llvm.extractvalue {struct}[{index}] : {box_mty}")
+        return out
+
+    def _sizeof(self, mty: str) -> str:
+        """sizeof(mty) in bytes via the null-GEP idiom (target layout aware)."""
+        null = self._fresh()
+        self._emit(f"{null} = llvm.mlir.zero : !llvm.ptr")
+        gep = self._fresh()
+        self._emit(f"{gep} = llvm.getelementptr {null}[1] : (!llvm.ptr) -> !llvm.ptr, {mty}")
+        size = self._fresh()
+        self._emit(f"{size} = llvm.ptrtoint {gep} : !llvm.ptr to i64")
+        return size
+
+    def _box(self, value: str, mty: str) -> str:
+        size = self._sizeof(mty)
+        ptr = self._fresh()
+        self._emit(f"{ptr} = func.call @__flx_box({size}) : (i64) -> !llvm.ptr")
+        self._emit(f"llvm.store {value}, {ptr} : {mty}, !llvm.ptr")
+        slot = self._fresh()
+        self._emit(f"{slot} = llvm.ptrtoint {ptr} : !llvm.ptr to i64")
+        return slot
+
+    def _unbox(self, slot: str, mty: str) -> str:
+        ptr = self._fresh()
+        self._emit(f"{ptr} = llvm.inttoptr {slot} : i64 to !llvm.ptr")
+        out = self._fresh()
+        self._emit(f"{out} = llvm.load {ptr} : !llvm.ptr -> {mty}")
+        return out
+
     def _widen_to_i64(self, value: str, ty: Type) -> str:
         if ty is BOOL:
             out = self._fresh()
             self._emit(f"{out} = arith.extui {value} : i1 to i64")
             return out
-        if ty is I64 or (isinstance(ty, AdtType) and _is_enum(ty)):
-            return value
-        raise BackendError(f"ADT payload of type {ty} is not supported yet")
+        assert _payload_inline(ty)
+        return value  # I64, Unit (already i64 0), or an enum tag
 
     def _narrow_from_i64(self, value: str, ty: Type) -> str:
         if ty is BOOL:
             out = self._fresh()
             self._emit(f"{out} = arith.trunci {value} : i64 to i1")
             return out
-        if ty is I64 or (isinstance(ty, AdtType) and _is_enum(ty)):
-            return value
-        raise BackendError(f"ADT payload of type {ty} is not supported yet")
+        assert _payload_inline(ty)
+        return value
 
     def _lower_match(self, expr: ast.MatchExpr) -> str | None:
         scrut_ty = self._ty_of(expr.scrutinee)
         assert isinstance(scrut_ty, AdtType)
         scrut = self.lower_expr(expr.scrutinee)
         assert scrut is not None
-        smty = mlir_type(scrut_ty)
-        payload: str | None = None
-        if _is_enum(scrut_ty):
-            tag, tag_ty = scrut, "i64"
-        else:
-            tag = self._fresh()
-            self._emit(f"{tag} = llvm.extractvalue {scrut}[0] : {smty}")
-            tag_ty = "i32"
-            payload = self._fresh()
-            self._emit(f"{payload} = llvm.extractvalue {scrut}[1] : {smty}")
 
         result_ty = self._ty_of(expr)
         has_value = result_ty is not UNIT
         rmty = mlir_type(result_ty) if has_value else ""
         slot = self._alloc_slot(rmty) if has_value else None
 
-        vidx_of = {v.name: i for i, v in enumerate(scrut_ty.variants)}
+        # First-match semantics, arm by arm: each arm tests its pattern (tag
+        # compares, literal compares, recursively for nested patterns) and
+        # branches to the next arm's test on mismatch. A tag switch can't
+        # express several arms on one constructor or nested refutation.
         join_lbl = self._label()
-        arm_labels = [self._label() for _ in expr.arms]
-        cases = []
-        default_lbl: str | None = None
-        for arm, lbl in zip(expr.arms, arm_labels, strict=True):
-            if isinstance(arm.pattern, ast.CtorPattern):
-                cases.append((vidx_of[arm.pattern.name], lbl))
-            else:
-                default_lbl = lbl
-        trap_lbl = None
-        if default_lbl is None:
-            trap_lbl = self._label()
-            default_lbl = trap_lbl
-
-        case_text = "".join(f", {vi}: {lbl}" for vi, lbl in cases)
-        self._terminator(f"cf.switch {tag} : {tag_ty}, [ default: {default_lbl}{case_text} ]")
-
         join_reachable = False
-        for arm, lbl in zip(expr.arms, arm_labels, strict=True):
-            self._start_block(lbl)
+        for i, arm in enumerate(expr.arms):
+            fail_lbl = self._label()  # next arm's test, or the trap
             self.scopes.append({})
-            self._bind_pattern_runtime(arm.pattern, scrut_ty, scrut, payload)
+            refutable = self._lower_pattern_test(arm.pattern, scrut_ty, scrut, fail_lbl)
             body_val = self.lower_expr(arm.body)
             self.scopes.pop()
             if not self.terminated:
@@ -543,11 +593,15 @@ class FunctionLowerer:
                     self._store_slot(slot, rmty, body_val)
                 self._terminator(f"cf.br {join_lbl}")
                 join_reachable = True
-
-        if trap_lbl is not None:
-            self._start_block(trap_lbl)
-            self._emit("func.call @__flx_match_fail() : () -> ()")
-            self._terminator("llvm.unreachable")
+            if not refutable:
+                # A catch-all arm: nothing branched to fail_lbl and any later
+                # arms are unreachable — emitting them would orphan blocks.
+                break
+            self._start_block(fail_lbl)
+            if i == len(expr.arms) - 1:
+                # The checker proves exhaustiveness; this trap must still link.
+                self._emit("func.call @__flx_match_fail() : () -> ()")
+                self._terminator("llvm.unreachable")
 
         if not join_reachable:
             self.terminated = True
@@ -557,19 +611,57 @@ class FunctionLowerer:
             return self._load_slot(slot, rmty)
         return None
 
-    def _bind_pattern_runtime(
-        self, pattern: ast.Pattern, scrut_ty: AdtType, scrut_val: str, payload: str | None
-    ) -> None:
+    def _lower_pattern_test(
+        self, pattern: ast.Pattern, ty: Type, value: str, fail_lbl: str
+    ) -> bool:
+        """Emit the tests that branch to `fail_lbl` unless `value` (typed `ty`)
+        matches `pattern`, binding pattern names along the success path.
+        Returns True when any test was emitted (the pattern can fail)."""
+        if isinstance(pattern, ast.WildcardPattern):
+            return False
         if isinstance(pattern, ast.BindPattern):
-            self._define(pattern.name, _Binding("val", scrut_val, mlir_type(scrut_ty)))
-        elif isinstance(pattern, ast.CtorPattern) and pattern.args:
-            vidx = next(i for i, v in enumerate(scrut_ty.variants) if v.name == pattern.name)
-            pty = scrut_ty.variants[vidx].payload[0]
-            assert payload is not None
-            narrowed = self._narrow_from_i64(payload, pty)
-            sub = pattern.args[0]
-            if isinstance(sub, ast.BindPattern):
-                self._define(sub.name, _Binding("val", narrowed, mlir_type(pty)))
+            self._define(pattern.name, _Binding("val", value, mlir_type(ty)))
+            return False
+        if isinstance(pattern, ast.LiteralPattern):
+            if isinstance(pattern.value, bool):
+                lit = self._const("1" if pattern.value else "0", "i1")
+                mty = "i1"
+            else:
+                lit = self._const(str(pattern.value), "i64")
+                mty = "i64"
+            eq = self._fresh()
+            self._emit(f"{eq} = arith.cmpi eq, {value}, {lit} : {mty}")
+            ok = self._label()
+            self._terminator(f"cf.cond_br {eq}, {ok}, {fail_lbl}")
+            self._start_block(ok)
+            return True
+        assert isinstance(pattern, ast.CtorPattern)
+        assert isinstance(ty, AdtType)
+        vidx = next(i for i, v in enumerate(ty.variants) if v.name == pattern.name)
+        refutable = False
+        if len(ty.variants) > 1:
+            if _is_enum(ty):
+                tag, tag_mty = value, "i64"
+            else:
+                tag = self._fresh()
+                self._emit(f"{tag} = llvm.extractvalue {value}[0] : {mlir_type(ty)}")
+                tag_mty = "i32"
+            want = self._const(str(vidx), tag_mty)
+            eq = self._fresh()
+            self._emit(f"{eq} = arith.cmpi eq, {tag}, {want} : {tag_mty}")
+            ok = self._label()
+            self._terminator(f"cf.cond_br {eq}, {ok}, {fail_lbl}")
+            self._start_block(ok)
+            refutable = True
+        if pattern.args:
+            payload_types = ty.variants[vidx].payload
+            payload_slot = self._fresh()
+            self._emit(f"{payload_slot} = llvm.extractvalue {value}[1] : {mlir_type(ty)}")
+            for j, (sub, pty) in enumerate(zip(pattern.args, payload_types, strict=True)):
+                field = self._decode_payload_field(payload_slot, payload_types, j)
+                if self._lower_pattern_test(sub, pty, field, fail_lbl):
+                    refutable = True
+        return refutable
 
     def _lower_try(self, expr: ast.TryExpr) -> str:
         result_adt = self._ty_of(expr.expr)
@@ -596,7 +688,8 @@ class FunctionLowerer:
         self._start_block(cont)
         payload = self._fresh()
         self._emit(f"{payload} = llvm.extractvalue {r}[1] : {rmty}")
-        return self._narrow_from_i64(payload, result_adt.type_args[0])
+        ok_payload = next(v for v in result_adt.variants if v.name == "Ok").payload
+        return self._decode_payload_field(payload, ok_payload, 0)
 
     def _lower_unary(self, expr: ast.UnaryExpr) -> str:
         operand = self.lower_expr(expr.operand)

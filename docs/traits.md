@@ -51,7 +51,7 @@ is `DISP001`.
 
 ## `derive`
 
-For records and (single-payload) ADTs, `derive` writes the impl for you:
+For records and ADTs, `derive` writes the impl for you:
 
 ```flex
 derive(Eq, Show) type Color =

@@ -92,6 +92,19 @@ void __flx_str_concat(const char *p1, long long n1, const char *p2, long long n2
     out->ptr = buf;
     out->len = n1 + n2;
 }
+// Heap cell for a boxed ADT payload (a payload that doesn't fit the i64 slot
+// by value: strings, records, non-enum ADTs, multi-field payloads). Boxes are
+// immutable once written and reclaimed at process exit; region-based
+// reclamation is the roadmap.
+void *__flx_box(long long size) {
+    void *p = malloc((size_t)size);
+    if (!p) {
+        fflush(stdout);
+        fputs("flx: runtime error: out of memory\\n", stderr);
+        exit(1);
+    }
+    return p;
+}
 """
 
 # MLIR external declarations matching BASE_RUNTIME_C, prepended to every module.
@@ -106,4 +119,5 @@ BASE_RUNTIME_DECLS = (
     "func.func private @__flx_int_to_str(i64, !llvm.ptr)\n"
     "func.func private @__flx_str_concat(!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr)\n"
     "func.func private @__flx_cstr_wrap(!llvm.ptr, !llvm.ptr)\n"
+    "func.func private @__flx_box(i64) -> !llvm.ptr\n"
 )

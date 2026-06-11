@@ -47,8 +47,9 @@ def test_nested_comptime_sees_outer_bindings() -> None:
     assert "Expr 6" in dump
 
 
-def test_multi_payload_variant_rejected() -> None:
-    assert "TYPE022" in _codes("type Pair = | Both(I64, I64)\nfn f() -> I64 = { 0 }")
+def test_multi_payload_variant_accepted() -> None:
+    # TYPE022 retired in M2: multi-field payloads are real now.
+    check(expand(parse("type Pair = | Both(I64, I64)\nfn f() -> I64 = { 0 }")))
 
 
 def test_derive_eq_on_string_record_needs_string_eq() -> None:
@@ -63,10 +64,9 @@ def test_derive_eq_on_string_adt_payload_rejected() -> None:
     assert "DER001" in _codes("derive(Eq) type W = | Tag(String) | Empty")
 
 
-def test_derive_show_multi_payload_rejected() -> None:
-    # The multi-field variant is rejected (TYPE022 from check or DER001 from derive).
-    codes = _codes("derive(Show) type T = | Pair(I64, I64) | One(I64)")
-    assert "DER001" in codes or "TYPE022" in codes
+def test_derive_show_multi_payload_accepted() -> None:
+    # Multi-field payloads derive Show field-by-field since M2.
+    check(expand(parse("derive(Show) type T = | Pair(I64, I64) | One(I64)")))
 
 
 @native
