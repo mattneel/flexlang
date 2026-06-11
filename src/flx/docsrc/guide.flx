@@ -73,10 +73,23 @@ doc "Syntax You Can Rely On" {
   text """
   ## Blocks vs records
 
-  A lone `{ x = e }` is a BLOCK containing an assignment. Record literals are
-  recognized by a comma (`{ x = 1, y = 2 }`), a `with` update, or `{}`. To
-  force a one-field record literal, parenthesize it: `({ x = e })`.
+  Braces are BLOCKS only where a body is required: after a function's `=`,
+  and as `if`/`else`, `while`/`for`, and `match`-arm bodies — there
+  `x = e` is an assignment. In VALUE position (a `let` initializer, a call
+  argument, a standalone statement) `{ x = e }` is a one-field RECORD
+  literal of a declared record type.
   """
+
+  test "body braces are blocks" {
+    mut total = 0
+    while total < 3 { total = total + 1 }
+    assert_eq(total, 3)
+  }
+
+  test "value-position braces are records" {
+    let p = { x = 5 }
+    assert_eq(p.x, 5)
+  }
 
   text """
   ## Not in the language (and what to use)
@@ -115,4 +128,10 @@ pub fn grade(score: I64) -> I64 = {
 
 doc grade {
   summary "Guide-example helper: 1/2/3 grade bands by score."
+}
+
+pub type GuidePoint = { x: I64 }
+
+doc GuidePoint {
+  summary "Guide-example helper: the record type behind the blocks-vs-records example."
 }

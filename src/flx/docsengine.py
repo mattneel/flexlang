@@ -73,13 +73,27 @@ def collect(files: list[Path] | None = None) -> list[DocUnit]:
 # --- checking -------------------------------------------------------------------
 
 
+def _flx_str(value: str) -> str:
+    """Render a string VALUE back into Flex string-literal syntax. Doc test
+    names are parsed values; embedding them verbatim into a synthesized
+    program would let a backslash or newline break the lexer."""
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+        .replace("\r", "\\r")
+    )
+    return f'"{escaped}"'
+
+
 def _synth_test_program(
-    module_name: str, tests: list[tuple[str, ast.DocTest]], extra_import: str | None = None
+    harness: str, tests: list[tuple[str, ast.DocTest]], extra_import: str | None = None
 ) -> str:
     """One runnable program holding a module's doc tests, importing the whole
     stdlib so examples are written from the USER's perspective (plus the
     declaring module itself when it isn't part of the stdlib)."""
-    lines = ["module DocRun"]
+    lines = [f"module {harness}"]
     for name in _std_module_names():
         lines.append(f"import {name}")
     if extra_import is not None:
@@ -87,8 +101,7 @@ def _synth_test_program(
     lines.append("")
     for anchor, dt in tests:
         uses = f" uses {{ {', '.join(dt.effects)} }}" if dt.effects else ""
-        label = f"{anchor}: {dt.name}".replace('"', "'")
-        lines.append(f'test "{label}"{uses} {{')
+        lines.append(f"test {_flx_str(f'{anchor}: {dt.name}')}{uses} {{")
         for src_line in dt.source.splitlines():
             lines.append(f"  {src_line}")
         lines.append("}")
@@ -126,22 +139,51 @@ def _doc_tests(
     return grouped
 
 
+def _copy_module_closure(file: Path, module_name: str, tmp: Path) -> set[str]:
+    """Copy a non-stdlib module AND its non-Std transitive imports into `tmp`,
+    mirroring the loader's root-relative layout (root = the file's directory
+    minus the module path's depth), so the synthesized program resolves the
+    same modules the user's own `flx test` would. Returns the copied names."""
+    root = file.resolve().parent
+    for _ in module_name.split(".")[:-1]:
+        root = root.parent
+    copied: set[str] = set()
+
+    def visit(name: str, src: Path) -> None:
+        if name in copied or not src.is_file():
+            return  # a missing import is the compiler's MOD001 to report, not ours
+        copied.add(name)
+        text = src.read_text(encoding="utf-8")
+        dest = tmp.joinpath(*name.split(".")).with_suffix(".flx")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+        for imp in parse(text, str(src)).imports:
+            if not imp.startswith("Std."):
+                visit(imp, root.joinpath(*imp.split(".")).with_suffix(".flx"))
+
+    visit(module_name, file)
+    return copied
+
+
 def _run_module_doc_tests(
     module_name: str, file: Path, tests: list[tuple[str, ast.DocTest]], native: bool
 ) -> int:
     """Synthesize and execute one module's doc examples. A non-stdlib module
-    is copied beside the synthesized program so its own helpers resolve."""
+    is copied (with its import closure) beside the synthesized program so its
+    own helpers resolve."""
     from flx import driver
 
     failures = 0
     is_std = module_name.startswith("Std.")
     extra = None if is_std else module_name
-    source = _synth_test_program(module_name, tests, extra)
     with tempfile.TemporaryDirectory() as tmp:
+        copied: set[str] = set()
         if extra is not None:
-            dest = Path(tmp).joinpath(*module_name.split(".")).with_suffix(".flx")
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(file.read_text(encoding="utf-8"), encoding="utf-8")
+            copied = _copy_module_closure(file, module_name, Path(tmp))
+        harness = "DocRun"
+        while harness in copied:  # a user module may be named DocRun itself
+            harness += "_"
+        source = _synth_test_program(harness, tests, extra)
         path = str(Path(tmp) / "doc_run.flx")
         Path(path).write_text(source, encoding="utf-8")
         print(f"== doc tests: {module_name} ({len(tests)} examples)")
@@ -179,8 +221,6 @@ def _documented_targets(units: list[DocUnit]) -> set[str]:
 def cmd_docs_check(native: bool = False) -> int:
     """Prove the documentation: DOC002 (an example fails), DOC003 (an expected
     diagnostic doesn't happen), DOC005 (an undocumented public stdlib symbol)."""
-    from flx import driver
-
     failures = 0
     units = collect()
 
@@ -206,7 +246,23 @@ def cmd_docs_check(native: bool = False) -> int:
         failures += _run_module_doc_tests(module_name, file, tests, native)
 
     # DOC003: every documented diagnostic example fails with exactly that code.
-    for anchor, dt in _error_tests(units):
+    failures += _check_error_examples(_error_tests(units))
+
+    if failures:
+        print(f"\ndocs check failed: {failures} problem(s)", file=sys.stderr)
+        return 1
+    print("\ndocs check: all examples proven")
+    return 0
+
+
+def _check_error_examples(error_tests: list[tuple[str, ast.DocTest]]) -> int:
+    """DOC003: each expect_error example must fail with EXACTLY the documented
+    code — an example that smuggles unrelated errors proves nothing. Returns
+    the failure count. Compile-fail checking is backend-independent."""
+    from flx import driver
+
+    failures = 0
+    for anchor, dt in error_tests:
         source = _synth_error_program(dt)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "doc_err.flx"
@@ -214,12 +270,12 @@ def cmd_docs_check(native: bool = False) -> int:
             result, _sources = driver._frontend(str(path))
             if isinstance(result, FlexError):
                 codes = {d.code for d in result.diagnostics}
-                if dt.expect_error in codes:
+                if codes == {dt.expect_error}:
                     print(f"ok doc error example {anchor!r}: {dt.expect_error}")
                     continue
                 print(
-                    f"error[DOC003]: {anchor!r} expected {dt.expect_error} but got "
-                    f"{', '.join(sorted(codes))}",
+                    f"error[DOC003]: {anchor!r} expected exactly {dt.expect_error} "
+                    f"but got {', '.join(sorted(codes))}",
                     file=sys.stderr,
                 )
             else:
@@ -229,25 +285,35 @@ def cmd_docs_check(native: bool = False) -> int:
                     file=sys.stderr,
                 )
             failures += 1
-
-    if failures:
-        print(f"\ndocs check failed: {failures} problem(s)", file=sys.stderr)
-        return 1
-    print("\ndocs check: all examples proven")
-    return 0
+    return failures
 
 
 def run_file_docs(path: str, native: bool = False) -> int:
-    """`flx test --docs`: run the doc tests declared in ONE user file."""
-    units = collect([Path(path)])
+    """`flx test --docs`: run the doc examples declared in a user file (or in
+    every .flx file under a directory) — nested tests execute, expect_error
+    examples must fail with exactly their documented code."""
+    target = Path(path)
+    files = sorted(target.rglob("*.flx")) if target.is_dir() else [target]
+    try:
+        units = collect(files)
+    except FlexError as err:
+        for diag in err.diagnostics:
+            print(f"error[{diag.code}]: {diag.message}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"flx test --docs: {exc}", file=sys.stderr)
+        return 1
     grouped = _doc_tests(units)
-    if not grouped:
+    error_tests = _error_tests(units)
+    if not grouped and not error_tests:
         print("no doc tests found")
         return 0
     code = 0
     for module_name, (file, tests) in sorted(grouped.items()):
         rc = _run_module_doc_tests(module_name, file, tests, native)
         code = code or rc
+    if _check_error_examples(error_tests):
+        code = code or 1
     return code
 
 
@@ -255,6 +321,9 @@ def run_file_docs(path: str, native: bool = False) -> int:
 
 _API_START = "<!-- flx-api:start (generated by `flx docs build`; do not edit) -->"
 _API_END = "<!-- flx-api:end -->"
+# Stamped into every generated page, so orphans (pages whose doc declaration
+# was removed or renamed) are recognizable and never linger as stale truth.
+_GENERATED_MARK = "<!-- generated by `flx docs build`; do not edit -->"
 
 
 def _type_str(t: ast.TypeExpr) -> str:
@@ -329,7 +398,7 @@ def render_api_pages() -> dict[str, str]:
                 docs_by_target[d.target.rsplit(".", 1)[-1]] = d
             else:
                 docs_by_target[d.target] = d
-        out: list[str] = [f"# {module.name}", ""]
+        out: list[str] = [f"# {module.name}", "", _GENERATED_MARK, ""]
         out.append(
             "*Generated from the `doc` declarations in "
             f"`{Path(path).name}` by `flx docs build`. Examples are executed by "
@@ -360,7 +429,7 @@ def render_api_pages() -> dict[str, str]:
             if d.target is not None or d.title is None:
                 continue
             slug = d.slug or d.title.lower().replace(" ", "-")
-            out = [f"# {d.title}", ""]
+            out = [f"# {d.title}", "", _GENERATED_MARK, ""]
             _render_doc_body(d, out)
             pages[f"{slug}.md"] = "\n".join(out).rstrip() + "\n"
     return pages
@@ -391,8 +460,29 @@ def cmd_docs_build(check_only: bool = False, docs_dir: Path | None = None) -> in
     if not docs.is_dir():
         print(f"flx docs: no {docs}/ directory here", file=sys.stderr)
         return 1
+    # Ownership check FIRST: this command rewrites pages and SUMMARY.md, so it
+    # must never touch a docs/ tree that isn't set up for it (a user project's
+    # book is not ours to scribble in).
+    summary_path = docs / "SUMMARY.md"
+    if not summary_path.is_file():
+        print(f"flx docs: {summary_path} does not exist", file=sys.stderr)
+        return 1
+    summary = summary_path.read_text(encoding="utf-8")
+    if _API_START not in summary or _API_END not in summary:
+        print(
+            f"flx docs: {summary_path} has no flx-api markers; refusing to "
+            "modify a docs tree not managed by `flx docs build`",
+            file=sys.stderr,
+        )
+        print(
+            f"help: to opt in, add `{_API_START}` and `{_API_END}` where the "
+            "generated section belongs",
+            file=sys.stderr,
+        )
+        return 1
+
     pages = render_api_pages()
-    index = ["# API Reference", ""]
+    index = ["# API Reference", "", _GENERATED_MARK, ""]
     index.append("*Generated from `doc` declarations by `flx docs build`.*")
     index.append("")
     for rel in sorted(p for p in pages if p.startswith("api/")):
@@ -400,7 +490,7 @@ def cmd_docs_build(check_only: bool = False, docs_dir: Path | None = None) -> in
     pages["api/index.md"] = "\n".join(index) + "\n"
     diags = sorted(p for p in pages if p.startswith("diagnostics/"))
     if diags:
-        dindex = ["# Diagnostics", ""]
+        dindex = ["# Diagnostics", "", _GENERATED_MARK, ""]
         dindex.append(
             "*Each page is proven by an `expect_error` example that `flx docs check` "
             "compiles and requires to fail with exactly this code. "
@@ -412,15 +502,10 @@ def cmd_docs_build(check_only: bool = False, docs_dir: Path | None = None) -> in
                 dindex.append(f"- [{Path(rel).stem}]({Path(rel).name})")
         pages["diagnostics/index.md"] = "\n".join(dindex) + "\n"
 
-    summary_path = docs / "SUMMARY.md"
-    summary = summary_path.read_text(encoding="utf-8")
     section = "\n".join(_summary_section(pages))
-    if _API_START in summary:
-        head, rest = summary.split(_API_START, 1)
-        _, tail = rest.split(_API_END, 1)
-        new_summary = head + section + tail
-    else:
-        new_summary = summary.rstrip() + "\n\n" + section + "\n"
+    head, rest = summary.split(_API_START, 1)
+    _, tail = rest.split(_API_END, 1)
+    new_summary = head + section + tail
 
     stale: list[str] = []
     for rel, content in {**pages, "SUMMARY.md": new_summary}.items():
@@ -436,6 +521,22 @@ def cmd_docs_build(check_only: bool = False, docs_dir: Path | None = None) -> in
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content, encoding="utf-8")
+    # Orphans: previously generated pages whose doc declaration is gone. They
+    # carry the generated mark but are no longer in the render set — stale
+    # truth the diff above can't see.
+    for md in sorted(docs.rglob("*.md")):
+        rel = md.relative_to(docs).as_posix()
+        if rel in pages or rel == "SUMMARY.md":
+            continue
+        if _GENERATED_MARK in md.read_text(encoding="utf-8"):
+            stale.append(rel)
+            if check_only:
+                print(
+                    f"{rel}: generated page with no current doc declaration (orphan)",
+                    file=sys.stderr,
+                )
+            else:
+                md.unlink()
     if check_only and stale:
         print(
             f"error[DOCS001]: generated docs are stale ({', '.join(stale)}); "
@@ -457,14 +558,20 @@ def _mdbook_available() -> bool:
 
 
 def cmd_docs_explain(code: str) -> int:
-    """Render the doc page for a diagnostic code in the terminal."""
-    for unit in collect():
-        d = unit.decl
-        if d.title == code or (d.slug or "").endswith(code):
-            print(f"# {d.title}")
-            out: list[str] = []
-            _render_doc_body(d, out)
-            print("\n".join(out))
-            return 0
+    """Render the doc page for a diagnostic code in the terminal. Codes match
+    exactly (case-insensitively) — `001` is not a code, and a guide page's
+    slug must not satisfy a diagnostic lookup."""
+    want = code.strip().upper()
+    if want:
+        for unit in collect():
+            d = unit.decl
+            slug = d.slug or ""
+            slug_match = slug.startswith("diagnostics/") and slug.split("/")[-1].upper() == want
+            if (d.title or "").upper() == want or slug_match:
+                print(f"# {d.title}")
+                out: list[str] = []
+                _render_doc_body(d, out)
+                print("\n".join(out))
+                return 0
     print(f"flx docs: no documentation for {code!r} (yet)", file=sys.stderr)
     return 1

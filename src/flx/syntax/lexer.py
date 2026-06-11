@@ -163,7 +163,10 @@ class Lexer:
         raw = self.source[self.i : end]
         while self.i < end + 3:
             self._advance()
-        text = raw[1:] if raw.startswith("\n") else raw
+        # Drop the opening line when it holds nothing but whitespace — an
+        # invisible trailing space after `"""` must not inject a leading "\n".
+        nl = raw.find("\n")
+        text = raw[nl + 1 :] if nl != -1 and not raw[:nl].strip() else raw
         text = textwrap.dedent(text).rstrip()
         return Token(TokenKind.STRING, text, self._span(start))
 

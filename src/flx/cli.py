@@ -156,6 +156,26 @@ def _run_highlight(path: str, fmt: str, style: str) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        code = _dispatch(argv)
+        # Flush HERE so a broken pipe surfaces as BrokenPipeError inside this
+        # try — interpreter-shutdown flushes happen after any handler could
+        # run and would die as an unhandled "Exception ignored" + exit 120.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        return code
+    except BrokenPipeError:
+        # A reader went away (`flx ... | head`). A native binary dies of
+        # SIGPIPE and reports 128+13; every flx command matches it. Point the
+        # standard streams at the void so interpreter shutdown's buffered
+        # flush doesn't print a second traceback.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.dup2(devnull, sys.stderr.fileno())
+        return 141
+
+
+def _dispatch(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 

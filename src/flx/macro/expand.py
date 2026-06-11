@@ -199,7 +199,10 @@ def expand(module: ast.Module) -> ast.Module:
     items: list[ast.Item] = []
     for item in module.items:
         if isinstance(item, ast.MacroDecl):
-            continue  # compile-time only
+            # Compile-time only, but kept through checking so `doc` targets can
+            # name macros; the checker drops them before the backends.
+            items.append(item)
+            continue
         items.append(exp.expand_item(item))
     items.extend(generated)
     return dataclasses.replace(module, items=items)

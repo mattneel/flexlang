@@ -109,6 +109,44 @@ def spec_symbol(name: str, key_tuple: tuple[str, ...]) -> str:
 # name -> (arity or None for variadic-ish, checker). Builtins are checked ad hoc.
 _BUILTINS = {"assert", "assert_eq", "assert_ne", "fail", "panic"}
 
+# Prelude names docs may reference: builtins plus the always-available
+# conversions. These exist in every program with no import.
+_PRELUDE_DOC_NAMES = _BUILTINS | {"to_str", "to_f64", "to_i64"}
+
+# Per-module top-level names of bundled-but-unloaded std modules, parsed from
+# disk on first use (docs may `see Std.X.y` without importing Std.X).
+_std_symbol_cache: dict[str, set[str] | None] = {}
+
+
+def _std_module_symbols(qual: str) -> set[str] | None:
+    """Top-level symbol names of the bundled std module `qual` (e.g. "Std.Str"),
+    or None when `qual` names no bundled module."""
+    if qual not in _std_symbol_cache:
+        names: set[str] | None = None
+        if Checker._is_std_module(qual):
+            from flx.modules import std_root
+            from flx.syntax.parser import parse as _parse
+
+            path = std_root().joinpath(*qual.split(".")).with_suffix(".flx")
+            module = _parse(path.read_text(encoding="utf-8"), str(path))
+            names = set()
+            decl_kinds = (
+                ast.FnDecl,
+                ast.ExternFnDecl,
+                ast.RecordDecl,
+                ast.AdtDecl,
+                ast.TraitDecl,
+                ast.MacroDecl,
+            )
+            for item in module.items:
+                if isinstance(item, decl_kinds):
+                    names.add(item.name)
+                if isinstance(item, ast.AdtDecl):
+                    names.update(v.name for v in item.variants)
+        _std_symbol_cache[qual] = names
+    return _std_symbol_cache[qual]
+
+
 # Capability modules whose calls (e.g. Log.info) are effectful intrinsics.
 _EFFECT_MODULES = {"Fs", "Http", "Db", "Log", "Time", "Alloc", "Random", "Process", "Unsafe"}
 
@@ -426,9 +464,13 @@ class Checker:
         if self.diags:
             raise FlexError(self.diags)
         # Emit impl methods as ordinary (mangled) functions for the backend, and
-        # drop generic templates (the monomorphizer emits concrete copies instead).
+        # drop generic templates (the monomorphizer emits concrete copies instead)
+        # plus macro declarations (expanded away; kept until here for doc targets).
         kept = [
-            it for it in self.module.items if not (isinstance(it, ast.FnDecl) and it.type_params)
+            it
+            for it in self.module.items
+            if not (isinstance(it, ast.FnDecl) and it.type_params)
+            and not isinstance(it, ast.MacroDecl)
         ]
         module = replace(self.module, items=[*kept, *self._impl_fns])
         return CheckResult(
@@ -713,40 +755,62 @@ class Checker:
         if doc.target is not None and doc.target != "module":
             refs.append(doc.target)
         for ref in refs:
-            leaf = ref.rsplit(".", 1)[-1]
-            known = (
-                leaf in self.functions
-                or leaf in self.generic_fns
-                or leaf in self.extern_fns
-                or leaf in self.record_types
-                or leaf in self.adt_templates
-                or leaf in self.traits
-                or leaf in self.ctors
-                or ref in self.decl_module.values()  # a module loaded here
-                or self._is_std_module(ref)  # a bundled module, loaded or not
-            )
-            if not known:
+            if not self._doc_ref_known(ref):
                 self._err(
                     "DOC001",
                     f"doc references {ref!r}, which does not exist",
                     doc.span,
                     help="docs are checked declarations; fix the reference or remove the doc",
                 )
-        if doc.status == "not_yet" and doc.target is not None and doc.target != "module":
-            leaf = doc.target.rsplit(".", 1)[-1]
-            if (
-                leaf in self.functions
-                or leaf in self.generic_fns
-                or leaf in self.extern_fns
-                or leaf in self.record_types
-                or leaf in self.adt_templates
-            ):
-                self._err(
-                    "DOC004",
-                    f"doc for {doc.target!r} says status not_yet, but the symbol exists",
-                    doc.span,
-                    help="update the status to implemented (or partial)",
-                )
+        if (
+            doc.status == "not_yet"
+            and doc.target is not None
+            and doc.target != "module"
+            and self._doc_symbol_exists(doc.target.rsplit(".", 1)[-1])
+        ):
+            self._err(
+                "DOC004",
+                f"doc for {doc.target!r} says status not_yet, but the symbol exists",
+                doc.span,
+                help="update the status to implemented (or partial)",
+            )
+
+    def _doc_symbol_exists(self, name: str) -> bool:
+        """Whether a bare name is a declared symbol of any documentable kind."""
+        return (
+            name in self.functions
+            or name in self.generic_fns
+            or name in self.extern_fns
+            or name in self.record_types
+            or name in self.adt_templates
+            or name in self.traits
+            or name in self.ctors
+            or name in _PRELUDE_DOC_NAMES
+            or any(m.name == name for m in self.module.macros)
+        )
+
+    def _doc_ref_known(self, ref: str) -> bool:
+        """Resolve a doc target or `see` reference. Dotted references validate
+        the QUALIFIER too: `Bogus.helper` must not pass just because some
+        `helper` exists somewhere — stale module prefixes are exactly what
+        DOC001 is for."""
+        loaded = set(self.decl_module.values())
+        if self.module.name:
+            loaded.add(self.module.name)
+        if "." not in ref:
+            return self._doc_symbol_exists(ref) or ref in loaded
+        if ref in loaded or self._is_std_module(ref):
+            return True  # a module reference
+        qual, leaf = ref.rsplit(".", 1)
+        if qual in loaded:
+            # A loaded module's symbol: the merged tables know its declarer.
+            if self.decl_module.get(leaf) == qual:
+                return True
+            return qual == self.module.name and self._doc_symbol_exists(leaf)
+        std_symbols = _std_module_symbols(qual)
+        if std_symbols is not None:
+            return leaf in std_symbols
+        return False
 
     @staticmethod
     def _is_std_module(ref: str) -> bool:
