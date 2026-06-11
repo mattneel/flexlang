@@ -69,6 +69,19 @@ def _dump_item(item: ast.Item, depth: int, out: list[str]) -> None:
         _dump_block(item.body, depth + 1, out)
     elif isinstance(item, ast.DefaultTargetDecl):
         out.append(f"{_indent(depth)}Target default = {item.name}")
+    elif isinstance(item, ast.DocDecl):
+        head = item.title if item.title is not None else item.target
+        out.append(f"{_indent(depth)}Doc {head!r}")
+        if item.summary:
+            out.append(f"{_indent(depth + 1)}summary {item.summary!r}")
+        for entry in item.content:
+            if isinstance(entry, ast.DocText):
+                out.append(f"{_indent(depth + 1)}text ({len(entry.text)} chars)")
+            elif isinstance(entry, ast.DocTest):
+                tag = f" expect_error {entry.expect_error}" if entry.expect_error else ""
+                out.append(f"{_indent(depth + 1)}test {entry.name!r}{tag}")
+            elif isinstance(entry, ast.DocSnippet):
+                out.append(f"{_indent(depth + 1)}snippet {entry.name!r}")
 
 
 def _type(t: ast.TypeExpr) -> str:

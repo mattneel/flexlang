@@ -45,3 +45,116 @@ pub extern fn exp(x: F64) -> F64
 
 pub fn fmin(a: F64, b: F64) -> F64 = { if a < b { a } else { b } }
 pub fn fmax(a: F64, b: F64) -> F64 = { if a > b { a } else { b } }
+
+// --- documentation ---------------------------------------------------------------
+
+doc module {
+  summary "Integer math (pure Flex) and floating point (libm over the FFI)."
+  text """
+  Integer arithmetic follows the language's 64-bit wrapping semantics. F64
+  follows IEEE-754: `x / 0.0` is inf or nan, comparisons are false on nan.
+  Convert explicitly with `to_f64(n)` and `to_i64(x)`.
+  """
+  since "0.0.1"
+  status implemented
+}
+
+doc abs {
+  summary "Absolute value (wraps on I64 minimum, like all Flex arithmetic)."
+  test "magnitudes" {
+    assert_eq(abs(-5), 5)
+    assert_eq(abs(5), 5)
+    assert_eq(abs(0), 0)
+  }
+}
+
+doc min {
+  summary "The smaller of two integers."
+  test "orders" { assert_eq(min(3, 7), 3) }
+}
+
+doc max {
+  summary "The larger of two integers."
+  test "orders" { assert_eq(max(3, 7), 7) }
+}
+
+doc clamp {
+  summary "n limited to the range [lo, hi]."
+  test "clamps both ends" {
+    assert_eq(clamp(99, 0, 10), 10)
+    assert_eq(clamp(-99, 0, 10), 0)
+    assert_eq(clamp(5, 0, 10), 5)
+  }
+}
+
+doc sign {
+  summary "-1, 0, or 1 by the sign of n."
+  test "signs" {
+    assert_eq(sign(-9), -1)
+    assert_eq(sign(0), 0)
+    assert_eq(sign(2), 1)
+  }
+}
+
+doc pow {
+  summary "Integer base^exp by binary exponentiation; negative exponents yield 0."
+  text """
+  This is the INTEGER power. For floats, declare libm's:
+  `extern fn pow(base: F64, exp: F64) -> F64` in your own module.
+  """
+  test "integer powers" {
+    assert_eq(pow(2, 10), 1024)
+    assert_eq(pow(7, 0), 1)
+    assert_eq(pow(2, -1), 0)
+  }
+}
+
+doc sqrt {
+  summary "libm square root (nan for negative input)."
+  test "roots" {
+    assert_eq(sqrt(16.0), 4.0)
+    assert_eq(to_str(sqrt(2.0)), "1.4142135623730951")
+  }
+}
+
+doc sin { summary "libm sine (radians)."  test "sin 0" { assert_eq(sin(0.0), 0.0) } }
+
+doc cos { summary "libm cosine (radians)."  test "cos 0" { assert_eq(cos(0.0), 1.0) } }
+
+doc floor {
+  summary "Round toward negative infinity."
+  test "floors" {
+    assert_eq(floor(2.7), 2.0)
+    assert_eq(floor(-2.1), -3.0)
+  }
+}
+
+doc ceil {
+  summary "Round toward positive infinity."
+  test "ceils" { assert_eq(ceil(0.2), 1.0) }
+}
+
+doc fabs {
+  summary "Floating-point absolute value."
+  test "magnitudes" { assert_eq(fabs(-3.5), 3.5) }
+}
+
+doc log {
+  summary "libm natural logarithm."
+  test "log 1" { assert_eq(log(1.0), 0.0) }
+}
+
+doc exp {
+  summary "libm e^x."
+  test "exp 0" { assert_eq(exp(0.0), 1.0) }
+}
+
+doc fmin {
+  summary "The smaller of two floats (by <, so nan-propagation differs from libm fmin)."
+  test "orders floats" { assert_eq(fmin(1.5, 2.5), 1.5) }
+}
+
+doc fmax {
+  summary "The larger of two floats (by >, so nan-propagation differs from libm fmax)."
+  test "orders floats" { assert_eq(fmax(1.5, 2.5), 2.5) }
+}

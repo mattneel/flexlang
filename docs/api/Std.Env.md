@@ -1,0 +1,42 @@
+# Std.Env
+
+*Generated from the `doc` declarations in `Env.flx` by `flx docs build`. Examples are executed by `flx docs check`.*
+
+Process environment access.
+
+Reading the environment observes process state, so everything here
+`uses { Process }`. Program ARGUMENTS are a language intrinsic instead:
+`Env.argv()` yields a `List<String>` of the user arguments (no argv[0]).
+
+*since 0.0.1 · status: implemented*
+
+## get_or
+
+```flx
+fn get_or(name: String, default: String) -> String uses { Process }
+```
+
+An environment variable's value, or a default when unset/empty.
+
+libc cannot distinguish an unset variable from one set to "" through
+getenv, so neither can this.
+
+**Example: missing variables fall back** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(get_or("FLX_DOC_TEST_SURELY_UNSET", "fallback"), "fallback")
+```
+
+## has
+
+```flx
+fn has(name: String) -> Bool uses { Process }
+```
+
+True when an environment variable is set to a non-empty value.
+
+**Example: missing variables are absent** — ✓ checked by `flx docs check`:
+
+```flx
+assert(!has("FLX_DOC_TEST_SURELY_UNSET"))
+```

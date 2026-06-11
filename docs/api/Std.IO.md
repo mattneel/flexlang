@@ -1,0 +1,67 @@
+# Std.IO
+
+*Generated from the `doc` declarations in `IO.flx` by `flx docs build`. Examples are executed by `flx docs check`.*
+
+Console input and output.
+
+*since 0.0.1 · status: implemented*
+
+## print
+
+```flx
+fn print(s: String) -> Unit uses { Log }
+```
+
+Write a string to stdout with NO trailing newline.
+
+Output is flushed immediately, so it interleaves correctly with extern
+calls and survives crashes.
+
+**Example: prints without a newline** — ✓ checked by `flx docs check`:
+
+```flx
+print("a")
+print("b")
+println("")
+```
+
+See also: `println`
+
+## println
+
+```flx
+fn println(s: String) -> Unit uses { Log }
+```
+
+Write a string to stdout followed by a newline.
+
+**Example: prints a line** — ✓ checked by `flx docs check`:
+
+```flx
+println("hello from a doc example")
+```
+
+## read_line
+
+```flx
+fn read_line() -> String uses { Fs }
+```
+
+Read one line from stdin, trailing newline stripped; "" at EOF.
+
+KNOWN LIMITATION: a blank line and end-of-input both return `""`, so they
+cannot be told apart from in-language. For byte-exact input handling,
+declare `extern fn getchar() -> I32 uses { Fs }` and read to a true EOF
+(-1). An Option-returning read is the roadmap.
+
+**Sketch: a read loop (interactive — not run here)** — illustration only, not checked:
+
+```flx
+mut line = read_line()
+while !is_empty(line) {
+  println("got: " ++ line)
+  line = read_line()
+}
+```
+
+*status: partial*

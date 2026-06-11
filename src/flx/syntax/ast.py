@@ -335,6 +335,61 @@ class Item:
     span: Span
 
 
+# --- documentation ------------------------------------------------------------
+# Docs are first-class declarations: parsed, checked, and rendered by the
+# compiler. `test` proves behavior; `doc` proves explanation; a `test` nested
+# in a `doc` proves the explanation.
+
+
+@dataclass(frozen=True)
+class DocText:
+    """A prose block (markdown) inside a doc declaration."""
+
+    text: str
+    span: Span
+
+
+@dataclass(frozen=True)
+class DocTest:
+    """A runnable example. Plain doc tests carry a parsed Block (they are real
+    tests with doc provenance); `expect_error CODE` tests carry their raw
+    source instead — the example is a whole program expected to FAIL with that
+    diagnostic, proving the documentation of an error."""
+
+    name: str
+    body: Block | None
+    effects: list[str]
+    expect_error: str | None
+    source: str  # verbatim source slice, for rendering
+    span: Span
+
+
+@dataclass(frozen=True)
+class DocSnippet:
+    """A non-runnable illustration. Rendered verbatim and NEVER checked —
+    anything that claims to work must be a nested `test` instead."""
+
+    name: str
+    source: str
+    span: Span
+
+
+@dataclass(frozen=True)
+class DocDecl(Item):
+    """`doc "Title" { ... }` (a free-standing page), `doc name { ... }`
+    (attached to a symbol), or `doc module { ... }` (the enclosing module)."""
+
+    target: str | None  # symbol path, "module", or None for free-standing
+    title: str | None  # page title for free-standing docs
+    summary: str | None
+    slug: str | None
+    since: str | None
+    status: str | None  # implemented | partial | not_yet | deprecated
+    sees: list[str]
+    content: list[DocText | DocTest | DocSnippet]  # in source order
+    span: Span
+
+
 @dataclass(frozen=True)
 class TypeParam:
     name: str
@@ -494,6 +549,10 @@ class Module:
     @property
     def traits(self) -> list[TraitDecl]:
         return [it for it in self.items if isinstance(it, TraitDecl)]
+
+    @property
+    def docs(self) -> list[DocDecl]:
+        return [it for it in self.items if isinstance(it, DocDecl)]
 
     @property
     def impls(self) -> list[ImplDecl]:

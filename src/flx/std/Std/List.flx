@@ -39,3 +39,64 @@ pub fn fold<T, A>(xs: List<T>, init: A, f: (A, T) -> A) -> A = {
   for x in xs { acc = f(acc, x) }
   acc
 }
+
+// --- documentation ---------------------------------------------------------------
+
+doc module {
+  summary "Helpers over the built-in growable `List<T>`."
+  text """
+  Lists themselves are built into the language: `[1, 2, 3]` literals, `xs[i]`
+  indexing (panics out of bounds), `List.push(xs, v)`, `List.len(xs)`,
+  `List.set(xs, i, v)`, and `for x in xs { ... }` need no import. Lists have
+  REFERENCE semantics: `let ys = xs` aliases, it does not copy. This module
+  adds the derived helpers.
+  """
+  since "0.0.1"
+  status implemented
+}
+
+doc range {
+  summary "The half-open range [a, b) as a list."
+  test "builds half-open ranges" {
+    let r = range(1, 5)
+    assert_eq(List.len(r), 4)
+    assert_eq(r[0], 1)
+    assert_eq(r[3], 4)
+    assert_eq(List.len(range(3, 3)), 0)
+  }
+}
+
+doc map {
+  summary "A new list with a pure function applied to every element."
+  text """
+  Function arguments must be PURE, monomorphic, top-level functions — function
+  types carry no effects yet. Any pure function fits, like `abs` here.
+  """
+  test "maps abs over elements" {
+    let magnitudes = map([-3, 4, -5], abs)
+    assert_eq(magnitudes[0], 3)
+    assert_eq(magnitudes[2], 5)
+  }
+  see filter
+  see fold
+  see Std.Math
+}
+
+doc filter {
+  summary "The elements a predicate keeps, in order."
+  test "keeps the empty strings" {
+    let empties = filter(["", "x", ""], is_empty)
+    assert_eq(List.len(empties), 2)
+  }
+  see Std.Str
+}
+
+doc fold {
+  summary "Reduce a list left-to-right from an initial accumulator."
+  test "folds min to find the smallest" {
+    assert_eq(fold([5, 3, 8, 1], 9999, min), 1)
+  }
+  test "folds max to find the largest" {
+    assert_eq(fold(range(1, 11), 0, max), 10)
+  }
+}

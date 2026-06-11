@@ -1,0 +1,15 @@
+# TYPE025
+
+A function value in a position that cannot store one.
+
+Function values flow through parameters, arguments, and `let` bindings.
+Storing one — in a `mut`, a record field, an ADT payload, a list, or a
+return type — is not supported yet.
+
+**Example: function values cannot live in lists** — expected to fail with `TYPE025` (proven by `flx docs check`):
+
+```flx
+fn d(x: I64) -> I64 = { x }
+fn main() -> I64 = { let fs = [d]
+  0 }
+```

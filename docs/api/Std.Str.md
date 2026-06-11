@@ -1,0 +1,190 @@
+# Std.Str
+
+*Generated from the `doc` declarations in `Str.flx` by `flx docs build`. Examples are executed by `flx docs check`.*
+
+Byte-oriented string operations over libc.
+
+Flex strings are UTF-8 bytes (always NUL-terminated). `length` is the BYTE
+length, indexing is by byte, and a multi-byte UTF-8 sequence can split —
+losslessly, but not Unicode-aware. Importing this module also gives every
+String `a.eq(b)` and `s.show()` through trait impls.
+
+*since 0.0.1 · status: implemented*
+
+## length
+
+```flx
+fn length(s: String) -> I64
+```
+
+The byte length of a string.
+
+**Example: counts bytes, not characters** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(length("hello"), 5)
+assert_eq(length(""), 0)
+assert_eq(length("héllo"), 6)
+```
+
+## is_empty
+
+```flx
+fn is_empty(s: String) -> Bool
+```
+
+True when the string has no bytes.
+
+**Example: empty and non-empty** — ✓ checked by `flx docs check`:
+
+```flx
+assert(is_empty(""))
+assert(!is_empty(" "))
+```
+
+## eq
+
+```flx
+fn eq(a: String, b: String) -> Bool
+```
+
+Byte equality of two strings.
+
+Importing Std.Str also enables `assert_eq` on strings and `a.eq(b)` method
+syntax via `impl Eq for String`.
+
+**Example: compares content** — ✓ checked by `flx docs check`:
+
+```flx
+assert(eq("flex", "flex"))
+assert(!eq("flex", "flexx"))
+```
+
+## ne
+
+```flx
+fn ne(a: String, b: String) -> Bool
+```
+
+Byte inequality of two strings.
+
+**Example: negation of eq** — ✓ checked by `flx docs check`:
+
+```flx
+assert(ne("a", "b"))
+```
+
+## cmp
+
+```flx
+fn cmp(a: String, b: String) -> I64
+```
+
+Lexicographic byte order: -1, 0, or 1.
+
+**Example: orders bytes** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(cmp("a", "b"), -1)
+assert_eq(cmp("b", "a"), 1)
+assert_eq(cmp("same", "same"), 0)
+```
+
+## byte_at
+
+```flx
+fn byte_at(s: String, i: I64) -> I64
+```
+
+The byte at an index, as an I64 (panics out of bounds).
+
+**Example: indexes bytes** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(byte_at("A", 0), 65)
+assert_eq(byte_at("flex", 3), 120)
+```
+
+See also: `substr`
+
+## substr
+
+```flx
+fn substr(s: String, start: I64, count: I64) -> String
+```
+
+The byte range [start, start+count) as a string (clamps at the ends).
+
+**Example: slices and clamps** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(substr("hello", 1, 3), "ell")
+assert_eq(substr("hello", 3, 99), "lo")
+assert_eq(substr("hello", 99, 1), "")
+```
+
+## char_at
+
+```flx
+fn char_at(s: String, i: I64) -> String
+```
+
+The single byte at an index as a one-byte string ("" past the end).
+
+**Example: one byte at a time** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(char_at("hello", 1), "e")
+assert_eq(char_at("hello", 99), "")
+```
+
+## split
+
+```flx
+fn split(s: String, sep: String) -> List<String>
+```
+
+Split on a separator, keeping empty pieces.
+
+Adjacent separators yield empty pieces; an empty separator yields the whole
+string as one piece.
+
+**Example: splits comma-separated text** — ✓ checked by `flx docs check`:
+
+```flx
+let parts = split("a,bb,,ccc", ",")
+assert_eq(List.len(parts), 4)
+assert_eq(parts[0], "a")
+assert_eq(parts[2], "")
+```
+
+**Example: empty separator yields the whole string** — ✓ checked by `flx docs check`:
+
+```flx
+let parts = split("abc", "")
+assert_eq(List.len(parts), 1)
+assert_eq(parts[0], "abc")
+```
+
+## parse_int
+
+```flx
+fn parse_int(s: String) -> Option<I64>
+```
+
+Parse a decimal integer; None on bad input OR overflow.
+
+Accepts an optional leading minus. Returns `None` for empty input, any
+non-digit, and any value outside I64 — a number is never silently wrapped.
+
+**Example: parses and rejects honestly** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(parse_int("42"), Some(42))
+assert_eq(parse_int("-42"), Some(-42))
+assert_eq(parse_int("4x2"), None)
+assert_eq(parse_int(""), None)
+assert_eq(parse_int("9223372036854775807"), Some(9223372036854775807))
+assert_eq(parse_int("9223372036854775808"), None)
+assert_eq(parse_int("-9223372036854775808"), Some(-9223372036854775808))
+```

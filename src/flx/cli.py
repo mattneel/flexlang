@@ -77,6 +77,11 @@ def _build_parser() -> argparse.ArgumentParser:
     test_cmd.add_argument("path", nargs="?", help="optional .flx file or directory")
     test_cmd.add_argument("--filter", dest="filter", help="only run tests matching a substring")
     test_cmd.add_argument(
+        "--docs",
+        action="store_true",
+        help="also run the examples nested in this file's doc declarations",
+    )
+    test_cmd.add_argument(
         "--native",
         action="store_true",
         help="run tests through the native LLVM backend (needs MLIR/LLVM 22)",
@@ -94,6 +99,27 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("doctor", help="Check the optional native backend toolchain (LLVM/MLIR)")
+
+    docs_cmd = sub.add_parser("docs", help="Check, build, or explain the documentation")
+    docs_sub = docs_cmd.add_subparsers(dest="docs_command", metavar="<docs-command>")
+    docs_check = docs_sub.add_parser(
+        "check", help="Prove the docs: run every example, verify every expected error"
+    )
+    docs_check.add_argument(
+        "--both",
+        action="store_true",
+        help="run doc examples on the native backend as well as the interpreter",
+    )
+    docs_build = docs_sub.add_parser(
+        "build", help="Render doc declarations into the book (then mdbook build)"
+    )
+    docs_build.add_argument(
+        "--check",
+        action="store_true",
+        help="verify the committed generated pages are current (CI gate)",
+    )
+    docs_explain = docs_sub.add_parser("explain", help="Explain a diagnostic code")
+    docs_explain.add_argument("code", help="a diagnostic code, e.g. EFFECT001")
 
     hl = sub.add_parser("highlight", help="Syntax-highlight a .flx file")
     hl.add_argument("path", help="path to a .flx source file")
@@ -144,6 +170,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "doctor":
         return driver.cmd_doctor()
+    if args.command == "docs":
+        from flx import docsengine
+
+        if args.docs_command == "check":
+            return docsengine.cmd_docs_check(native=args.both)
+        if args.docs_command == "build":
+            return docsengine.cmd_docs_build(check_only=args.check)
+        if args.docs_command == "explain":
+            return docsengine.cmd_docs_explain(args.code)
+        print("usage: flx docs <check|build|explain>", file=sys.stderr)
+        return 2
     if args.command == "parse":
         return driver.cmd_parse(args.path)
     if args.command == "expand":
@@ -180,9 +217,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return driver.cmd_build(None, args.output)
         return build_runner.run_build(args.path, args.explain)
     if args.command == "test":
-        return driver.cmd_test(
+        code = driver.cmd_test(
             args.path, args.filter, interpret=not args.native, native=args.native
         )
+        if getattr(args, "docs", False) and args.path:
+            from flx import docsengine
+
+            docs_code = docsengine.run_file_docs(args.path, native=args.native)
+            code = code or docs_code
+        return code
 
     print(f"flx {args.command}: not yet implemented", file=sys.stderr)
     return 2

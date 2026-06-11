@@ -1,0 +1,127 @@
+module Docs.Diagnostics
+
+// Diagnostic documentation, each proven by an `expect_error` example:
+// `flx docs check` compiles the example and FAILS unless it produces exactly
+// the documented code. `flx docs explain <CODE>` renders these in the
+// terminal.
+
+doc "EFFECT001" {
+  slug "diagnostics/EFFECT001"
+  summary "A call requires an effect the caller does not declare."
+  text """
+  Flex effects are explicit: a function that logs, reads, or touches process
+  state must say so with `uses { ... }`, and so must everything that calls
+  it. The error names the missing effect; add it to the caller's `uses`
+  clause (or stop making the call).
+  """
+  test "calling Log without declaring it" expect_error EFFECT001 {
+    fn bad() -> Unit = { Log.info("hello") }
+    fn main() -> I64 = { 0 }
+  }
+}
+
+doc "NAME001" {
+  slug "diagnostics/NAME001"
+  summary "An unknown name — or a feature Flex does not have yet."
+  text """
+  Most NAME001s are typos. For names that LOOK like missing features
+  (`break`, `chr`, `parse_float`, `sort`, ...), the error says "Flex does not
+  have X yet" and names the working alternative instead of pretending it was
+  a typo.
+  """
+  test "break is not in the language" expect_error NAME001 {
+    fn main() -> I64 = {
+      mut i = 0
+      while i < 9 { if i == 3 { break } else { () }
+        i = i + 1 }
+      i
+    }
+  }
+}
+
+doc "NAME003" {
+  slug "diagnostics/NAME003"
+  summary "A function reference that cannot be a value."
+  text """
+  PURE top-level functions are values (pass them to map/filter/fold).
+  Effectful functions, externs, generics, and builtins stay call-only: a
+  value of an effectful function would smuggle its effects past the checker.
+  """
+  test "effectful functions are call-only" expect_error NAME003 {
+    fn shouty() -> I64 uses { Log } = { Log.info("x")
+      41 }
+    fn main() -> I64 uses { Log } = { let g = shouty
+      g() }
+  }
+}
+
+doc "TYPE019" {
+  slug "diagnostics/TYPE019"
+  summary "Equality is not defined for this type."
+  text """
+  `==` and `assert_eq` work on scalars, records of comparables, and ADTs
+  whose payloads fit a machine word. Strings compare via `import Std.Str`
+  (the Eq trait); lists and String-carrying ADTs need a `match` or an
+  explicit comparison — pointer identity would be a lie.
+  """
+  test "lists do not compare with ==" expect_error TYPE019 {
+    fn main() -> I64 = { if [1] == [1] { 0 } else { 1 } }
+  }
+}
+
+doc "MATCH001" {
+  slug "diagnostics/MATCH001"
+  summary "A match does not cover every variant."
+  text """
+  Only arms that take a WHOLE variant (every argument a binder or `_`) count
+  toward coverage; literal and nested sub-patterns never do. Add a catch-all
+  arm (`_ => ...`) or an all-binders arm.
+  """
+  test "nested patterns do not cover" expect_error MATCH001 {
+    type N = | Zero | Succ(N)
+    fn main() -> I64 = { match Succ(Zero) { Zero => 0  Succ(Zero) => 1 } }
+  }
+}
+
+doc "TYPE008" {
+  slug "diagnostics/TYPE008"
+  summary "Branches disagree on a type where the value is used."
+  text """
+  An `if`/`match` used AS A VALUE needs every branch to produce the same
+  type. In statement position (nobody consumes the value) the branches are
+  free to differ.
+  """
+  test "value-position branches must agree" expect_error TYPE008 {
+    fn main() -> I64 = { let x = if true { 1 } else { "s" }
+      0 }
+  }
+}
+
+doc "TYPE025" {
+  slug "diagnostics/TYPE025"
+  summary "A function value in a position that cannot store one."
+  text """
+  Function values flow through parameters, arguments, and `let` bindings.
+  Storing one — in a `mut`, a record field, an ADT payload, a list, or a
+  return type — is not supported yet.
+  """
+  test "function values cannot live in lists" expect_error TYPE025 {
+    fn d(x: I64) -> I64 = { x }
+    fn main() -> I64 = { let fs = [d]
+      0 }
+  }
+}
+
+doc "DOC001" {
+  slug "diagnostics/DOC001"
+  summary "A doc declaration references a symbol that does not exist."
+  text """
+  Docs are checked declarations: `doc name { ... }` and `see name` must
+  point at real symbols (or bundled modules). Stale references fail the
+  compile — that is the point.
+  """
+  test "docs cannot reference ghosts" expect_error DOC001 {
+    doc nonexistent_thing { summary "..." }
+    fn main() -> I64 = { 0 }
+  }
+}

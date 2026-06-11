@@ -112,6 +112,28 @@ _BUILTINS = {"assert", "assert_eq", "assert_ne", "fail", "panic"}
 # Capability modules whose calls (e.g. Log.info) are effectful intrinsics.
 _EFFECT_MODULES = {"Fs", "Http", "Db", "Log", "Time", "Alloc", "Random", "Process", "Unsafe"}
 
+# Things users from other languages reach for that don't exist yet. Erroring
+# as if they were typos cost real study time; say "not yet" and name the
+# workaround instead.
+_KNOWN_ABSENT: dict[str, str] = {
+    "break": "loops have no break; use a flag in the `while` condition, or an early `return`",
+    "continue": "loops have no continue; guard the rest of the body with an `if`",
+    "chr": "there is no byte-to-String construction yet; keep data as byte lists "
+    "(List<I64>) and print via FFI putchar, or build strings only from existing strings",
+    "from_byte": "there is no byte-to-String construction yet (see `chr`)",
+    "from_bytes": "there is no byte-to-String construction yet (see `chr`)",
+    "parse_float": "parse_float does not exist yet; declare libc's parser: "
+    "`extern fn atof(s: String) -> F64` (import Std.Str for parse_int)",
+    "to_float": "see parse_float: declare `extern fn atof(s: String) -> F64`",
+    "sort": "List has no built-in sort yet; insertion sort with List.set is ~15 lines, "
+    "and comparison functions can be passed as values",
+    "sorted": "see `sort` — no built-in sort yet",
+    "format": "there are no format strings yet; build output with `++`, to_str, and "
+    "Std.Str substr/char_at",
+    "printf": "there is no printf; use println (import Std.IO) with `++` and to_str",
+    "input": "use read_line() (import Std.IO, uses { Fs })",
+}
+
 # Build-only intrinsics under `flx.` (available when the module declares targets).
 _FLX_BUILD_OPS = {"check", "test", "run", "expand", "build"}
 
@@ -398,6 +420,8 @@ class Checker:
             self._check_test(test)
         for target in self.module.targets:
             self._check_target(target)
+        for doc in self.module.docs:
+            self._check_doc(doc)
 
         if self.diags:
             raise FlexError(self.diags)
@@ -680,6 +704,62 @@ class Checker:
                     f"function {fn.name!r} must return {fn_ty.ret} but its body has no value",
                     fn.span,
                 )
+
+    def _check_doc(self, doc: ast.DocDecl) -> None:
+        """Static doc validation, run on EVERY compile: a doc that references a
+        missing symbol (DOC001) or claims a status reality contradicts (DOC004)
+        fails the build. Example execution belongs to `flx docs check`."""
+        refs = list(doc.sees)
+        if doc.target is not None and doc.target != "module":
+            refs.append(doc.target)
+        for ref in refs:
+            leaf = ref.rsplit(".", 1)[-1]
+            known = (
+                leaf in self.functions
+                or leaf in self.generic_fns
+                or leaf in self.extern_fns
+                or leaf in self.record_types
+                or leaf in self.adt_templates
+                or leaf in self.traits
+                or leaf in self.ctors
+                or ref in self.decl_module.values()  # a module loaded here
+                or self._is_std_module(ref)  # a bundled module, loaded or not
+            )
+            if not known:
+                self._err(
+                    "DOC001",
+                    f"doc references {ref!r}, which does not exist",
+                    doc.span,
+                    help="docs are checked declarations; fix the reference or remove the doc",
+                )
+        if doc.status == "not_yet" and doc.target is not None and doc.target != "module":
+            leaf = doc.target.rsplit(".", 1)[-1]
+            if (
+                leaf in self.functions
+                or leaf in self.generic_fns
+                or leaf in self.extern_fns
+                or leaf in self.record_types
+                or leaf in self.adt_templates
+            ):
+                self._err(
+                    "DOC004",
+                    f"doc for {doc.target!r} says status not_yet, but the symbol exists",
+                    doc.span,
+                    help="update the status to implemented (or partial)",
+                )
+
+    @staticmethod
+    def _is_std_module(ref: str) -> bool:
+        """Whether `ref` names a bundled stdlib module (Std.Str, ...). Docs may
+        `see` sibling modules that the current program never imports; the
+        bundle on disk is the truth for those."""
+        from flx.modules import std_root
+
+        parts = ref.split(".")
+        if len(parts) < 2 or parts[0] != "Std":
+            return False
+        candidate = std_root().joinpath(*parts).with_suffix(".flx")
+        return candidate.is_file()
 
     def _check_test(self, test: ast.TestDecl) -> None:
         self.scope = _Scope()
@@ -1148,7 +1228,17 @@ class Checker:
             return ERROR
         if obj_ty is ERROR:
             return ERROR
-        self._err("TYPE010", f"cannot access field .{expr.name} on {obj_ty}", expr.span)
+        help_text = None
+        if expr.name in self.functions or expr.name in self.generic_fns:
+            # Dot syntax is trait-methods-only; a same-named free function is
+            # almost certainly what was meant.
+            help_text = (
+                f"dot syntax is only for trait methods; call the free function: "
+                f"{expr.name}(value, ...)"
+            )
+        self._err(
+            "TYPE010", f"cannot access field .{expr.name} on {obj_ty}", expr.span, help=help_text
+        )
         return ERROR
 
     def _infer_region(self, expr: ast.RegionExpr) -> Type:
@@ -1212,6 +1302,15 @@ class Checker:
                 f"{expr.name!r} is a builtin and cannot be passed as a value",
                 expr.span,
                 help=f"wrap it: fn my_{expr.name}(...) = {{ {expr.name}(...) }}",
+            )
+            return ERROR
+        absent = _KNOWN_ABSENT.get(expr.name)
+        if absent is not None:
+            self._err(
+                "NAME001",
+                f"Flex does not have {expr.name!r} yet",
+                expr.span,
+                help=absent,
             )
             return ERROR
         self._err("NAME001", f"unknown name {expr.name!r}", expr.span)

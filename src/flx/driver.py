@@ -5,6 +5,7 @@ Each `cmd_*` returns a process exit code and renders diagnostics to stderr.
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -291,6 +292,15 @@ def cmd_run(
     if not choice:
         try:
             code = interp.run_main(result, args)
+        except BrokenPipeError:
+            # The reader went away (e.g. `flx run ... | head`). A native binary
+            # dies of SIGPIPE and reports 128+13; match it, and point stdout at
+            # the void so interpreter shutdown doesn't print a second traceback.
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+            if announce:
+                print("flx: exited with code 141", file=sys.stderr)
+            return 141
         except interp.FlexRuntimeError as exc:
             sys.stdout.flush()  # emit buffered output before the error (match native)
             print(f"flx: runtime error: {exc}", file=sys.stderr)

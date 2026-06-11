@@ -1,0 +1,19 @@
+# NAME001
+
+An unknown name — or a feature Flex does not have yet.
+
+Most NAME001s are typos. For names that LOOK like missing features
+(`break`, `chr`, `parse_float`, `sort`, ...), the error says "Flex does not
+have X yet" and names the working alternative instead of pretending it was
+a typo.
+
+**Example: break is not in the language** — expected to fail with `NAME001` (proven by `flx docs check`):
+
+```flx
+fn main() -> I64 = {
+  mut i = 0
+  while i < 9 { if i == 3 { break } else { () }
+    i = i + 1 }
+  i
+}
+```

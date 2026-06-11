@@ -1,0 +1,248 @@
+# Std.Math
+
+*Generated from the `doc` declarations in `Math.flx` by `flx docs build`. Examples are executed by `flx docs check`.*
+
+Integer math (pure Flex) and floating point (libm over the FFI).
+
+Integer arithmetic follows the language's 64-bit wrapping semantics. F64
+follows IEEE-754: `x / 0.0` is inf or nan, comparisons are false on nan.
+Convert explicitly with `to_f64(n)` and `to_i64(x)`.
+
+*since 0.0.1 · status: implemented*
+
+## abs
+
+```flx
+fn abs(n: I64) -> I64
+```
+
+Absolute value (wraps on I64 minimum, like all Flex arithmetic).
+
+**Example: magnitudes** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(abs(-5), 5)
+assert_eq(abs(5), 5)
+assert_eq(abs(0), 0)
+```
+
+## min
+
+```flx
+fn min(a: I64, b: I64) -> I64
+```
+
+The smaller of two integers.
+
+**Example: orders** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(min(3, 7), 3) 
+```
+
+## max
+
+```flx
+fn max(a: I64, b: I64) -> I64
+```
+
+The larger of two integers.
+
+**Example: orders** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(max(3, 7), 7) 
+```
+
+## clamp
+
+```flx
+fn clamp(n: I64, lo: I64, hi: I64) -> I64
+```
+
+n limited to the range [lo, hi].
+
+**Example: clamps both ends** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(clamp(99, 0, 10), 10)
+assert_eq(clamp(-99, 0, 10), 0)
+assert_eq(clamp(5, 0, 10), 5)
+```
+
+## sign
+
+```flx
+fn sign(n: I64) -> I64
+```
+
+-1, 0, or 1 by the sign of n.
+
+**Example: signs** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(sign(-9), -1)
+assert_eq(sign(0), 0)
+assert_eq(sign(2), 1)
+```
+
+## pow
+
+```flx
+fn pow(base: I64, exp: I64) -> I64
+```
+
+Integer base^exp by binary exponentiation; negative exponents yield 0.
+
+This is the INTEGER power. For floats, declare libm's:
+`extern fn pow(base: F64, exp: F64) -> F64` in your own module.
+
+**Example: integer powers** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(pow(2, 10), 1024)
+assert_eq(pow(7, 0), 1)
+assert_eq(pow(2, -1), 0)
+```
+
+## sqrt
+
+```flx
+extern fn sqrt(x: F64) -> F64
+```
+
+libm square root (nan for negative input).
+
+**Example: roots** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(sqrt(16.0), 4.0)
+assert_eq(to_str(sqrt(2.0)), "1.4142135623730951")
+```
+
+## sin
+
+```flx
+extern fn sin(x: F64) -> F64
+```
+
+libm sine (radians).
+
+**Example: sin 0** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(sin(0.0), 0.0) 
+```
+
+## cos
+
+```flx
+extern fn cos(x: F64) -> F64
+```
+
+libm cosine (radians).
+
+**Example: cos 0** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(cos(0.0), 1.0) 
+```
+
+## floor
+
+```flx
+extern fn floor(x: F64) -> F64
+```
+
+Round toward negative infinity.
+
+**Example: floors** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(floor(2.7), 2.0)
+assert_eq(floor(-2.1), -3.0)
+```
+
+## ceil
+
+```flx
+extern fn ceil(x: F64) -> F64
+```
+
+Round toward positive infinity.
+
+**Example: ceils** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(ceil(0.2), 1.0) 
+```
+
+## fabs
+
+```flx
+extern fn fabs(x: F64) -> F64
+```
+
+Floating-point absolute value.
+
+**Example: magnitudes** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(fabs(-3.5), 3.5) 
+```
+
+## log
+
+```flx
+extern fn log(x: F64) -> F64
+```
+
+libm natural logarithm.
+
+**Example: log 1** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(log(1.0), 0.0) 
+```
+
+## exp
+
+```flx
+extern fn exp(x: F64) -> F64
+```
+
+libm e^x.
+
+**Example: exp 0** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(exp(0.0), 1.0) 
+```
+
+## fmin
+
+```flx
+fn fmin(a: F64, b: F64) -> F64
+```
+
+The smaller of two floats (by <, so nan-propagation differs from libm fmin).
+
+**Example: orders floats** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(fmin(1.5, 2.5), 1.5) 
+```
+
+## fmax
+
+```flx
+fn fmax(a: F64, b: F64) -> F64
+```
+
+The larger of two floats (by >, so nan-propagation differs from libm fmax).
+
+**Example: orders floats** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(fmax(1.5, 2.5), 2.5) 
+```

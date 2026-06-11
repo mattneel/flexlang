@@ -28,8 +28,8 @@ jobs:
       - name: Sync dependencies
         run: uv sync --frozen
 
-      - name: Build mdBook
-        run: uv run mdbook build
+      - name: Build docs (generated pages + mdBook)
+        run: uv run flx docs build
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

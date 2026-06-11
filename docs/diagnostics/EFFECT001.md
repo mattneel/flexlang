@@ -1,0 +1,15 @@
+# EFFECT001
+
+A call requires an effect the caller does not declare.
+
+Flex effects are explicit: a function that logs, reads, or touches process
+state must say so with `uses { ... }`, and so must everything that calls
+it. The error names the missing effect; add it to the caller's `uses`
+clause (or stop making the call).
+
+**Example: calling Log without declaring it** — expected to fail with `EFFECT001` (proven by `flx docs check`):
+
+```flx
+fn bad() -> Unit = { Log.info("hello") }
+fn main() -> I64 = { 0 }
+```

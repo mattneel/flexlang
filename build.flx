@@ -20,6 +20,15 @@ target test uses { Fs, Process } {
   check()?
   sh("uv run pytest -q")?
   flx.test("examples/macros.flx")?
+  docs()?
+}
+
+// The documentation is a checked artifact: every doc example runs, every
+// documented diagnostic is reproduced, and the generated pages must be
+// current.
+target docs uses { Process } {
+  sh("uv run flx docs check")?
+  sh("uv run flx docs build --check")?
 }
 
 target examples uses { Fs } {

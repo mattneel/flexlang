@@ -6,6 +6,8 @@ unknown characters) are raised as :class:`~flx.diagnostics.FlexError`.
 
 from __future__ import annotations
 
+import textwrap
+
 from flx.diagnostics import Diagnostic, FlexError, Pos, Span
 from flx.syntax.tokens import KEYWORDS, Token, TokenKind
 
@@ -115,6 +117,8 @@ class Lexer:
 
     def _string(self) -> Token:
         start = self._pos()
+        if self.source.startswith('"""', self.i):
+            return self._triple_string(start)
         self._advance()  # opening quote
         chars: list[str] = []
         while True:
@@ -127,12 +131,41 @@ class Lexer:
                 if self.i >= len(self.source):
                     raise self._error("unterminated string literal", start)
                 esc = self._advance()
-                chars.append({"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\"}.get(esc, esc))
+                # NB: no \0 — strings are NUL-terminated, so an embedded NUL
+                # would split the string's strlen extent from its stored length.
+                known = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\"}
+                if esc not in known:
+                    # An unknown escape used to silently drop the backslash
+                    # ("\x41" became "x41") — mangling data is worse than an error.
+                    hint = " (\\xNN byte escapes are not supported yet)" if esc == "x" else ""
+                    raise self._error(
+                        f'unknown string escape "\\{esc}"{hint}; '
+                        'the escapes are \\n \\t \\r \\" \\\\',
+                        start,
+                    )
+                chars.append(known[esc])
             elif ch == "\n":
                 raise self._error("unterminated string literal", start)
             else:
                 chars.append(ch)
         return Token(TokenKind.STRING, "".join(chars), self._span(start))
+
+    def _triple_string(self, start: Pos) -> Token:
+        """A \"\"\"...\"\"\" block: raw text (no escapes — doc prose keeps its
+        backslashes), with the leading newline dropped and common indentation
+        stripped so blocks can sit at any nesting depth."""
+        self._advance()
+        self._advance()
+        self._advance()  # the opening quotes, keeping line/col tracking honest
+        end = self.source.find('"""', self.i)
+        if end == -1:
+            raise self._error('unterminated """ block', start)
+        raw = self.source[self.i : end]
+        while self.i < end + 3:
+            self._advance()
+        text = raw[1:] if raw.startswith("\n") else raw
+        text = textwrap.dedent(text).rstrip()
+        return Token(TokenKind.STRING, text, self._span(start))
 
     def _number(self) -> Token:
         start = self._pos()

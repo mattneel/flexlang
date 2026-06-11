@@ -1,0 +1,118 @@
+module Docs.Guide
+
+// Compiler-level guide pages, written as doc declarations. Every claim that
+// can run is a nested test, executed by `flx docs check` on both backends.
+
+doc "Syntax You Can Rely On" {
+  slug "reference/syntax"
+
+  text """
+  The corners of Flex syntax that the study showed people guess about, each
+  one proven by a checked example. (Examples on this page run under
+  `flx docs check` on both backends.)
+  """
+
+  text """
+  ## `return` works everywhere
+
+  Early `return` is legal anywhere in a function body — inside loops, `if`
+  branches, and `match` arms. It is the idiomatic replacement for `break`.
+  """
+
+  test "early return escapes a loop" {
+    assert_eq(first_multiple_of_7_above(20), 21)
+  }
+
+  text """
+  ## `else if` chains work
+  """
+
+  test "else-if chains" {
+    assert_eq(grade(95), 1)
+    assert_eq(grade(85), 2)
+    assert_eq(grade(20), 3)
+  }
+
+  text """
+  ## Operator precedence
+
+  From loosest to tightest: `|>` · `||` · `&&` · `==` `!=` · `<` `<=` `>` `>=`
+  · `|` · `^` · `&` · `<<` `>>` · `+` `-` `++` · `*` `/` `%` · unary `-` `!` ·
+  calls, `.member`, `[index]`, `?`. Bitwise binds tighter than comparison
+  (Rust-style), so `x & 1 == 1` means `(x & 1) == 1`.
+  """
+
+  test "bitwise binds tighter than comparison" {
+    assert(0xFF & 0x0F == 0x0F)
+    assert_eq(1 << 2 + 3, 32)
+  }
+
+  text """
+  ## String escapes
+
+  The escape set is `\n` `\t` `\r` `\"` `\\` — anything else is a compile
+  error, never silent mangling. Prose blocks use `\"\"\"` and are raw.
+  """
+
+  text """
+  ## Literals
+
+  Integers: `42`, `0xFF`, `0b1010`, `1_000_000`. Hex/binary are BIT PATTERNS:
+  `0xFFFFFFFFFFFFFFFF` is -1. Floats need a decimal point or exponent:
+  `12.5`, `1e9`. Unit is `()`. Lists are `[1, 2, 3]`.
+  """
+
+  test "literal forms" {
+    assert_eq(0xFF, 255)
+    assert_eq(0b1010, 10)
+    assert_eq(1_000_000, 1000000)
+    assert_eq(0xFFFFFFFFFFFFFFFF, -1)
+    assert_eq(to_i64(12.5 * 2.0), 25)
+  }
+
+  text """
+  ## Blocks vs records
+
+  A lone `{ x = e }` is a BLOCK containing an assignment. Record literals are
+  recognized by a comma (`{ x = 1, y = 2 }`), a `with` update, or `{}`. To
+  force a one-field record literal, parenthesize it: `({ x = e })`.
+  """
+
+  text """
+  ## Not in the language (and what to use)
+
+  - `break` / `continue` — use a flag in the `while` condition or early `return`.
+  - Tuples — use a record or a multi-field ADT variant.
+  - Lambdas/closures — define a top-level `fn`; pure functions are values.
+  - `xs[i] = v` — use `List.set(xs, i, v)`.
+  - String literal patterns — bind, then compare with `.eq()`.
+
+  Each of these errors with a message that says so.
+  """
+
+  see Std.List
+  see Std.Str
+}
+
+// Helpers the page's examples call (pure, monomorphic — also doc'd so DOC005
+// stays meaningful if this module ever ships symbols).
+pub fn first_multiple_of_7_above(n: I64) -> I64 = {
+  mut i = n + 1
+  while true {
+    if i % 7 == 0 { return i }
+    i = i + 1
+  }
+  0
+}
+
+doc first_multiple_of_7_above {
+  summary "Guide-example helper: the first multiple of 7 strictly above n."
+}
+
+pub fn grade(score: I64) -> I64 = {
+  if score >= 90 { 1 } else if score >= 80 { 2 } else { 3 }
+}
+
+doc grade {
+  summary "Guide-example helper: 1/2/3 grade bands by score."
+}

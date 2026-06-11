@@ -3,3 +3,18 @@ module Std.Proc
 extern fn getpid() -> I32 uses { Process }
 
 pub fn pid() -> I64 uses { Process } = { getpid() }
+
+// --- documentation ---------------------------------------------------------------
+
+doc module {
+  summary "Process introspection."
+  since "0.0.1"
+  status implemented
+}
+
+doc pid {
+  summary "This process's id."
+  test "pids are positive" uses { Process } {
+    assert(pid() > 0)
+  }
+}

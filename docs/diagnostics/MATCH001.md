@@ -1,0 +1,14 @@
+# MATCH001
+
+A match does not cover every variant.
+
+Only arms that take a WHOLE variant (every argument a binder or `_`) count
+toward coverage; literal and nested sub-patterns never do. Add a catch-all
+arm (`_ => ...`) or an all-binders arm.
+
+**Example: nested patterns do not cover** — expected to fail with `MATCH001` (proven by `flx docs check`):
+
+```flx
+type N = | Zero | Succ(N)
+fn main() -> I64 = { match Succ(Zero) { Zero => 0  Succ(Zero) => 1 } }
+```

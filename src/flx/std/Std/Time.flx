@@ -8,3 +8,30 @@ pub fn unix_time() -> I64 uses { Time } = { time(0) }
 
 // Monotonic milliseconds — for measuring durations, not telling the time.
 pub fn monotonic_ms() -> I64 uses { Time } = { Time.monotonic_ms() }
+
+// --- documentation ---------------------------------------------------------------
+
+doc module {
+  summary "Clocks."
+  since "0.0.1"
+  status implemented
+}
+
+doc unix_time {
+  summary "Seconds since the Unix epoch (libc time)."
+  test "the epoch is behind us" uses { Time } {
+    assert(unix_time() > 1500000000)
+  }
+}
+
+doc monotonic_ms {
+  summary "A monotonic clock in milliseconds — for measuring durations."
+  text """
+  Monotone non-decreasing within a run; the absolute value is meaningless.
+  """
+  test "time does not run backwards" uses { Time } {
+    let t0 = monotonic_ms()
+    let t1 = monotonic_ms()
+    assert(t1 >= t0)
+  }
+}

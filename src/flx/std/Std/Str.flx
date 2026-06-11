@@ -70,8 +70,8 @@ fn matches_at(s: String, sep: String, at: I64, m: I64) -> Bool = {
   ok
 }
 
-// Parse a decimal integer ("-42"). None on empty input or any non-digit;
-// values beyond I64 wrap (64-bit two's complement, like arithmetic).
+// Parse a decimal integer ("-42"). None on empty input, any non-digit, or a
+// value outside I64 — never a silently wrapped number.
 pub fn parse_int(s: String) -> Option<I64> = {
   let n = strlen(s)
   if n == 0 { return None }
@@ -82,19 +82,25 @@ pub fn parse_int(s: String) -> Option<I64> = {
     i = 1
   }
   if i == n { return None }
+  // Accumulate NEGATIVE: the negative range is one wider than the positive,
+  // so -9223372036854775808 parses without wrapping. The pre-multiply bound
+  // check is exact under truncating division.
+  let limit = if neg { -9223372036854775808 } else { 0 - 9223372036854775807 }
   mut value = 0
   mut ok = true
   while i < n {
     let d = Str.byte_at(s, i) - 48
     if d < 0 { ok = false  i = n } else {
       if d > 9 { ok = false  i = n } else {
-        value = value * 10 + d
-        i = i + 1
+        if value < (limit + d) / 10 { ok = false  i = n } else {
+          value = value * 10 - d
+          i = i + 1
+        }
       }
     }
   }
   if !ok { return None }
-  if neg { Some(0 - value) } else { Some(value) }
+  if neg { Some(value) } else { Some(0 - value) }
 }
 
 // Importing Std.Str gives every String `a.eq(b)` and `s.show()`.
@@ -104,4 +110,125 @@ impl Eq for String = {
 
 impl Show for String = {
   fn show(self: String) -> String = { self }
+}
+
+// --- documentation ---------------------------------------------------------------
+
+doc module {
+  summary "Byte-oriented string operations over libc."
+  text """
+  Flex strings are UTF-8 bytes (always NUL-terminated). `length` is the BYTE
+  length, indexing is by byte, and a multi-byte UTF-8 sequence can split —
+  losslessly, but not Unicode-aware. Importing this module also gives every
+  String `a.eq(b)` and `s.show()` through trait impls.
+  """
+  since "0.0.1"
+  status implemented
+}
+
+doc length {
+  summary "The byte length of a string."
+  test "counts bytes, not characters" {
+    assert_eq(length("hello"), 5)
+    assert_eq(length(""), 0)
+    assert_eq(length("héllo"), 6)
+  }
+}
+
+doc is_empty {
+  summary "True when the string has no bytes."
+  test "empty and non-empty" {
+    assert(is_empty(""))
+    assert(!is_empty(" "))
+  }
+}
+
+doc eq {
+  summary "Byte equality of two strings."
+  text """
+  Importing Std.Str also enables `assert_eq` on strings and `a.eq(b)` method
+  syntax via `impl Eq for String`.
+  """
+  test "compares content" {
+    assert(eq("flex", "flex"))
+    assert(!eq("flex", "flexx"))
+  }
+}
+
+doc ne {
+  summary "Byte inequality of two strings."
+  test "negation of eq" {
+    assert(ne("a", "b"))
+  }
+}
+
+doc cmp {
+  summary "Lexicographic byte order: -1, 0, or 1."
+  test "orders bytes" {
+    assert_eq(cmp("a", "b"), -1)
+    assert_eq(cmp("b", "a"), 1)
+    assert_eq(cmp("same", "same"), 0)
+  }
+}
+
+doc byte_at {
+  summary "The byte at an index, as an I64 (panics out of bounds)."
+  test "indexes bytes" {
+    assert_eq(byte_at("A", 0), 65)
+    assert_eq(byte_at("flex", 3), 120)
+  }
+  see substr
+}
+
+doc substr {
+  summary "The byte range [start, start+count) as a string (clamps at the ends)."
+  test "slices and clamps" {
+    assert_eq(substr("hello", 1, 3), "ell")
+    assert_eq(substr("hello", 3, 99), "lo")
+    assert_eq(substr("hello", 99, 1), "")
+  }
+}
+
+doc char_at {
+  summary "The single byte at an index as a one-byte string (\"\" past the end)."
+  test "one byte at a time" {
+    assert_eq(char_at("hello", 1), "e")
+    assert_eq(char_at("hello", 99), "")
+  }
+}
+
+doc split {
+  summary "Split on a separator, keeping empty pieces."
+  text """
+  Adjacent separators yield empty pieces; an empty separator yields the whole
+  string as one piece.
+  """
+  test "splits comma-separated text" {
+    let parts = split("a,bb,,ccc", ",")
+    assert_eq(List.len(parts), 4)
+    assert_eq(parts[0], "a")
+    assert_eq(parts[2], "")
+  }
+  test "empty separator yields the whole string" {
+    let parts = split("abc", "")
+    assert_eq(List.len(parts), 1)
+    assert_eq(parts[0], "abc")
+  }
+}
+
+doc parse_int {
+  summary "Parse a decimal integer; None on bad input OR overflow."
+  text """
+  Accepts an optional leading minus. Returns `None` for empty input, any
+  non-digit, and any value outside I64 — a number is never silently wrapped.
+  """
+  test "parses and rejects honestly" {
+    assert_eq(parse_int("42"), Some(42))
+    assert_eq(parse_int("-42"), Some(-42))
+    assert_eq(parse_int("4x2"), None)
+    assert_eq(parse_int(""), None)
+    assert_eq(parse_int("9223372036854775807"), Some(9223372036854775807))
+    assert_eq(parse_int("9223372036854775808"), None)
+    assert_eq(parse_int("-9223372036854775808"), Some(-9223372036854775808))
+  }
 }

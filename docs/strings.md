@@ -72,8 +72,14 @@ fn main() -> I64 uses { Time, Log } = {
 }
 ```
 
-## Not yet (so you stop looking)
+## Beyond this page
 
-Floats, format strings, string indexing/slicing/split, hex literals, and
-bitwise operators are not in the language yet — the compiler now says so at
-the exact place you try them.
+Much of what this page once listed as missing has shipped: floats and
+hex/bitwise live in [Numbers, Bits, and Function Values](numerics.md), and
+byte-level access — `byte_at`, `substr`, `char_at`, `split`, `parse_int` —
+is in [`Std.Str`](api/Std.Str.md) (generated from the compiler, examples
+executed in CI).
+
+Still missing, and the compiler says so at the exact place you try them:
+format strings, `parse_float` (declare `extern fn atof(s: String) -> F64`),
+byte-to-String construction (`chr`), and string literal patterns.

@@ -1,0 +1,12 @@
+# Diagnostics
+
+*Each page is proven by an `expect_error` example that `flx docs check` compiles and requires to fail with exactly this code. `flx docs explain <CODE>` shows these in the terminal.*
+
+- [DOC001](DOC001.md)
+- [EFFECT001](EFFECT001.md)
+- [MATCH001](MATCH001.md)
+- [NAME001](NAME001.md)
+- [NAME003](NAME003.md)
+- [TYPE008](TYPE008.md)
+- [TYPE019](TYPE019.md)
+- [TYPE025](TYPE025.md)

@@ -84,9 +84,10 @@ _EXPR_START = {
 
 
 class Parser:
-    def __init__(self, tokens: list[Token], file: str = "<input>") -> None:
+    def __init__(self, tokens: list[Token], file: str = "<input>", source: str = "") -> None:
         self.tokens = tokens
         self.file = file
+        self.source = source  # for verbatim doc example/snippet slices
         self.pos = 0
         self._depth = 0
 
@@ -178,6 +179,8 @@ class Parser:
                 item = self._impl_decl()
             elif pub_tok is None and self._at(TokenKind.KW_TARGET):
                 item = self._target_decl()
+            elif pub_tok is None and self._at(TokenKind.KW_DOC):
+                item = self._doc_decl()
             else:
                 tok = self._peek()
                 if pub_tok is not None:
@@ -187,7 +190,7 @@ class Parser:
                         tok.span,
                     )
                 raise self._error(
-                    f"expected a function, test, type, macro, trait, or impl, "
+                    f"expected a function, test, type, macro, trait, impl, or doc, "
                     f"found {self._describe(tok)}",
                     tok.span,
                 )
@@ -320,6 +323,128 @@ class Parser:
             end = self._close_type_angle()
             span = name_tok.span.to(end)
         return ast.TypeExpr(name_tok.text, args, span)
+
+    _DOC_STATUSES = ("implemented", "partial", "not_yet", "deprecated")
+
+    def _doc_decl(self) -> ast.DocDecl:
+        """`doc "Title" { ... }` | `doc symbol.path { ... }` | `doc module { ... }`.
+
+        Docs are declarations, not comments: prose, metadata, runnable examples
+        (nested `test` blocks), expected-diagnostic examples, and unchecked
+        snippets — all parsed and carried in the AST."""
+        start = self._advance().span  # `doc`
+        target: str | None = None
+        title: str | None = None
+        if self._at(TokenKind.STRING):
+            title = self._advance().text
+        elif self._at(TokenKind.KW_MODULE):
+            self._advance()
+            target = "module"
+        else:
+            target = self._dotted_name()
+        self._expect(TokenKind.LBRACE, "'{'")
+        summary: str | None = None
+        slug: str | None = None
+        since: str | None = None
+        status: str | None = None
+        sees: list[str] = []
+        content: list[ast.DocText | ast.DocTest | ast.DocSnippet] = []
+        while not self._at(TokenKind.RBRACE) and not self._at(TokenKind.EOF):
+            tok = self._peek()
+            if tok.kind is TokenKind.KW_TEST:
+                content.append(self._doc_test())
+                continue
+            if tok.kind is not TokenKind.IDENT:
+                raise self._error(
+                    f"expected a doc item (summary, text, slug, since, status, see, "
+                    f"snippet, or a nested test), found {self._describe(tok)}",
+                    tok.span,
+                )
+            kind = tok.text
+            if kind == "summary":
+                self._advance()
+                summary = self._expect(TokenKind.STRING, "a string").text
+            elif kind == "text":
+                self._advance()
+                text_tok = self._expect(TokenKind.STRING, 'a string (use """ blocks for prose)')
+                content.append(ast.DocText(text_tok.text, text_tok.span))
+            elif kind == "slug":
+                self._advance()
+                slug = self._expect(TokenKind.STRING, "a string").text
+            elif kind == "since":
+                self._advance()
+                since = self._expect(TokenKind.STRING, "a version string").text
+            elif kind == "status":
+                self._advance()
+                st = self._expect(TokenKind.IDENT, "a status")
+                if st.text not in self._DOC_STATUSES:
+                    raise self._error(
+                        f"unknown doc status {st.text!r}; one of: {', '.join(self._DOC_STATUSES)}",
+                        st.span,
+                    )
+                status = st.text
+            elif kind == "see":
+                self._advance()
+                sees.append(self._dotted_name())
+            elif kind == "snippet":
+                self._advance()
+                name = self._expect(TokenKind.STRING, "a snippet name").text
+                source, snip_span = self._raw_braced()
+                content.append(ast.DocSnippet(name, source, snip_span))
+            else:
+                raise self._error(
+                    f"expected a doc item (summary, text, slug, since, status, see, "
+                    f"snippet, or a nested test), found {kind!r}",
+                    tok.span,
+                )
+        end = self._expect(TokenKind.RBRACE, "'}'").span
+        return ast.DocDecl(
+            target, title, summary, slug, since, status, sees, content, start.to(end)
+        )
+
+    def _doc_test(self) -> ast.DocTest:
+        start = self._advance().span  # `test`
+        name = self._expect(TokenKind.STRING, "a test name").text
+        expect_error: str | None = None
+        if self._at(TokenKind.IDENT) and self._peek().text == "expect_error":
+            self._advance()
+            expect_error = self._expect(TokenKind.IDENT, "a diagnostic code (e.g. EFFECT001)").text
+        effects = self._uses_clause()
+        if expect_error is not None:
+            # The body is a whole PROGRAM expected to fail with the code:
+            # capture it verbatim and let `flx docs check` compile it.
+            source, span = self._raw_braced()
+            return ast.DocTest(name, None, effects, expect_error, source, start.to(span))
+        open_tok = self._peek()
+        body = self._block()
+        source = self._slice(open_tok.span.end.offset, body.span.end.offset - 1)
+        return ast.DocTest(name, body, effects, None, source, start.to(body.span))
+
+    def _raw_braced(self) -> tuple[str, Span]:
+        """Consume a balanced `{ ... }` region and return its VERBATIM source
+        (dedented) — used where doc content is illustrative or deliberately
+        invalid, so it must not be forced through the expression grammar."""
+        open_tok = self._expect(TokenKind.LBRACE, "'{'")
+        depth = 1
+        while depth > 0:
+            tok = self._peek()
+            if tok.kind is TokenKind.EOF:
+                raise self._error("unterminated doc block", open_tok.span)
+            if tok.kind is TokenKind.LBRACE:
+                depth += 1
+            elif tok.kind is TokenKind.RBRACE:
+                depth -= 1
+                if depth == 0:
+                    break
+            self._advance()
+        close_tok = self._advance()  # the final '}'
+        text = self._slice(open_tok.span.end.offset, close_tok.span.start.offset)
+        return text, open_tok.span.to(close_tok.span)
+
+    def _slice(self, start_offset: int, end_offset: int) -> str:
+        import textwrap
+
+        return textwrap.dedent(self.source[start_offset:end_offset]).strip("\n")
 
     def _uses_clause(self) -> list[str]:
         if not self._eat(TokenKind.KW_USES):
@@ -511,6 +636,28 @@ class Parser:
 
     def _stmt(self) -> ast.Stmt:
         tok = self._peek()
+        if tok.kind is TokenKind.IDENT and self._peek_at(1).kind is TokenKind.LBRACKET:
+            # Catch `xs[i] = v` before it parses as an expression statement and
+            # trips over the `=` with a generic parse error.
+            depth = 0
+            offset = 1
+            while True:
+                kind = self._peek_at(offset).kind
+                if kind is TokenKind.LBRACKET:
+                    depth += 1
+                elif kind is TokenKind.RBRACKET:
+                    depth -= 1
+                    if depth == 0:
+                        break
+                elif kind is TokenKind.EOF:
+                    break
+                offset += 1
+            after = self._peek_at(offset + 1)
+            if after.kind is TokenKind.EQ:
+                raise self._error(
+                    "indexed assignment (`xs[i] = v`) is not supported yet",
+                    after.span,
+                )
         if tok.kind is TokenKind.KW_LET:
             return self._let(mutable=False)
         if tok.kind is TokenKind.KW_MUT:
@@ -675,6 +822,12 @@ class Parser:
                 end = self._advance().span
                 return ast.UnitLit(start.to(end))
             inner = self._expr()
+            if self._at(TokenKind.COMMA):
+                raise self._error(
+                    "Flex has no tuples yet; use a record "
+                    "(`{ first = ..., second = ... }`) or a multi-field ADT variant",
+                    self._peek().span,
+                )
             end = self._expect(TokenKind.RPAREN, "')'").span
             # The span must reach the `)`: postfix `.member`/`(` continue an
             # expression only from its last line, which for a multi-line
@@ -710,6 +863,12 @@ class Parser:
             return self._record_expr()
         if tok.kind is TokenKind.LBRACKET:
             return self._list_expr()
+        if tok.kind is TokenKind.KW_FN:
+            raise self._error(
+                "Flex has no lambdas or closures yet; define a top-level "
+                "`fn` and pass its name (pure functions are values)",
+                tok.span,
+            )
         if tok.kind is TokenKind.KW_TEST and self._peek_at(1).kind is TokenKind.LPAREN:
             # `test(...)` is a call to a target named `test` (a declaration would
             # have a string after the keyword), so the keyword acts as a name.
@@ -834,4 +993,4 @@ class Parser:
 
 
 def parse(source: str, file: str = "<input>") -> ast.Module:
-    return Parser(tokenize(source, file), file).parse_module()
+    return Parser(tokenize(source, file), file, source).parse_module()

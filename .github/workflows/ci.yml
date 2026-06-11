@@ -40,6 +40,12 @@ jobs:
       - name: pytest
         run: uv run pytest
 
+      - name: docs check (every example proven, both backends)
+        run: uv run flx docs check --both
+
+      - name: docs freshness (generated pages current)
+        run: uv run flx docs build --check
+
   docs:
     name: Build docs
     runs-on: ubuntu-latest
@@ -52,5 +58,5 @@ jobs:
       - name: Sync dependencies
         run: uv sync --frozen
 
-      - name: Build mdBook
-        run: uv run mdbook build
+      - name: Build docs (generated pages + mdBook)
+        run: uv run flx docs build
