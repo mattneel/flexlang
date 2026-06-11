@@ -133,6 +133,86 @@ void *__flx_box(long long size) {
     }
     return p;
 }
+// The growable list (List<T>): a header with an i64-slot element array.
+// Elements use the SAME slot codec as ADT payloads — inline scalars by value,
+// everything else a __flx_box address. Lists have reference semantics.
+typedef struct { long long len; long long cap; long long *data; } FlxList;
+void *__flx_list_new(void) {
+    FlxList *l = (FlxList *)__flx_box((long long)sizeof(FlxList));
+    l->len = 0;
+    l->cap = 0;
+    l->data = NULL;
+    return l;
+}
+void __flx_list_push(void *lp, long long v) {
+    FlxList *l = (FlxList *)lp;
+    if (l->len == l->cap) {
+        l->cap = l->cap ? l->cap * 2 : 8;
+        l->data = (long long *)realloc(l->data, (size_t)l->cap * sizeof(long long));
+        if (!l->data) {
+            fflush(stdout);
+            fputs("flx: runtime error: out of memory\\n", stderr);
+            exit(1);
+        }
+    }
+    l->data[l->len++] = v;
+}
+static void __flx_bounds(long long i, long long len) {
+    if (i < 0 || i >= len) {
+        fflush(stdout);
+        fprintf(stderr, "flx: runtime error: index %lld out of bounds (len %lld)\\n", i, len);
+        exit(1);
+    }
+}
+long long __flx_list_get(void *lp, long long i) {
+    FlxList *l = (FlxList *)lp;
+    __flx_bounds(i, l->len);
+    return l->data[i];
+}
+void __flx_list_set(void *lp, long long i, long long v) {
+    FlxList *l = (FlxList *)lp;
+    __flx_bounds(i, l->len);
+    l->data[i] = v;
+}
+long long __flx_list_len(void *lp) {
+    return ((FlxList *)lp)->len;
+}
+// Byte-indexed string primitives (Std.Str): byte_at panics out of bounds,
+// substr clamps. Strings are byte strings; UTF-8 awareness is the roadmap.
+long long __flx_byte_at(const char *p, long long n, long long i) {
+    __flx_bounds(i, n);
+    return (long long)(unsigned char)p[i];
+}
+void __flx_substr(const char *p, long long n, long long start, long long count, FlxStr *out) {
+    if (start < 0) start = 0;
+    if (start > n) start = n;
+    if (count < 0) count = 0;
+    if (count > n - start) count = n - start;
+    char *buf = (char *)__flx_box(count + 1);
+    memcpy(buf, p + start, (size_t)count);
+    buf[count] = 0;
+    out->ptr = buf;
+    out->len = count;
+}
+// Program arguments, captured by the run shim's main(). Env.argv() yields the
+// USER arguments only (argv[0] is the executable path, which differs across
+// backends, so it is deliberately excluded).
+static int g_argc = 0;
+static char **g_argv = NULL;
+void __flx_set_args(int argc, char **argv) {
+    g_argc = argc;
+    g_argv = argv;
+}
+void *__flx_argv(void) {
+    FlxList *l = (FlxList *)__flx_list_new();
+    for (int i = 1; i < g_argc; i++) {
+        FlxStr *s = (FlxStr *)__flx_box((long long)sizeof(FlxStr));
+        s->ptr = g_argv[i];
+        s->len = (long long)strlen(g_argv[i]);
+        __flx_list_push(l, (long long)s);
+    }
+    return l;
+}
 """
 
 # MLIR external declarations matching BASE_RUNTIME_C, prepended to every module.
@@ -148,4 +228,12 @@ BASE_RUNTIME_DECLS = (
     "func.func private @__flx_str_concat(!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr)\n"
     "func.func private @__flx_cstr_wrap(!llvm.ptr, !llvm.ptr)\n"
     "func.func private @__flx_box(i64) -> !llvm.ptr\n"
+    "func.func private @__flx_list_new() -> !llvm.ptr\n"
+    "func.func private @__flx_list_push(!llvm.ptr, i64)\n"
+    "func.func private @__flx_list_get(!llvm.ptr, i64) -> i64\n"
+    "func.func private @__flx_list_set(!llvm.ptr, i64, i64)\n"
+    "func.func private @__flx_list_len(!llvm.ptr) -> i64\n"
+    "func.func private @__flx_byte_at(!llvm.ptr, i64, i64) -> i64\n"
+    "func.func private @__flx_substr(!llvm.ptr, i64, i64, i64, !llvm.ptr)\n"
+    "func.func private @__flx_argv() -> !llvm.ptr\n"
 )

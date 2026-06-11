@@ -62,6 +62,15 @@ class MemberExpr(Expr):
 
 
 @dataclass(frozen=True)
+class IndexExpr(Expr):
+    """`xs[i]` — list element access (panics on an out-of-bounds index)."""
+
+    obj: Expr
+    index: Expr
+    span: Span
+
+
+@dataclass(frozen=True)
 class UnaryExpr(Expr):
     op: str
     operand: Expr
@@ -243,6 +252,7 @@ class LetStmt(Stmt):
     name: str
     value: Expr
     span: Span
+    annotation: TypeExpr | None = None  # `let x: T = ...`
 
 
 @dataclass(frozen=True)
@@ -250,6 +260,7 @@ class MutStmt(Stmt):
     name: str
     value: Expr
     span: Span
+    annotation: TypeExpr | None = None  # `mut x: T = ...`
 
 
 @dataclass(frozen=True)
@@ -268,7 +279,8 @@ class WhileStmt(Stmt):
 
 @dataclass(frozen=True)
 class ForStmt(Stmt):
-    """`for name in iter { body }` — comptime-only for the MVP."""
+    """`for name in iter { body }` — iterates a List at runtime (and comptime
+    fragments during macro expansion)."""
 
     name: str
     iter: Expr

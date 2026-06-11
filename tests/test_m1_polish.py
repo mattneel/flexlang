@@ -184,10 +184,11 @@ def test_hex_literal_diagnostic() -> None:
     assert "hexadecimal and binary literals are not supported" in text
 
 
-def test_indexing_diagnostic() -> None:
-    # Previously `s[0]` silently parsed as two statements and produced wrong values.
+def test_indexing_strings_rejected_with_hint() -> None:
+    # M1 made `s[0]` a parse error (it had silently misparsed); M3 made indexing
+    # real for lists, so a String receiver now gets a typed error with the hint.
     text = _codes_and_text('fn main() -> I64 = { let s = "abc"\n let c = s[0]\n 0 }')
-    assert "indexing" in text and "not supported" in text
+    assert "cannot index" in text and "char_at" in text
 
 
 def test_match_arm_blocks_work(tmp_path: Path) -> None:
@@ -360,7 +361,7 @@ def test_paren_multiline_postfix(tmp_path: Path) -> None:
 
 
 @native
-def test_list_native_message(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
-    path = _write(tmp_path, "fn main() -> I64 = { let xs = [1, 2, 3]\n 0 }\n")
-    assert driver.cmd_run(path, native=True) == 1
-    assert "list literals are not supported in native builds yet" in capfd.readouterr().err
+def test_list_literals_lower_natively(tmp_path: Path) -> None:
+    # M2 gave native list literals a truthful "not yet" error; M3 made them real.
+    path = _write(tmp_path, "fn main() -> I64 = { let xs = [1, 2, 3]\n xs[2] }\n")
+    assert driver.cmd_run(path, native=True) == 3

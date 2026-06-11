@@ -61,9 +61,7 @@ def mlir_type(ty: Type) -> str:
             return "i64"
         return "!llvm.struct<(i32, i64)>"
     if isinstance(ty, ListType):
-        raise BackendError(
-            "list values are not supported in native builds yet (run on the interpreter)"
-        )
+        return "!llvm.ptr"  # a heap header: {i64 len, i64 cap, i64* data}
     raise BackendError(f"type {ty} has no MLIR representation yet")
 
 
@@ -78,8 +76,16 @@ def _is_enum(ty: AdtType) -> bool:
 def _payload_inline(ty: Type) -> bool:
     """Whether a payload of this type lives in the i64 slot by value. Everything
     else (strings, records, non-enum ADTs — recursion included — and any
-    multi-field payload) is boxed on the heap behind the slot."""
-    return ty is I64 or ty is BOOL or ty is UNIT or (isinstance(ty, AdtType) and _is_enum(ty))
+    multi-field payload) is boxed on the heap behind the slot. Lists are already
+    heap pointers, so the slot holds the pointer itself (note: that makes them
+    storable, NOT comparable — the checker still rejects `==` on lists)."""
+    return (
+        ty is I64
+        or ty is BOOL
+        or ty is UNIT
+        or isinstance(ty, ListType)
+        or (isinstance(ty, AdtType) and _is_enum(ty))
+    )
 
 
 def _payload_box_type(payload: tuple[Type, ...]) -> str:
@@ -268,6 +274,9 @@ class FunctionLowerer:
         if isinstance(stmt, ast.WhileStmt):
             self.lower_while(stmt)
             return None
+        if isinstance(stmt, ast.ForStmt):
+            self._lower_for(stmt)
+            return None
         if isinstance(stmt, ast.ReturnStmt):
             if stmt.value is None:
                 self._terminator("func.return")
@@ -332,9 +341,9 @@ class FunctionLowerer:
         if isinstance(expr, ast.TryExpr):
             return self._lower_try(expr)
         if isinstance(expr, ast.ListExpr):
-            raise BackendError(
-                "list literals are not supported in native builds yet (run on the interpreter)"
-            )
+            return self._lower_list(expr)
+        if isinstance(expr, ast.IndexExpr):
+            return self._lower_index(expr)
         raise BackendError(f"cannot lower expression {type(expr).__name__}")
 
     def _const(self, literal: str, mty: str) -> str:
@@ -513,15 +522,23 @@ class FunctionLowerer:
     def _decode_payload_field(self, slot: str, payload: tuple[Type, ...], index: int) -> str:
         """Field `index` of a variant payload, given the i64 slot."""
         if len(payload) == 1:
-            ty = payload[0]
-            if _payload_inline(ty):
-                return self._narrow_from_i64(slot, ty)
-            return self._unbox(slot, mlir_type(ty))
+            return self._decode_elem(slot, payload[0])
         box_mty = _payload_box_type(payload)
         struct = self._unbox(slot, box_mty)
         out = self._fresh()
         self._emit(f"{out} = llvm.extractvalue {struct}[{index}] : {box_mty}")
         return out
+
+    def _encode_elem(self, value: str, ty: Type) -> str:
+        """A value as an i64 slot (list elements share the payload codec)."""
+        if _payload_inline(ty):
+            return self._widen_to_i64(value, ty)
+        return self._box(value, mlir_type(ty))
+
+    def _decode_elem(self, slot: str, ty: Type) -> str:
+        if _payload_inline(ty):
+            return self._narrow_from_i64(slot, ty)
+        return self._unbox(slot, mlir_type(ty))
 
     def _sizeof(self, mty: str) -> str:
         """sizeof(mty) in bytes via the null-GEP idiom (target layout aware)."""
@@ -554,6 +571,10 @@ class FunctionLowerer:
             out = self._fresh()
             self._emit(f"{out} = arith.extui {value} : i1 to i64")
             return out
+        if isinstance(ty, ListType):
+            out = self._fresh()
+            self._emit(f"{out} = llvm.ptrtoint {value} : !llvm.ptr to i64")
+            return out
         assert _payload_inline(ty)
         return value  # I64, Unit (already i64 0), or an enum tag
 
@@ -561,6 +582,10 @@ class FunctionLowerer:
         if ty is BOOL:
             out = self._fresh()
             self._emit(f"{out} = arith.trunci {value} : i64 to i1")
+            return out
+        if isinstance(ty, ListType):
+            out = self._fresh()
+            self._emit(f"{out} = llvm.inttoptr {value} : i64 to !llvm.ptr")
             return out
         assert _payload_inline(ty)
         return value
@@ -662,6 +687,77 @@ class FunctionLowerer:
                 if self._lower_pattern_test(sub, pty, field, fail_lbl):
                     refutable = True
         return refutable
+
+    def _lower_list(self, expr: ast.ListExpr) -> str:
+        ty = self._ty_of(expr)
+        assert isinstance(ty, ListType)
+        lst = self._fresh()
+        self._emit(f"{lst} = func.call @__flx_list_new() : () -> !llvm.ptr")
+        for item in expr.items:
+            value = self._materialize(self.lower_expr(item), item)
+            slot = self._encode_elem(value, ty.elem)
+            self._emit(f"func.call @__flx_list_push({lst}, {slot}) : (!llvm.ptr, i64) -> ()")
+        return lst
+
+    def _lower_index(self, expr: ast.IndexExpr) -> str:
+        obj_ty = self._ty_of(expr.obj)
+        assert isinstance(obj_ty, ListType)
+        lst = self._materialize(self.lower_expr(expr.obj), expr.obj)
+        idx = self._materialize(self.lower_expr(expr.index), expr.index)
+        slot = self._fresh()
+        self._emit(f"{slot} = func.call @__flx_list_get({lst}, {idx}) : (!llvm.ptr, i64) -> i64")
+        return self._decode_elem(slot, obj_ty.elem)
+
+    def _lower_list_op(self, op: str, expr: ast.CallExpr) -> str | None:
+        obj_ty = self._ty_of(expr.args[0])
+        assert isinstance(obj_ty, ListType)
+        lst = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
+        if op == "len":
+            out = self._fresh()
+            self._emit(f"{out} = func.call @__flx_list_len({lst}) : (!llvm.ptr) -> i64")
+            return out
+        if op == "push":
+            value = self._materialize(self.lower_expr(expr.args[1]), expr.args[1])
+            slot = self._encode_elem(value, obj_ty.elem)
+            self._emit(f"func.call @__flx_list_push({lst}, {slot}) : (!llvm.ptr, i64) -> ()")
+            return None
+        assert op == "set"
+        idx = self._materialize(self.lower_expr(expr.args[1]), expr.args[1])
+        value = self._materialize(self.lower_expr(expr.args[2]), expr.args[2])
+        slot = self._encode_elem(value, obj_ty.elem)
+        self._emit(f"func.call @__flx_list_set({lst}, {idx}, {slot}) : (!llvm.ptr, i64, i64) -> ()")
+        return None
+
+    def _lower_for(self, stmt: ast.ForStmt) -> None:
+        iter_ty = self._ty_of(stmt.iter)
+        assert isinstance(iter_ty, ListType)
+        lst = self._materialize(self.lower_expr(stmt.iter), stmt.iter)
+        n = self._fresh()
+        self._emit(f"{n} = func.call @__flx_list_len({lst}) : (!llvm.ptr) -> i64")
+        islot = self._alloc_slot("i64")
+        self._store_slot(islot, "i64", self._const("0", "i64"))
+        cond_lbl, body_lbl, exit_lbl = self._label(), self._label(), self._label()
+        self._terminator(f"cf.br {cond_lbl}")
+        self._start_block(cond_lbl)
+        i = self._load_slot(islot, "i64")
+        cmp = self._fresh()
+        self._emit(f"{cmp} = arith.cmpi slt, {i}, {n} : i64")
+        self._terminator(f"cf.cond_br {cmp}, {body_lbl}, {exit_lbl}")
+        self._start_block(body_lbl)
+        cur = self._load_slot(islot, "i64")
+        slot = self._fresh()
+        self._emit(f"{slot} = func.call @__flx_list_get({lst}, {cur}) : (!llvm.ptr, i64) -> i64")
+        elem = self._decode_elem(slot, iter_ty.elem)
+        self.scopes.append({})
+        self._define(stmt.name, _Binding("val", elem, mlir_type(iter_ty.elem)))
+        self.lower_block(stmt.body)
+        self.scopes.pop()
+        one = self._const("1", "i64")
+        nxt = self._fresh()
+        self._emit(f"{nxt} = arith.addi {cur}, {one} : i64")
+        self._store_slot(islot, "i64", nxt)
+        self._terminator(f"cf.br {cond_lbl}")
+        self._start_block(exit_lbl)
 
     def _lower_try(self, expr: ast.TryExpr) -> str:
         result_adt = self._ty_of(expr.expr)
@@ -805,6 +901,32 @@ class FunctionLowerer:
                 if obj.name == "Time" and method == "monotonic_ms":
                     out = self._fresh()
                     self._emit(f"{out} = func.call @__flx_monotonic_ms() : () -> i64")
+                    return out
+                if obj.name == "List":
+                    return self._lower_list_op(method, expr)
+                if obj.name == "Str" and method == "byte_at":
+                    s = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
+                    ptr, length = self._string_parts(s)
+                    idx = self._materialize(self.lower_expr(expr.args[1]), expr.args[1])
+                    out = self._fresh()
+                    self._emit(
+                        f"{out} = func.call @__flx_byte_at({ptr}, {length}, {idx}) : "
+                        "(!llvm.ptr, i64, i64) -> i64"
+                    )
+                    return out
+                if obj.name == "Str" and method == "substr":
+                    s = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
+                    ptr, length = self._string_parts(s)
+                    start = self._materialize(self.lower_expr(expr.args[1]), expr.args[1])
+                    count = self._materialize(self.lower_expr(expr.args[2]), expr.args[2])
+                    return self._str_runtime(
+                        "__flx_substr",
+                        ["!llvm.ptr", "i64", "i64", "i64"],
+                        [ptr, length, start, count],
+                    )
+                if obj.name == "Env" and method == "argv":
+                    out = self._fresh()
+                    self._emit(f"{out} = func.call @__flx_argv() : () -> !llvm.ptr")
                     return out
             return None
         if not isinstance(expr.callee, ast.NameExpr):

@@ -32,8 +32,9 @@ an effect-free function is EFFECT001, exactly like any other call.
 | Module | What | Effects |
 |---|---|---|
 | `Std.Math` | `abs`, `min`, `max`, `clamp`, `sign`, `pow` (64-bit wrapping integer math) | pure |
-| `Std.Str` | `length` (bytes), `is_empty`, `eq`, `ne`, `cmp`, plus `impl Eq for String` and `impl Show for String` | pure |
+| `Std.Str` | `length` (bytes), `is_empty`, `eq`, `ne`, `cmp`, `byte_at`, `substr`, `char_at`, `split`, `parse_int`, plus `impl Eq for String` and `impl Show for String` | pure |
 | `Std.IO` | `print` (no newline), `println`, `read_line` (one stdin line; `""` at EOF) | `Log` / `Fs` |
+| `Std.List` | `range(a, b)` — the built-in list ops (`List.push`/`len`/`set`, `xs[i]`, `for-in`) need no import | pure |
 | `Std.Env` | `get_or(name, default)`, `has(name)` | `Process` |
 | `Std.Time` | `unix_time()`, `monotonic_ms()` (for measuring durations) | `Time` |
 | `Std.Proc` | `pid()` | `Process` |

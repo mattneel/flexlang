@@ -1,0 +1,40 @@
+// The data layer: growable lists, for-in, byte-level strings, argv.
+//   flx run examples/lists.flx 12 7 not-a-number 23
+module Main
+
+import Std.IO
+import Std.List
+import Std.Str
+
+// Sum every argument that parses as an integer; report the rest.
+fn main() -> I64 uses { Process, Log } = {
+  mut good: List<I64> = []
+  mut bad: List<String> = []
+  for a in Env.argv() {
+    match parse_int(a) {
+      Some(n) => List.push(good, n)
+      None => List.push(bad, a)
+    }
+  }
+  mut total = 0
+  for n in good { total = total + n }
+  println("sum " ++ to_str(total) ++ " of " ++ to_str(List.len(good)) ++ " numbers")
+  for b in bad { println("ignored: " ++ b) }
+  total
+}
+
+test "split and rejoin" {
+  let parts = split("1,22,333", ",")
+  assert_eq(List.len(parts), 3)
+  assert_eq(length(parts[1]), 2)
+  match parse_int(parts[2]) {
+    Some(n) => assert_eq(n, 333)
+    None => fail("333 must parse")
+  }
+}
+
+test "range sums" {
+  mut total = 0
+  for i in range(1, 11) { total = total + i }
+  assert_eq(total, 55)
+}

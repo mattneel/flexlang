@@ -91,7 +91,7 @@ def test_polymorphic_recursion_clean_diagnostic() -> None:
         "fn use_bad(b: Bad<I64>) -> I64 = { 0 }\n"
         "fn main() -> I64 = { 0 }\n"
     )
-    assert any(d.code == "TYPE023" for d in diags)
+    assert any(d.code == "TYPE024" for d in diags)
 
 
 # --- literal pattern ranges ----------------------------------------------------------
@@ -235,7 +235,7 @@ def test_recursion_through_record_and_adt(tmp_path: Path) -> None:
 
 def test_directly_recursive_record_rejected() -> None:
     diags = _diag("type R = { next: R }\nfn main() -> I64 = { 0 }\n")
-    assert any(d.code == "TYPE023" and "infinite size" in d.message for d in diags)
+    assert any(d.code == "TYPE024" and "infinite size" in d.message for d in diags)
 
 
 def test_payload_arity_validated_at_declaration() -> None:

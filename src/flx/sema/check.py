@@ -127,6 +127,11 @@ _INTRINSICS: dict[tuple[str, str], tuple[str, tuple[Type, ...], Type]] = {
     ("Log", "print"): ("Log", (STRING,), UNIT),  # no trailing newline
     ("Fs", "read_line"): ("Fs", (), STRING),  # one line from stdin, "" at EOF
     ("Time", "monotonic_ms"): ("Time", (), I64),
+    # Strings are byte strings: byte_at/substr index BYTES (UTF-8 sequences can
+    # split; surrogateescape keeps the bytes lossless). Pure ("" = no effect).
+    ("Str", "byte_at"): ("", (STRING, I64), I64),  # panics out of bounds
+    ("Str", "substr"): ("", (STRING, I64, I64), STRING),  # clamps to the string
+    ("Env", "argv"): ("Process", (), ListType(STRING)),  # user args, no argv[0]
 }
 
 
@@ -316,7 +321,7 @@ class Checker:
         for record in user_records:
             if _on_record_cycle(self.record_types[record.name]):
                 self._err(
-                    "TYPE023",
+                    "TYPE024",
                     f"record {record.name!r} contains itself (directly or through "
                     "other records), so it would have infinite size",
                     record.span,
@@ -882,11 +887,15 @@ class Checker:
     def _check_stmt(
         self, stmt: ast.Stmt, expected: Type | None = None, value_used: bool = True
     ) -> Type:
-        if isinstance(stmt, ast.LetStmt):
-            self.scope.define(stmt.name, _Binding(self._check_expr(stmt.value), mutable=False))
-            return UNIT
-        if isinstance(stmt, ast.MutStmt):
-            self.scope.define(stmt.name, _Binding(self._check_expr(stmt.value), mutable=True))
+        if isinstance(stmt, (ast.LetStmt, ast.MutStmt)):
+            annotated: Type | None = None
+            if stmt.annotation is not None:
+                annotated = self._resolve_type(stmt.annotation)
+            value_ty = self._check_expr(stmt.value, annotated)
+            if annotated is not None:
+                self._expect(annotated, value_ty, stmt.value.span, "bound value")
+                value_ty = annotated  # the annotation wins (e.g. `[]` stays typed)
+            self.scope.define(stmt.name, _Binding(value_ty, mutable=isinstance(stmt, ast.MutStmt)))
             return UNIT
         if isinstance(stmt, ast.AssignStmt):
             self._check_assign(stmt)
@@ -896,7 +905,16 @@ class Checker:
             self._check_block(stmt.body, None, False)
             return UNIT
         if isinstance(stmt, ast.ForStmt):
-            self._err("TYPE021", "`for` is only supported inside comptime for now", stmt.span)
+            iter_ty = self._check_expr(stmt.iter)
+            elem: Type = ERROR
+            if isinstance(iter_ty, ListType):
+                elem = iter_ty.elem
+            elif iter_ty is not ERROR:
+                self._err("TYPE021", f"`for` iterates a List, found {iter_ty}", stmt.iter.span)
+            self.scope.push()
+            self.scope.define(stmt.name, _Binding(elem, mutable=False))
+            self._check_block(stmt.body, None, False)
+            self.scope.pop()
             return UNIT
         if isinstance(stmt, ast.ReturnStmt):
             actual = (
@@ -969,12 +987,25 @@ class Checker:
             return UNIT
         if isinstance(expr, ast.ListExpr):
             return self._infer_list(expr, expected)
+        if isinstance(expr, ast.IndexExpr):
+            return self._infer_index(expr)
         if isinstance(expr, ast.MemberExpr):
             return self._infer_member(expr)
         if isinstance(expr, ast.MatchExpr):
             return self._infer_match(expr, expected, value_used)
         if isinstance(expr, ast.TryExpr):
             return self._infer_try(expr)
+        return ERROR
+
+    def _infer_index(self, expr: ast.IndexExpr) -> Type:
+        obj = self._check_expr(expr.obj)
+        index = self._check_expr(expr.index)
+        self._expect(I64, index, expr.index.span, "index")
+        if isinstance(obj, ListType):
+            return obj.elem
+        if obj is not ERROR:
+            help_text = "import Std.Str and use char_at/byte_at/substr" if obj is STRING else None
+            self._err("TYPE017", f"cannot index a value of type {obj}", expr.span, help=help_text)
         return ERROR
 
     def _infer_list(self, expr: ast.ListExpr, expected: Type | None) -> Type:
@@ -1204,7 +1235,9 @@ class Checker:
                     )
                 self._require_effects({"Fs"}, expr.span)
                 return self._target_result(expr.span)
-            if callee.obj.name in _EFFECT_MODULES:
+            if callee.obj.name == "List" and not self.scope.lookup("List"):
+                return self._infer_list_op(callee.name, expr)
+            if callee.obj.name in _EFFECT_MODULES or callee.obj.name in ("Str", "Env"):
                 return self._infer_intrinsic(callee.obj.name, callee.name, expr)
             if callee.obj.name in self.adt_templates and callee.name in self.ctors:
                 # Qualified constructor with payload, e.g. E.Code(x).
@@ -1235,8 +1268,52 @@ class Checker:
             self._expect(expected, self._check_expr(arg), arg.span, "argument")
         for extra in call.args[len(params) :]:
             self._check_expr(extra)
-        self._require_effects({effect}, call.span)
+        if effect:
+            self._require_effects({effect}, call.span)
         return ret
+
+    def _infer_list_op(self, op: str, call: ast.CallExpr) -> Type:
+        """The built-in growable-list operations, generic over the element type
+        (so typed here, not in the monomorphic intrinsics table). Lists have
+        reference semantics; mutating one needs no effect, like `mut`."""
+        arity = {"len": 1, "push": 2, "set": 3}.get(op)
+        if arity is None:
+            for arg in call.args:
+                self._check_expr(arg)
+            self._err(
+                "TYPE010",
+                f"unknown operation List.{op}",
+                call.span,
+                help="the list operations are List.len, List.push, and List.set",
+            )
+            return ERROR
+        if len(call.args) != arity:
+            for arg in call.args:
+                self._check_expr(arg)
+            self._err("TYPE005", f"List.{op} expects {arity} argument(s)", call.span)
+            return ERROR
+        obj = self._check_expr(call.args[0])
+        if not isinstance(obj, ListType):
+            if obj is not ERROR:
+                self._err(
+                    "TYPE003",
+                    f"List.{op} operates on a List, found {obj}",
+                    call.args[0].span,
+                )
+            for arg in call.args[1:]:
+                self._check_expr(arg)
+            return ERROR
+        if op == "len":
+            return I64
+        if op == "push":
+            value = self._check_expr(call.args[1], obj.elem)
+            self._expect(obj.elem, value, call.args[1].span, "pushed value")
+            return UNIT
+        index = self._check_expr(call.args[1])
+        self._expect(I64, index, call.args[1].span, "index")
+        value = self._check_expr(call.args[2], obj.elem)
+        self._expect(obj.elem, value, call.args[2].span, "assigned element")
+        return UNIT
 
     def _require_effects(self, effects: set[str], span: Span) -> None:
         site = "target" if self.in_target else ("test" if self.in_test else "function")
@@ -1632,7 +1709,7 @@ class Checker:
             raise FlexError(
                 [
                     Diagnostic(
-                        "TYPE023",
+                        "TYPE024",
                         f"instantiating type {adt_name!r} does not converge "
                         "(polymorphic recursion is not supported)",
                         span,

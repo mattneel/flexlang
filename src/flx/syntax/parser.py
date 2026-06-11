@@ -422,32 +422,40 @@ class Parser:
         return ast.Block([ast.ExprStmt(expr, expr.span)], expr.span)
 
     def _record_ahead(self) -> bool:
-        """At a `{`, whether it begins a record literal rather than a block."""
-        nxt = self._peek_at(1)
-        if nxt.kind is TokenKind.RBRACE:
-            return True
-        if nxt.kind is TokenKind.IDENT and self._peek_at(2).kind in (
-            TokenKind.EQ,
-            TokenKind.KW_WITH,
-        ):
-            return True
-        # A record update whose base is not a bare identifier (`{ mk(n) with .. }`,
-        # `{ p.origin with .. }`): `with` is only ever valid directly inside the
-        # braces of a record update, so scan ahead for one at this brace depth.
+        """At a `{`, whether it begins a record literal rather than a block.
+
+        Scan to the matching `}` for a decisive signal at nesting depth 0:
+        a comma (field separator) or `with` (record update) means a record; a
+        statement keyword means a block. A lone `{ x = e }` is genuinely
+        ambiguous (one-field record vs one-assignment block) and reads as a
+        BLOCK — wrap a one-field record in parens (`({ x = e })`) to force it."""
+        if self._peek_at(1).kind is TokenKind.RBRACE:
+            return True  # `{}` is the empty record
         depth = 0
         offset = 1
         while True:
             kind = self._peek_at(offset).kind
             if kind is TokenKind.EOF:
                 return False
-            if kind is TokenKind.LBRACE:
+            if kind in (TokenKind.LBRACE, TokenKind.LPAREN, TokenKind.LBRACKET):
                 depth += 1
+            elif kind in (TokenKind.RPAREN, TokenKind.RBRACKET):
+                depth -= 1
             elif kind is TokenKind.RBRACE:
                 if depth == 0:
-                    return False
+                    return False  # closed without a record signal: a block
                 depth -= 1
-            elif kind is TokenKind.KW_WITH and depth == 0:
-                return True
+            elif depth == 0:
+                if kind in (TokenKind.COMMA, TokenKind.KW_WITH):
+                    return True
+                if kind in (
+                    TokenKind.KW_LET,
+                    TokenKind.KW_MUT,
+                    TokenKind.KW_WHILE,
+                    TokenKind.KW_FOR,
+                    TokenKind.KW_RETURN,
+                ):
+                    return False  # statement keywords never occur in a record literal
             offset += 1
 
     def _block(self) -> ast.Block:
@@ -482,12 +490,15 @@ class Parser:
     def _let(self, *, mutable: bool) -> ast.Stmt:
         start = self._advance().span  # `let` / `mut`
         name = self._expect(TokenKind.IDENT, "a binding name").text
+        annotation: ast.TypeExpr | None = None
+        if self._eat(TokenKind.COLON):
+            annotation = self._type()
         self._expect(TokenKind.EQ, "'='")
         value = self._expr()
         span = start.to(value.span)
         if mutable:
-            return ast.MutStmt(name, value, span)
-        return ast.LetStmt(name, value, span)
+            return ast.MutStmt(name, value, span, annotation)
+        return ast.LetStmt(name, value, span, annotation)
 
     def _while(self) -> ast.Stmt:
         start = self._advance().span  # `while`
@@ -551,7 +562,11 @@ class Parser:
                 lhs = ast.MemberExpr(lhs, name_tok.text, lhs.span.to(name_tok.span))
                 continue
             if kind is TokenKind.LBRACKET and min_bp < _POSTFIX_BP and same_line:
-                raise self._error("indexing (`value[i]`) is not supported yet", tok.span)
+                self._advance()
+                index = self._expr()
+                end = self._expect(TokenKind.RBRACKET, "']'").span
+                lhs = ast.IndexExpr(lhs, index, lhs.span.to(end))
+                continue
             if kind is TokenKind.QUESTION and min_bp < _POSTFIX_BP:
                 self._advance()
                 lhs = ast.TryExpr(lhs, lhs.span.to(tok.span))

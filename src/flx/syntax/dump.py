@@ -118,6 +118,8 @@ def _expr(expr: ast.Expr) -> str:
         return expr.name
     if isinstance(expr, ast.MemberExpr):
         return f"{_expr(expr.obj)}.{expr.name}"
+    if isinstance(expr, ast.IndexExpr):
+        return f"{_expr(expr.obj)}[{_expr(expr.index)}]"
     if isinstance(expr, ast.UnaryExpr):
         return f"({expr.op} {_expr(expr.operand)})"
     if isinstance(expr, ast.BinaryExpr):

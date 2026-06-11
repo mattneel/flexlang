@@ -213,10 +213,21 @@ def cmd_check(path: str | None = None) -> int:
 
 
 def _run_shim(main_ret: Type) -> str:
+    # The shim main captures argc/argv for Env.argv before entering Flex.
     if main_ret is UNIT:
-        main = "extern void flx_main(void);\nint main(void){ flx_main(); return 0; }\n"
+        main = (
+            "extern void flx_main(void);\n"
+            "void __flx_set_args(int, char **);\n"
+            "int main(int argc, char **argv){ __flx_set_args(argc, argv); "
+            "flx_main(); return 0; }\n"
+        )
     elif main_ret is I64:
-        main = "extern long long flx_main(void);\nint main(void){ return (int)flx_main(); }\n"
+        main = (
+            "extern long long flx_main(void);\n"
+            "void __flx_set_args(int, char **);\n"
+            "int main(int argc, char **argv){ __flx_set_args(argc, argv); "
+            "return (int)flx_main(); }\n"
+        )
     else:
         raise FlexError([Diagnostic("RUN002", "main must return I64 or Unit")])
     return BASE_RUNTIME_C + main
@@ -244,9 +255,11 @@ def cmd_run(
     interpret: bool = False,
     native: bool = False,
     announce: bool = True,
+    args: tuple[str, ...] = (),
 ) -> int:
     """Run a program. `announce` controls the `flx: exited with code N` stderr
-    line — a CLI affordance that in-process callers (build targets) suppress."""
+    line — a CLI affordance that in-process callers (build targets) suppress.
+    `args` are the program's own arguments, surfaced through Env.argv."""
     resolved = _resolve_entry(path)
     if resolved is None:
         return 1
@@ -269,7 +282,7 @@ def cmd_run(
         return 1
     if not choice:
         try:
-            code = interp.run_main(result)
+            code = interp.run_main(result, args)
         except interp.FlexRuntimeError as exc:
             sys.stdout.flush()  # emit buffered output before the error (match native)
             print(f"flx: runtime error: {exc}", file=sys.stderr)
@@ -287,7 +300,7 @@ def cmd_run(
         shim = _run_shim(main.ret)
         with tempfile.TemporaryDirectory() as tmp:
             exe = build_executable(mlir_text, shim, Path(tmp) / "program", Path(tmp))
-            code = run_executable(exe)
+            code = run_executable(exe, args)
             if announce:
                 print(f"flx: exited with code {code}", file=sys.stderr)
             return code

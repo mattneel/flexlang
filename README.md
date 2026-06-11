@@ -159,19 +159,23 @@ ok Main / add works
   ABI; works on both backends — the interpreter calls libc via `ctypes`, so
   even `uvx … flx run` can call C with no toolchain
   ([FFI — Calling C](https://mattneel.github.io/flexlang/ffi.html));
+- **lists** — `List<T>` on both backends: `[1, 2, 3]` literals, `xs[i]`
+  indexing (bounds-checked), `List.push`/`len`/`set`, `for x in xs { … }`,
+  elements of any type, `let xs: List<I64> = []` annotations, and `Env.argv()`
+  for program arguments
+  ([Lists and Iteration](https://mattneel.github.io/flexlang/lists.html));
 - **standard library** — written in Flex, shipped in the package, importable
-  everywhere (`import Std.Math`): `Std.Math`/`Str`/`Env`/`Time`/`Proc`, with
-  string equality via `impl Eq for String`
+  everywhere (`import Std.Math`): `Std.Math`/`Str`/`Env`/`Time`/`Proc`/`List`,
+  with string equality via `impl Eq for String` and byte-level string tools
+  (`char_at`/`substr`/`split`/`parse_int`)
   ([Standard Library](https://mattneel.github.io/flexlang/std.html)).
 
 ### Prototype / partial
 
 - **regions** — `region name { … }` parses and checks, but lifetime/escape
   analysis is shallow (scalars copy out, so nothing dangles yet); boxed ADT
-  payloads are heap-allocated and reclaimed at process exit (region-based
-  reclamation is the roadmap);
-- **lists** — `List<T>` literals run on the interpreter (manifests need them);
-  no native lowering yet.
+  payloads and lists are heap-allocated and reclaimed at process exit
+  (region-based reclamation is the roadmap).
 
 ### Planned
 

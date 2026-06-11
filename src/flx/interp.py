@@ -164,8 +164,14 @@ def _read_line() -> str:
 
 
 class Interpreter:
-    def __init__(self, checked: CheckResult, max_steps: int | None = None) -> None:
+    def __init__(
+        self,
+        checked: CheckResult,
+        max_steps: int | None = None,
+        args: tuple[str, ...] = (),
+    ) -> None:
         self.checked = checked
+        self.args = args  # program arguments for Env.argv (user args, no argv[0])
         self.functions = {fn.name: fn for fn in checked.module.functions}
         self.constructors = checked.constructors
         self.method_targets = checked.method_targets
@@ -269,6 +275,14 @@ class Interpreter:
             while self.eval(stmt.cond, env):
                 self.exec_block(stmt.body, env)
             return None
+        if isinstance(stmt, ast.ForStmt):
+            xs = self.eval(stmt.iter, env)
+            assert isinstance(xs, list)
+            for item in xs:
+                child = _Env(env)
+                child.define(stmt.name, item)
+                self.exec_block(stmt.body, child)
+            return None
         if isinstance(stmt, ast.ReturnStmt):
             raise _Return(self.eval(stmt.value, env) if stmt.value is not None else None)
         raise FlexRuntimeError(f"cannot interpret statement {type(stmt).__name__}")
@@ -319,6 +333,13 @@ class Interpreter:
             return None
         if isinstance(expr, ast.ListExpr):
             return [self.eval(item, env) for item in expr.items]
+        if isinstance(expr, ast.IndexExpr):
+            xs = self.eval(expr.obj, env)
+            i = self.eval(expr.index, env)
+            assert isinstance(xs, list) and isinstance(i, int)
+            if not 0 <= i < len(xs):
+                raise FlexRuntimeError(f"index {i} out of bounds (len {len(xs)})")
+            return xs[i]
         if isinstance(expr, ast.RecordExpr):
             return {f.name: self.eval(f.value, env) for f in expr.fields}
         if isinstance(expr, ast.RecordUpdateExpr):
@@ -480,6 +501,12 @@ class Interpreter:
                 import time as _time
 
                 return _wrap(_time.monotonic_ns() // 1_000_000)
+            if isinstance(obj, ast.NameExpr) and obj.name == "List" and not env.has("List"):
+                return self._list_op(callee.name, expr, env)
+            if isinstance(obj, ast.NameExpr) and obj.name == "Str":
+                return self._str_op(callee.name, expr, env)
+            if isinstance(obj, ast.NameExpr) and obj.name == "Env" and callee.name == "argv":
+                return list(self.args)
             if callee.name in self.constructors:  # qualified ctor, e.g. E.Code(x)
                 return Variant(callee.name, self._ctor_payload(expr.args, env))
             raise FlexRuntimeError(f"cannot interpret call to .{callee.name}")
@@ -498,6 +525,42 @@ class Interpreter:
         if func is None:
             raise FlexRuntimeError(f"call to unknown function {name!r}")
         return self.call(func, [self.eval(a, env) for a in expr.args])
+
+    def _list_op(self, op: str, expr: ast.CallExpr, env: _Env) -> object:
+        xs = self.eval(expr.args[0], env)
+        assert isinstance(xs, list)
+        if op == "len":
+            return len(xs)
+        if op == "push":
+            xs.append(self.eval(expr.args[1], env))
+            return None
+        if op == "set":
+            i = self.eval(expr.args[1], env)
+            assert isinstance(i, int)
+            if not 0 <= i < len(xs):
+                raise FlexRuntimeError(f"index {i} out of bounds (len {len(xs)})")
+            xs[i] = self.eval(expr.args[2], env)
+            return None
+        raise FlexRuntimeError(f"cannot interpret List.{op}")
+
+    def _str_op(self, op: str, expr: ast.CallExpr, env: _Env) -> object:
+        # BYTE semantics, matching the native runtime exactly: index the UTF-8
+        # bytes (surrogateescape keeps split sequences lossless).
+        data = str(self.eval(expr.args[0], env)).encode("utf-8", "surrogateescape")
+        if op == "byte_at":
+            i = self.eval(expr.args[1], env)
+            assert isinstance(i, int)
+            if not 0 <= i < len(data):
+                raise FlexRuntimeError(f"index {i} out of bounds (len {len(data)})")
+            return data[i]
+        if op == "substr":
+            start = self.eval(expr.args[1], env)
+            count = self.eval(expr.args[2], env)
+            assert isinstance(start, int) and isinstance(count, int)
+            start = min(max(start, 0), len(data))
+            end = min(start + max(count, 0), len(data))
+            return data[start:end].decode("utf-8", "surrogateescape")
+        raise FlexRuntimeError(f"cannot interpret Str.{op}")
 
     def _call_extern(self, name: str, args: list[object]) -> object:
         param_kinds, ret_kind = self.checked.extern_abi[name]
@@ -601,10 +664,10 @@ def _ensure_recursion_headroom() -> None:
         sys.setrecursionlimit(20_000)
 
 
-def run_main(checked: CheckResult) -> int:
+def run_main(checked: CheckResult, args: tuple[str, ...] = ()) -> int:
     _ensure_recursion_headroom()
     try:
-        return Interpreter(checked).run_main()
+        return Interpreter(checked, args=args).run_main()
     except RecursionError:
         # Deep non-call nesting can blow Python's stack before our own call-depth
         # guard fires; surface it as the same clean runtime error either way.

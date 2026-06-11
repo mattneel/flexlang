@@ -78,7 +78,9 @@ def generate_harness(tests: list[tuple[int, str]]) -> str:
     for i, _ in tests:
         lines.append(f"extern int __flx_test_{i}(void);")
     lines.append("")
-    lines.append("int main(void) {")
+    lines.append("void __flx_set_args(int, char **);")
+    lines.append("int main(int argc, char **argv) {")
+    lines.append("    __flx_set_args(argc, argv);")
     lines.append(f'    printf("running {n} test{plural}\\n\\n");')
     lines.append("    int passed = 0, failed = 0;")
     for i, full_label in tests:

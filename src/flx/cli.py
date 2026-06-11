@@ -63,6 +63,11 @@ def _build_parser() -> argparse.ArgumentParser:
                 help="compile and run through the native LLVM backend (needs MLIR/LLVM 22)",
             )
             cmd.add_argument(
+                "args",
+                nargs=argparse.REMAINDER,
+                help="arguments for the program (Env.argv); put flx flags before the file",
+            )
+            cmd.add_argument(
                 "--interpret",
                 action="store_true",
                 help="force the pure-Python interpreter (the default backend)",
@@ -149,7 +154,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return driver.cmd_emit_mlir(args.path)
     if args.command == "run":
         # The CLI is interpreter-first: default to the interpreter unless --native.
-        return driver.cmd_run(args.path, interpret=not args.native, native=args.native)
+        prog_args = list(getattr(args, "args", []) or [])
+        if prog_args and prog_args[0] == "--":
+            prog_args = prog_args[1:]  # `flx run f.flx -- --flag` passes --flag through
+        return driver.cmd_run(
+            args.path,
+            interpret=not args.native,
+            native=args.native,
+            args=tuple(prog_args),
+        )
     if args.command == "build":
         # An explicit .flx file (or path) compiles a native executable. A bare
         # word is a target name in ./build.flx: `flx build [target] [--explain]`,
