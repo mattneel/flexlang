@@ -219,6 +219,20 @@ def test_manifest_may_not_declare_targets(tmp_path: Path) -> None:
     assert exc.value.diagnostics[0].code == "PKG006"
 
 
+def test_manifest_may_not_declare_externs(tmp_path: Path) -> None:
+    # Extern purity is author-asserted trust, which manifests must not require.
+    src = (
+        "module Package\n"
+        "extern fn getpid() -> I64\n"
+        "fn manifest() -> Manifest = "
+        '{ { name = "x", version = "0", entry = "m.flx", dependencies = [] } }\n'
+    )
+    _write(tmp_path, {"package.flx": src})
+    with pytest.raises(FlexError) as exc:
+        load_manifest(tmp_path / "package.flx")
+    assert exc.value.diagnostics[0].code == "PKG007"
+
+
 def test_non_utf8_manifest_is_clean(tmp_path: Path) -> None:
     (tmp_path / "package.flx").write_bytes(b"\xff\xfe garbage")
     with pytest.raises(FlexError) as exc:

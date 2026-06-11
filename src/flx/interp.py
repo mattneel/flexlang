@@ -391,8 +391,15 @@ class Interpreter:
         if isinstance(callee, ast.MemberExpr):
             obj = callee.obj
             if isinstance(obj, ast.NameExpr) and obj.name == "Log":
-                message = self.eval(expr.args[0], env)
-                print(message)  # flx_log writes the message + a newline to stdout
+                message = str(self.eval(expr.args[0], env))
+                try:
+                    print(message)  # flx_log writes the message + a newline
+                except UnicodeEncodeError:
+                    # Bytes that came from C via surrogateescape: write them raw,
+                    # exactly as native flx_log would.
+                    sys.stdout.flush()
+                    sys.stdout.buffer.write(message.encode("utf-8", "surrogateescape") + b"\n")
+                    sys.stdout.buffer.flush()
                 return None
             if callee.name in self.constructors:  # qualified ctor, e.g. E.Code(x)
                 payload = self.eval(expr.args[0], env) if expr.args else None
@@ -438,7 +445,9 @@ class Interpreter:
         cargs: list[object] = []
         for v, p in zip(args, fn_ty.params, strict=True):
             if p is STRING:
-                cargs.append(str(v).encode("utf-8"))
+                # surrogateescape round-trips arbitrary bytes that earlier came
+                # back from C, so what we hand to C is byte-identical to native.
+                cargs.append(str(v).encode("utf-8", "surrogateescape"))
             else:  # I64 (the checker admits nothing else)
                 assert isinstance(v, int)
                 cargs.append(_wrap(v))
@@ -453,8 +462,10 @@ class Interpreter:
         finally:
             _fflush_libc()
         if fn_ty.ret is STRING:
-            # A NULL char* comes back as the empty string (no null pointers in Flex).
-            return result.decode("utf-8", "replace") if result is not None else ""
+            # A NULL char* comes back as the empty string (no null pointers in
+            # Flex); non-UTF-8 bytes are preserved losslessly via surrogateescape
+            # so length and round-trips match the native backend byte-for-byte.
+            return result.decode("utf-8", "surrogateescape") if result is not None else ""
         if fn_ty.ret is UNIT:
             return None
         assert isinstance(result, int)

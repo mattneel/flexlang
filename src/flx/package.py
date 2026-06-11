@@ -96,6 +96,15 @@ def load_manifest(manifest_path: Path) -> PackageManifest:
             f"{manifest_path} declares build targets",
             help="a manifest is pure data; put targets in build.flx",
         )
+    if module.externs:
+        # An extern's purity is author-asserted, which is exactly the trust a
+        # manifest must not require: manifests stay FFI-free so "reading a
+        # manifest runs no foreign code" holds unconditionally.
+        raise _err(
+            "PKG007",
+            f"{manifest_path} declares extern fns",
+            help="a manifest is pure data; call C from the program or build.flx",
+        )
     result = check_and_monomorphize(module, builtin_records=BUILTIN_RECORDS)
 
     fn = result.module.functions and {f.name: f for f in result.module.functions}.get("manifest")

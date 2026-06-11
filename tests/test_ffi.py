@@ -83,6 +83,36 @@ def test_extern_arity_checked() -> None:
     assert "TYPE005" in _codes(src)
 
 
+def test_bare_function_reference_rejected() -> None:
+    # No first-class function values: an alias would also sidestep effect checks.
+    src = (
+        "extern fn puts(s: String) -> I64 uses { Process }\n"
+        'fn main() -> I64 = { let f = puts\n let r = f("hi")\n 0 }\n'
+    )
+    assert "NAME003" in _codes(src)
+    assert "NAME003" in _codes(
+        "fn helper() -> I64 = { 41 }\nfn main() -> I64 = { let g = helper\n g() }\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "decl",
+    [
+        "extern fn flx_log(s: String) -> I64",  # runtime namespace
+        "extern fn __secret() -> I64",
+        "extern fn main() -> I64",
+        "extern fn to_str(n: I64) -> String",  # builtin
+        "extern fn Some(n: I64) -> I64",  # constructor
+    ],
+)
+def test_reserved_extern_names_rejected(decl: str) -> None:
+    assert "FFI003" in _codes(f"{decl}\nfn main() -> I64 = {{ 0 }}")
+
+
+def test_non_ascii_extern_name_rejected() -> None:
+    assert "FFI003" in _codes("extern fn übercall(n: I64) -> I64\nfn main() -> I64 = { 0 }")
+
+
 # --- running (interpreter; no toolchain needed) ---------------------------------
 
 
@@ -93,10 +123,12 @@ def test_ffi_runs_on_interpreter(tmp_path: Path) -> None:
 
 
 def test_missing_symbol_is_clean(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
-    src = "extern fn flx_no_such_sym_xyz() -> I64\nfn main() -> I64 = { flx_no_such_sym_xyz() }\n"
+    src = (
+        "extern fn no_such_sym_xyz_12345() -> I64\nfn main() -> I64 = { no_such_sym_xyz_12345() }\n"
+    )
     path = _write(tmp_path, src)
     assert driver.cmd_run(path, interpret=True) == 1
-    assert "extern symbol 'flx_no_such_sym_xyz' not found" in capfd.readouterr().err
+    assert "extern symbol 'no_such_sym_xyz_12345' not found" in capfd.readouterr().err
 
 
 def test_pub_extern_across_modules(tmp_path: Path) -> None:
@@ -143,6 +175,19 @@ def test_extern_usable_in_build_targets(
     assert run_build() == 0
 
 
+def test_non_utf8_roundtrip_byte_length(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Bytes from C survive the Flex String round-trip losslessly: strlen counts
+    # the original bytes (5 here: c a f \xe9 \xff), matching native.
+    monkeypatch.setenv("FLX_WEIRD_BYTES", "caf\udce9\udcff")  # surrogateescape of \xe9\xff
+    src = (
+        "extern fn strlen(s: String) -> I64\n"
+        "extern fn getenv(name: String) -> String\n"
+        'fn main() -> I64 = { strlen(getenv("FLX_WEIRD_BYTES")) }\n'
+    )
+    path = _write(tmp_path, src)
+    assert driver.cmd_run(path, interpret=True) == 5
+
+
 # --- native parity ---------------------------------------------------------------
 
 
@@ -162,6 +207,20 @@ def test_ffi_matches_native(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -
     interp_test_out = capfd.readouterr().out
     assert (interp_test, interp_test_out) == (native_test, native_test_out)
     assert native_test == 0
+
+
+@native
+def test_abort_parity(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
+    # A signal-terminating extern: prior Flex output survives (flx_log flushes
+    # per line) and the exit code is shell-style 128+sig on the native path.
+    src = (
+        "extern fn abort() uses { Process }\n"
+        "fn main() -> I64 uses { Log, Process } = {\n"
+        '  Log.info("before abort")\n  abort()\n  0\n}\n'
+    )
+    path = _write(tmp_path, src)
+    assert driver.cmd_run(path, native=True) == 134  # 128 + SIGABRT
+    assert "before abort" in capfd.readouterr().out
 
 
 @native

@@ -42,6 +42,9 @@ long long flx_imod(long long a, long long b) {
 void flx_log(const char *p, long long n) {
     fwrite(p, 1, (size_t)n, stdout);
     fputc('\\n', stdout);
+    // Flush per line so output survives an extern call that aborts/raises
+    // (the interpreter flushes before every extern call; this matches it).
+    fflush(stdout);
 }
 void flx_int_to_str(long long n, FlxStr *out) {
     char *buf = (char *)malloc(24);

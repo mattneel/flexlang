@@ -86,4 +86,8 @@ def build_executable(mlir_text: str, c_source: str, out_path: Path, workdir: Pat
 
 
 def run_executable(path: Path, args: tuple[str, ...] = ()) -> int:
-    return subprocess.run([str(path), *args]).returncode
+    code = subprocess.run([str(path), *args]).returncode
+    # A signal death (e.g. an extern abort()) comes back negative from Python;
+    # report it as a shell would (128 + signal), which is also what the
+    # interpreter path yields when the same C call kills its process.
+    return 128 - code if code < 0 else code

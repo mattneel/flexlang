@@ -557,6 +557,7 @@ class Checker:
     def _register_externs(self) -> None:
         for ext in self.module.externs:
             self.current_module = self._module_of(ext.span)
+            self._check_extern_name(ext)
             if ext.name in self.functions or ext.name in self.generic_fns:
                 self._err_duplicate("function", ext.name, ext.span)
             # The C ABI surface is deliberately small: I64 and String (passed as a
@@ -586,6 +587,24 @@ class Checker:
             self.functions[ext.name] = FnType(tuple(params), ret)
             self.fn_effects[ext.name] = set(ext.effects)
             self.extern_fns.add(ext.name)
+
+    def _check_extern_name(self, ext: ast.ExternFnDecl) -> None:
+        """An extern's name IS the C symbol it links: it must be a plain C
+        identifier and must not collide with the Flex runtime, the prelude, or
+        a constructor — those would silently rebind or miscompile."""
+        name = ext.name
+        if not name.isascii() or not all(c.isalnum() or c == "_" for c in name):
+            self._err("FFI003", f"{name!r} is not a valid C symbol name", ext.span)
+        elif name.startswith(("flx_", "__")) or name == "main":
+            self._err(
+                "FFI003",
+                f"extern name {name!r} collides with the Flex runtime namespace",
+                ext.span,
+            )
+        elif name in _BUILTINS or name in ("to_str", "sh", "flx"):
+            self._err("FFI003", f"extern name {name!r} collides with a Flex builtin", ext.span)
+        elif name in self.ctors:
+            self._err("FFI003", f"extern name {name!r} collides with a constructor", ext.span)
 
     def _target_result(self, span: Span | None) -> Type:
         """The value a target (or build intrinsic) call yields: Result<Unit, String>."""
@@ -834,9 +853,17 @@ class Checker:
             return binding.type
         if expr.name in self.ctors:  # bare variant, e.g. None / Red
             return self._infer_ctor(expr.name, [], expected, expr.span)
-        if expr.name in self.functions:
-            self._check_visible(expr.name, expr.span)
-            return self.functions[expr.name]
+        if expr.name in self.functions or expr.name in self.generic_fns:
+            # Functions are not first-class values yet: neither backend can
+            # represent one, and an indirect call would sidestep effect checking.
+            # Direct calls never reach here (they resolve inside _infer_call).
+            self._err(
+                "NAME003",
+                f"{expr.name!r} is a function, not a value",
+                expr.span,
+                help=f"call it directly: {expr.name}(...)",
+            )
+            return ERROR
         self._err("NAME001", f"unknown name {expr.name!r}", expr.span)
         return ERROR
 
