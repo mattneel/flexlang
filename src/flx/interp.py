@@ -152,7 +152,10 @@ def _read_line() -> str:
         pass
     if via_libc is None:
         line = sys.stdin.readline()
-        return line[:-1] if line.endswith("\n") else line
+        line = line[:-1] if line.endswith("\n") else line
+        # Truncate at an embedded NUL (strings are NUL-terminated; the native
+        # runtime's strlen-based extent must match the stored length).
+        return line.split("\x00", 1)[0]
     fgetc, stream = via_libc
     buf = bytearray()
     while True:
@@ -160,6 +163,9 @@ def _read_line() -> str:
         if ch in (-1, 0x0A):  # EOF / '\n'
             break
         buf.append(ch & 0xFF)
+    nul = buf.find(0)
+    if nul >= 0:
+        del buf[nul:]  # see above: the first NUL ends the string
     return buf.decode("utf-8", "surrogateescape")
 
 
@@ -178,6 +184,7 @@ class Interpreter:
         # Variants of payloadless enums lower to a scalar tag natively, so the
         # native harness reports assert failures on them with the tag index.
         self.enum_index: dict[str, int] = {}
+        self.adts = {adt.name for adt in checked.module.adts}
         for adt in checked.module.adts:
             if all(not v.payload for v in adt.variants):
                 for i, variant in enumerate(adt.variants):
@@ -233,6 +240,13 @@ class Interpreter:
                 print("  explicit failure")
                 print(f"fail {module_name} / {test.name}")
                 failed += 1
+            except FlexRuntimeError as exc:
+                # A panic (index out of bounds, division by zero) fails the ONE
+                # test it happened in; the rest of the suite still runs. The
+                # native harness recovers identically via setjmp/longjmp.
+                print(f"  runtime error: {exc}")
+                print(f"fail {module_name} / {test.name}")
+                failed += 1
             finally:
                 self.in_test = False
         print(f"\n{passed} passed, {failed} failed")
@@ -278,9 +292,13 @@ class Interpreter:
         if isinstance(stmt, ast.ForStmt):
             xs = self.eval(stmt.iter, env)
             assert isinstance(xs, list)
-            for item in xs:
+            # The length is snapshotted at loop entry (matching the native
+            # lowering): elements pushed during the loop are not visited, and
+            # an unconditional push can't turn the loop infinite. Element
+            # reads stay live, so List.set during the loop is visible.
+            for i in range(len(xs)):
                 child = _Env(env)
-                child.define(stmt.name, item)
+                child.define(stmt.name, xs[i])
                 self.exec_block(stmt.body, child)
             return None
         if isinstance(stmt, ast.ReturnStmt):
@@ -477,7 +495,12 @@ class Interpreter:
 
         if isinstance(callee, ast.MemberExpr):
             obj = callee.obj
-            if isinstance(obj, ast.NameExpr) and obj.name == "Log":
+            # A user type or binding named Log/Str/Env/... shadows the intrinsic
+            # module (the checker routes those to ctor/method paths instead).
+            shadowed = isinstance(obj, ast.NameExpr) and (
+                env.has(obj.name) or obj.name in self.adts
+            )
+            if isinstance(obj, ast.NameExpr) and obj.name == "Log" and not shadowed:
                 message = str(self.eval(expr.args[0], env))
                 end = "" if callee.name == "print" else "\n"  # flx_print vs flx_log
                 try:
@@ -490,22 +513,33 @@ class Interpreter:
                     sys.stdout.buffer.write(raw)
                     sys.stdout.buffer.flush()
                 return None
-            if isinstance(obj, ast.NameExpr) and obj.name == "Fs" and callee.name == "read_line":
+            if (
+                isinstance(obj, ast.NameExpr)
+                and obj.name == "Fs"
+                and callee.name == "read_line"
+                and not shadowed
+            ):
                 sys.stdout.flush()
                 return _read_line()
             if (
                 isinstance(obj, ast.NameExpr)
                 and obj.name == "Time"
                 and (callee.name == "monotonic_ms")
+                and not shadowed
             ):
                 import time as _time
 
                 return _wrap(_time.monotonic_ns() // 1_000_000)
-            if isinstance(obj, ast.NameExpr) and obj.name == "List" and not env.has("List"):
+            if isinstance(obj, ast.NameExpr) and obj.name == "List" and not shadowed:
                 return self._list_op(callee.name, expr, env)
-            if isinstance(obj, ast.NameExpr) and obj.name == "Str":
+            if isinstance(obj, ast.NameExpr) and obj.name == "Str" and not shadowed:
                 return self._str_op(callee.name, expr, env)
-            if isinstance(obj, ast.NameExpr) and obj.name == "Env" and callee.name == "argv":
+            if (
+                isinstance(obj, ast.NameExpr)
+                and obj.name == "Env"
+                and callee.name == "argv"
+                and not shadowed
+            ):
                 return list(self.args)
             if callee.name in self.constructors:  # qualified ctor, e.g. E.Code(x)
                 return Variant(callee.name, self._ctor_payload(expr.args, env))

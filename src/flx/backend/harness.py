@@ -79,15 +79,26 @@ def generate_harness(tests: list[tuple[int, str]]) -> str:
         lines.append(f"extern int __flx_test_{i}(void);")
     lines.append("")
     lines.append("void __flx_set_args(int, char **);")
+    lines.append("void __flx_set_test_recover(void *);")
     lines.append("int main(int argc, char **argv) {")
     lines.append("    __flx_set_args(argc, argv);")
     lines.append(f'    printf("running {n} test{plural}\\n\\n");')
-    lines.append("    int passed = 0, failed = 0;")
+    lines.append("    int passed = 0, failed = 0, code;")
+    lines.append("    jmp_buf recover;")
     for i, full_label in tests:
         # Pass the label as a printf ARGUMENT (not in the format string), so any
         # '%' in a test name is inert rather than a conversion specifier.
+        # A runtime panic (index out of bounds, division by zero) longjmps back
+        # here, failing this ONE test; the rest of the suite still runs.
         label = _c_string(full_label)
-        lines.append(f"    if (__flx_test_{i}() == 0) {{")
+        lines.append("    if (setjmp(recover) == 0) {")
+        lines.append("        __flx_set_test_recover(&recover);")
+        lines.append(f"        code = __flx_test_{i}();")
+        lines.append("    } else {")
+        lines.append("        code = 1;")
+        lines.append("    }")
+        lines.append("    __flx_set_test_recover(0);")
+        lines.append("    if (code == 0) {")
         lines.append(f'        printf("ok %s\\n", "{label}");')
         lines.append("        passed++;")
         lines.append("    } else {")

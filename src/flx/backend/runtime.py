@@ -14,8 +14,26 @@ BASE_RUNTIME_C = """#include <stdio.h>
 #include <time.h>
 #include <signal.h>
 #include <unistd.h>
+#include <setjmp.h>
 
 typedef struct { const char *ptr; long long len; } FlxStr;
+
+// Runtime panics (division by zero, index out of bounds) are fatal in a
+// program run, but inside `flx test` they fail just the ONE test: the harness
+// arms a recovery point per test and we long-jump back to it, mirroring the
+// interpreter's per-test exception handling.
+static jmp_buf *__flx_test_recover_env = NULL;
+void __flx_set_test_recover(void *env) { __flx_test_recover_env = (jmp_buf *)env; }
+static void __flx_runtime_fail(const char *msg) {
+    if (__flx_test_recover_env) {
+        printf("  runtime error: %s\\n", msg);
+        fflush(stdout);
+        longjmp(*__flx_test_recover_env, 1);
+    }
+    fflush(stdout);
+    fprintf(stderr, "flx: runtime error: %s\\n", msg);
+    exit(1);
+}
 
 // Deep recursion must not die as a raw SIGSEGV: report it like the
 // interpreter's stack guard does and exit 1. The handler runs on its own
@@ -51,20 +69,12 @@ void __flx_match_fail(void) {
 // divisor and on INT64_MIN / -1; we trap the former (matching the interpreter's
 // message + exit code) and define the latter as the 64-bit wrapping result.
 long long __flx_idiv(long long a, long long b) {
-    if (b == 0) {
-        fflush(stdout);
-        fputs("flx: runtime error: division by zero\\n", stderr);
-        exit(1);
-    }
+    if (b == 0) __flx_runtime_fail("division by zero");
     if (b == -1 && a == INT64_MIN) return INT64_MIN;
     return a / b;
 }
 long long __flx_imod(long long a, long long b) {
-    if (b == 0) {
-        fflush(stdout);
-        fputs("flx: runtime error: division by zero\\n", stderr);
-        exit(1);
-    }
+    if (b == 0) __flx_runtime_fail("division by zero");
     if (b == -1) return 0;
     return a % b;
 }
@@ -98,8 +108,11 @@ void __flx_read_line(FlxStr *out) {
     }
     if (line[n - 1] == '\\n') n--;
     line[n] = 0;
+    // Strings are NUL-terminated: an embedded NUL would give strlen-based ops
+    // (length, ++) a shorter extent than the stored length, so the line is
+    // truncated at the first NUL on BOTH backends.
     out->ptr = line;
-    out->len = n;
+    out->len = (long long)strlen(line);
 }
 // Monotonic wall clock in milliseconds (Time.monotonic_ms).
 long long __flx_monotonic_ms(void) {
@@ -159,9 +172,9 @@ void __flx_list_push(void *lp, long long v) {
 }
 static void __flx_bounds(long long i, long long len) {
     if (i < 0 || i >= len) {
-        fflush(stdout);
-        fprintf(stderr, "flx: runtime error: index %lld out of bounds (len %lld)\\n", i, len);
-        exit(1);
+        char msg[80];
+        snprintf(msg, sizeof msg, "index %lld out of bounds (len %lld)", i, len);
+        __flx_runtime_fail(msg);
     }
 }
 long long __flx_list_get(void *lp, long long i) {

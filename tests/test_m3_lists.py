@@ -266,6 +266,102 @@ def test_argv_empty_without_args(tmp_path: Path) -> None:
     )
 
 
+def test_for_in_snapshots_length(tmp_path: Path) -> None:
+    # for-in takes the length at loop entry on BOTH backends: pushes inside
+    # the body are not visited (and can't make the loop infinite).
+    _both(
+        tmp_path,
+        "fn main() -> I64 = {\n"
+        "  let xs = [1, 2]\n  mut seen = 0\n"
+        "  for x in xs {\n    seen = seen + 1\n    List.push(xs, x * 10)\n  }\n"
+        "  seen * 10 + List.len(xs)\n}\n",
+        24,  # 2 visits, len 4
+    )
+
+
+# --- review findings ---------------------------------------------------------------------
+
+
+def test_generics_over_list_types(tmp_path: Path) -> None:
+    # MONO002 misfire: the monomorphizer never learned ListType in M3.
+    _both(
+        tmp_path,
+        "fn id<T>(x: T) -> T = { x }\n"
+        "fn first<T>(xs: List<T>) -> T = { xs[0] }\n"
+        "fn main() -> I64 = { let xs = id([1, 2, 3])\n first(xs) + first([[7]])[0] }\n",
+        8,
+    )
+
+
+def test_panic_fails_one_test_not_the_suite(tmp_path: Path, capfd) -> None:
+    # A runtime panic is attributed to ITS test; the suite continues and the
+    # summary prints — identically on both backends (setjmp/longjmp natively).
+    src = (
+        "fn main() -> I64 = { 0 }\n"
+        'test "oob" { let xs = [1]\n assert_eq(xs[5], 1) }\n'
+        'test "still runs" { assert(true) }\n'
+    )
+    path = _write(tmp_path, src)
+    assert driver.cmd_test(path, interpret=True) == 1
+    out = capfd.readouterr().out
+    assert "  runtime error: index 5 out of bounds (len 1)" in out
+    assert "fail Main / oob" in out
+    assert "ok Main / still runs" in out
+    assert "1 passed, 1 failed" in out
+    if _tools_available():
+        assert driver.cmd_test(path, native=True) == 1
+        assert capfd.readouterr().out == out
+
+
+def test_main_return_type_rule_both_backends(tmp_path: Path, capfd) -> None:
+    # Was native-only (RUN002 in the shim): the interpreter ran what native refused.
+    path = _write(tmp_path, "fn main() -> List<I64> = { [1] }\n")
+    assert driver.cmd_run(path, interpret=True) == 1
+    assert "must return I64 or Unit" in capfd.readouterr().err
+    if _tools_available():
+        assert driver.cmd_run(path, native=True) == 1
+        assert "must return I64 or Unit" in capfd.readouterr().err
+
+
+def test_mut_annotation_is_reassignment_context(tmp_path: Path) -> None:
+    _both(
+        tmp_path,
+        "fn main() -> I64 = {\n"
+        "  mut r: Result<I64, String> = Ok(1)\n"
+        '  r = Err("boom")\n'
+        "  mut xs: List<I64> = [1]\n"
+        "  xs = []\n"
+        "  match r { Ok(n) => n  Err(e) => 7 + List.len(xs) }\n}\n",
+        7,
+    )
+
+
+def test_user_type_shadows_intrinsic_module(tmp_path: Path) -> None:
+    # A user ADT named Str/Env/Log wins over the intrinsic module namespace.
+    _both(
+        tmp_path,
+        "type Str = | Wrap(I64)\nfn main() -> I64 = { match Str.Wrap(5) { Wrap(n) => n } }\n",
+        5,
+    )
+
+
+def test_read_line_truncates_at_nul(tmp_path: Path) -> None:
+    # Strings are NUL-terminated: the stored length must agree with the extent
+    # strlen-based ops see, so read_line cuts at the first NUL.
+    src = (
+        "module Main\nimport Std.IO\nimport Std.Str\n"
+        "fn main() -> I64 uses { Fs } = { length(read_line()) }\n"
+    )
+    path = _write(tmp_path, src)
+    proc = subprocess.run(
+        [sys.executable, "-m", "flx", "run", path],
+        input="ab\x00cdef\n",
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 2
+
+
 # --- for-in shape errors ----------------------------------------------------------------
 
 

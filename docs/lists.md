@@ -48,6 +48,13 @@ List.len(xs)        // 2 — same list
 `==`/`assert_eq` are not defined on lists (reference identity would be a lie
 and deep comparison is not free); compare lengths and elements explicitly.
 
+## Mutation during iteration
+
+`for x in xs` snapshots the list's **length** when the loop starts: elements
+pushed during the loop are not visited (and an unconditional push can't make
+the loop infinite). Element reads stay live, so `List.set` on a not-yet-visited
+index is observed.
+
 ## Bounds
 
 `xs[i]` and `List.set` panic on an out-of-bounds index, identically on both

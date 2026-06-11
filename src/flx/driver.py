@@ -276,6 +276,14 @@ def cmd_run(
     if main.params:
         print("flx: `main` must take no arguments", file=sys.stderr)
         return 1
+    if main.ret is not I64 and main.ret is not UNIT:
+        # One rule for both backends (the native shim can only return an int;
+        # the interpreter must not silently accept what native rejects).
+        print(
+            f"flx: `main` must return I64 or Unit, not {main.ret}",
+            file=sys.stderr,
+        )
+        return 1
 
     choice = _use_native(interpret, native)
     if choice is None:

@@ -929,7 +929,9 @@ class Checker:
 
     def _check_assign(self, stmt: ast.AssignStmt) -> None:
         binding = self.scope.lookup(stmt.name)
-        value_ty = self._check_expr(stmt.value)
+        # The declared type is inference context for the RHS, so `xs = []` and
+        # `r = Err("boom")` work on a typed `mut` binding.
+        value_ty = self._check_expr(stmt.value, binding.type if binding else None)
         if binding is None:
             self._err("NAME001", f"cannot assign to undefined binding {stmt.name!r}", stmt.span)
             return
@@ -1235,10 +1237,18 @@ class Checker:
                     )
                 self._require_effects({"Fs"}, expr.span)
                 return self._target_result(expr.span)
-            if callee.obj.name == "List" and not self.scope.lookup("List"):
+            head = callee.obj.name
+            shadowed = (
+                head in self.adt_templates
+                or head in self.record_types
+                or self.scope.lookup(head) is not None
+            )
+            if head == "List" and not shadowed:
                 return self._infer_list_op(callee.name, expr)
-            if callee.obj.name in _EFFECT_MODULES or callee.obj.name in ("Str", "Env"):
-                return self._infer_intrinsic(callee.obj.name, callee.name, expr)
+            if (head in _EFFECT_MODULES or head in ("Str", "Env")) and not shadowed:
+                # A user type or binding named Str/Env/Log/... wins over the
+                # intrinsic module (qualified ctors and locals stay reachable).
+                return self._infer_intrinsic(head, callee.name, expr)
             if callee.obj.name in self.adt_templates and callee.name in self.ctors:
                 # Qualified constructor with payload, e.g. E.Code(x).
                 return self._infer_ctor(callee.name, expr.args, expected, expr.span)
