@@ -57,6 +57,17 @@ class AdtType(Type):
 
 
 @dataclass(frozen=True)
+class ListType(Type):
+    """A homogeneous list, `List<T>`. Interpreter-only for now (manifests and
+    build scripts run interpreted); the native backend rejects it cleanly."""
+
+    elem: Type
+
+    def __str__(self) -> str:
+        return f"List<{self.elem}>"
+
+
+@dataclass(frozen=True)
 class ErrorType(Type):
     """Placeholder produced after a type error, to suppress cascades."""
 

@@ -40,9 +40,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
     for name, help_text in _FILE_COMMANDS.items():
         cmd = sub.add_parser(name, help=help_text)
-        cmd.add_argument("path", help="path to a .flx source file")
+        if name in ("check", "run", "build"):
+            cmd.add_argument(
+                "path",
+                nargs="?",
+                help="path to a .flx source file (default: the package.flx entry in cwd)",
+            )
+        else:
+            cmd.add_argument("path", help="path to a .flx source file")
         if name == "build":
             cmd.add_argument("-o", "--output", help="output executable path")
+            cmd.add_argument(
+                "--explain",
+                action="store_true",
+                help="list build.flx targets and their declared effects",
+            )
         if name == "run":
             cmd.add_argument(
                 "--native",
@@ -138,14 +150,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         # The CLI is interpreter-first: default to the interpreter unless --native.
         return driver.cmd_run(args.path, interpret=not args.native, native=args.native)
     if args.command == "build":
-        return driver.cmd_build(args.path, args.output)
+        # A .flx file path compiles a native executable. Otherwise `flx build`
+        # drives ./build.flx: `flx build [target] [--explain]`, falling back to a
+        # native build of the package entry when there is no build.flx.
+        if args.path is not None and (args.path.endswith(".flx") or Path(args.path).is_file()):
+            return driver.cmd_build(args.path, args.output)
+        from flx import build as build_runner
+
+        if args.path is None and not args.explain and not Path("build.flx").is_file():
+            return driver.cmd_build(None, args.output)
+        return build_runner.run_build(args.path, args.explain)
     if args.command == "test":
-        if args.path is None:
-            print(
-                "flx test: a .flx file is required (directory discovery is not yet supported)",
-                file=sys.stderr,
-            )
-            return 2
         return driver.cmd_test(
             args.path, args.filter, interpret=not args.native, native=args.native
         )

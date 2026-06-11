@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 from flx import interp
+from flx import package as pkg
 from flx.backend import toolchain
 from flx.backend.harness import generate_harness
 from flx.backend.mlir import BackendError, emit_module, emit_program
@@ -48,17 +49,51 @@ def _report(err: FlexError, sources: dict[str, str]) -> None:
         print(file=sys.stderr)
 
 
-def _load(path: str) -> ProgramInfo | FlexError:
+def _resolve_entry(path: str | None) -> tuple[str, tuple[Path, ...]] | None:
+    """The (entry file, extra import roots) for a command.
+
+    An explicit path is used as-is, gaining the dependency roots of any
+    `package.flx` beside it. With no path, the manifest in the current directory
+    supplies both the entry and the roots."""
+    if path is not None:
+        manifest_file = pkg.find_package(Path(path).resolve().parent)
+        if manifest_file is not None and Path(path).name != pkg.MANIFEST_FILE:
+            try:
+                manifest = pkg.load_manifest(manifest_file)
+                return path, pkg.dependency_roots(manifest)
+            except FlexError as err:
+                _report(err, {})
+                return None
+        return path, ()
+    manifest_file = pkg.find_package()
+    if manifest_file is None:
+        print(
+            "flx: no path given and no package.flx in the current directory",
+            file=sys.stderr,
+        )
+        return None
     try:
-        return load_program(path)
+        manifest = pkg.load_manifest(manifest_file)
+        roots = pkg.dependency_roots(manifest)
+    except FlexError as err:
+        _report(err, {})
+        return None
+    return str(manifest.dir / manifest.entry), roots
+
+
+def _load(path: str, roots: tuple[Path, ...] = ()) -> ProgramInfo | FlexError:
+    try:
+        return load_program(path, roots)
     except FlexError as err:
         return err
     except RecursionError:
         return FlexError([Diagnostic("PAR003", "input is too deeply nested")])
 
 
-def _frontend(path: str) -> tuple[CheckResult | FlexError, dict[str, str]]:
-    loaded = _load(path)
+def _frontend(
+    path: str, roots: tuple[Path, ...] = ()
+) -> tuple[CheckResult | FlexError, dict[str, str]]:
+    loaded = _load(path, roots)
     if isinstance(loaded, FlexError):
         return loaded, {}
     try:
@@ -123,12 +158,24 @@ def cmd_expand(path: str) -> int:
     return 0
 
 
-def cmd_check(path: str) -> int:
-    result, sources = _frontend(path)
+def cmd_check(path: str | None = None) -> int:
+    if path is not None and Path(path).name == pkg.MANIFEST_FILE:
+        try:
+            manifest = pkg.load_manifest(Path(path))
+        except FlexError as err:
+            _report(err, {})
+            return 1
+        print(f"ok: {path} is a valid manifest ({manifest.name} {manifest.version})")
+        return 0
+    resolved = _resolve_entry(path)
+    if resolved is None:
+        return 1
+    entry, roots = resolved
+    result, sources = _frontend(entry, roots)
     if isinstance(result, FlexError):
         _report(result, sources)
         return 1
-    print(f"ok: {path} type-checks")
+    print(f"ok: {entry} type-checks")
     return 0
 
 
@@ -143,7 +190,11 @@ def _run_shim(main_ret: Type) -> str:
 
 
 def cmd_emit_mlir(path: str) -> int:
-    result, sources = _frontend(path)
+    resolved = _resolve_entry(path)
+    if resolved is None:
+        return 1
+    entry, roots = resolved
+    result, sources = _frontend(entry, roots)
     if isinstance(result, FlexError):
         _report(result, sources)
         return 1
@@ -155,15 +206,19 @@ def cmd_emit_mlir(path: str) -> int:
     return 0
 
 
-def cmd_run(path: str, interpret: bool = False, native: bool = False) -> int:
-    result, sources = _frontend(path)
+def cmd_run(path: str | None = None, interpret: bool = False, native: bool = False) -> int:
+    resolved = _resolve_entry(path)
+    if resolved is None:
+        return 1
+    entry, roots = resolved
+    result, sources = _frontend(entry, roots)
     if isinstance(result, FlexError):
         _report(result, sources)
         return 1
 
     main = result.functions.get("main")
     if main is None:
-        print(f"flx: {path} has no `main` function to run", file=sys.stderr)
+        print(f"flx: {entry} has no `main` function to run", file=sys.stderr)
         return 1
     if main.params:
         print("flx: `main` must take no arguments", file=sys.stderr)
@@ -195,9 +250,16 @@ def cmd_run(path: str, interpret: bool = False, native: bool = False) -> int:
 
 
 def cmd_test(
-    path: str, test_filter: str | None = None, interpret: bool = False, native: bool = False
+    path: str | None = None,
+    test_filter: str | None = None,
+    interpret: bool = False,
+    native: bool = False,
 ) -> int:
-    result, sources = _frontend(path)
+    resolved = _resolve_entry(path)
+    if resolved is None:
+        return 1
+    entry, roots = resolved
+    result, sources = _frontend(entry, roots)
     if isinstance(result, FlexError):
         _report(result, sources)
         return 1
@@ -238,21 +300,25 @@ def cmd_test(
         return 1
 
 
-def cmd_build(path: str, output: str | None = None) -> int:
-    result, sources = _frontend(path)
+def cmd_build(path: str | None = None, output: str | None = None) -> int:
+    resolved = _resolve_entry(path)
+    if resolved is None:
+        return 1
+    entry, roots = resolved
+    result, sources = _frontend(entry, roots)
     if isinstance(result, FlexError):
         _report(result, sources)
         return 1
 
     main = result.functions.get("main")
     if main is None:
-        print(f"flx: {path} has no `main` function to build", file=sys.stderr)
+        print(f"flx: {entry} has no `main` function to build", file=sys.stderr)
         return 1
     if main.params:
         print("flx: `main` must take no arguments", file=sys.stderr)
         return 1
 
-    out_path = Path(output) if output else Path(path).with_suffix("")
+    out_path = Path(output) if output else Path(entry).with_suffix("")
     try:
         mlir_text = emit_module(result)
         shim = _run_shim(main.ret)

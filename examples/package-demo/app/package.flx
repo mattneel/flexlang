@@ -1,0 +1,12 @@
+module Package
+
+// The manifest is pure Flex data: a typed record, evaluated with zero effect
+// capabilities. Effectful build logic lives in build.flx instead.
+fn manifest() -> Manifest = {
+  {
+    name = "demo-app",
+    version = "0.1.0",
+    entry = "main.flx",
+    dependencies = [ { name = "Mathlib", path = "../mathlib" } ]
+  }
+}

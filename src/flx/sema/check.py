@@ -22,6 +22,7 @@ from flx.types import (
     UNIT,
     AdtType,
     FnType,
+    ListType,
     PrimType,
     RecordType,
     Type,
@@ -65,6 +66,8 @@ def _type_enc(ty: Type) -> str:
     if isinstance(ty, AdtType) and ty.type_args:
         inner = "$".join(_type_enc(a) for a in ty.type_args)
         return f"{len(ty.type_args)}${ty.name}${inner}"
+    if isinstance(ty, ListType):
+        return f"1$List${_type_enc(ty.elem)}"
     if isinstance(ty, (PrimType, RecordType, AdtType)):
         return f"0${ty.name}"
     return "0$?"
@@ -104,6 +107,9 @@ _BUILTINS = {"assert", "assert_eq", "assert_ne", "fail", "panic"}
 
 # Capability modules whose calls (e.g. Log.info) are effectful intrinsics.
 _EFFECT_MODULES = {"Fs", "Http", "Db", "Log", "Time", "Alloc", "Random", "Process", "Unsafe"}
+
+# Build-only intrinsics under `flx.` (available when the module declares targets).
+_FLX_BUILD_OPS = {"check", "test", "run", "expand", "build"}
 
 _ARITH = {"+", "-", "*", "/", "%"}
 _COMPARE = {"<", "<=", ">", ">="}
@@ -169,7 +175,15 @@ class Checker:
         decl_module: dict[str, str] | None = None,
         public: set[str] | None = None,
         file_module: dict[str, str] | None = None,
+        builtin_records: dict[str, RecordType] | None = None,
     ) -> None:
+        # Pre-registered record types (e.g. Manifest/Dependency when checking a
+        # package.flx). Kept out of ordinary programs so user record literals
+        # can never accidentally resolve to them.
+        self._builtin_records = builtin_records or {}
+        # Build mode: `target` declarations present (a build.flx). Enables the
+        # build intrinsics (`sh`, `flx.*`), which ordinary programs cannot call.
+        self._build_mode = bool(module.targets)
         self.module = module
         # Visibility: which module declared each top-level name, which are `pub`,
         # and which module each FILE belongs to. Empty for a single-file program
@@ -184,6 +198,7 @@ class Checker:
         self.scope = _Scope()
         self.return_type: Type = UNIT
         self.in_test = False
+        self.in_target = False
         self.fn_effects: dict[str, set[str]] = {}
         self.declared_effects: set[str] = set()
         self.record_types: dict[str, RecordType] = {}
@@ -228,6 +243,7 @@ class Checker:
             for i, (vname, _) in enumerate(variants):
                 self.ctors[vname] = (adt_name, i)
 
+        self.record_types.update(self._builtin_records)
         for record in self.module.records:
             if record.name in self.record_types or record.name in self.adt_templates:
                 self._err_duplicate("type", record.name, record.span)
@@ -252,6 +268,7 @@ class Checker:
 
         self.current_module = None
         self._register_impls()
+        self._register_targets()
 
         for fn in self.module.functions:
             if fn.name in self.generic_fns:
@@ -261,6 +278,8 @@ class Checker:
             self._check_fn(impl_fn)
         for test in self.module.tests:
             self._check_test(test)
+        for target in self.module.targets:
+            self._check_target(target)
 
         if self.diags:
             raise FlexError(self.diags)
@@ -532,6 +551,36 @@ class Checker:
         self.return_type = UNIT
         self._check_block(test.body)
 
+    def _target_result(self, span: Span | None) -> Type:
+        """The value a target (or build intrinsic) call yields: Result<Unit, String>."""
+        return self._instantiate("Result", [UNIT, STRING], span)
+
+    def _register_targets(self) -> None:
+        for target in self.module.targets:
+            if target.name in self.functions or target.name in self.generic_fns:
+                self._err_duplicate("target", target.name, target.span)
+            # A target is callable from other targets as `name()?`; calling it
+            # demands its declared effects, so effects propagate up the build
+            # graph exactly like ordinary calls.
+            self.functions[target.name] = FnType((), self._target_result(target.span))
+            self.fn_effects[target.name] = set(target.effects)
+        default = self.module.default_target
+        if default is not None and default not in {t.name for t in self.module.targets}:
+            self._err("BUILD002", f"default target {default!r} is not a target", self.module.span)
+
+    def _check_target(self, target: ast.TargetDecl) -> None:
+        # Targets check like tests: `?` propagates failure out of the body, and
+        # every effectful call must be covered by the target's `uses { ... }`.
+        self.scope = _Scope()
+        self.in_test = True
+        self.in_target = True
+        self.current_module = self._module_of(target.span)
+        self.declared_effects = set(target.effects)
+        self.return_type = UNIT
+        self._check_block(target.body)
+        self.in_test = False
+        self.in_target = False
+
     # --- statements / blocks --------------------------------------------------
 
     def _check_block(self, block: ast.Block, expected: Type | None = None) -> Type:
@@ -625,6 +674,8 @@ class Checker:
             return self._infer_record(expr)
         if isinstance(expr, ast.RecordUpdateExpr):
             return self._infer_record_update(expr)
+        if isinstance(expr, ast.ListExpr):
+            return self._infer_list(expr, expected)
         if isinstance(expr, ast.MemberExpr):
             return self._infer_member(expr)
         if isinstance(expr, ast.MatchExpr):
@@ -632,6 +683,23 @@ class Checker:
         if isinstance(expr, ast.TryExpr):
             return self._infer_try(expr)
         return ERROR
+
+    def _infer_list(self, expr: ast.ListExpr, expected: Type | None) -> Type:
+        elem_expected = expected.elem if isinstance(expected, ListType) else None
+        if not expr.items:
+            if elem_expected is not None:
+                return ListType(elem_expected)
+            self._err(
+                "TYPE023",
+                "cannot infer the element type of an empty list here",
+                expr.span,
+                help="give it context, e.g. a parameter or return type of List<T>",
+            )
+            return ERROR
+        first = self._check_expr(expr.items[0], elem_expected)
+        for item in expr.items[1:]:
+            self._expect(first, self._check_expr(item, first), item.span, "list element")
+        return ListType(first) if first is not ERROR else ERROR
 
     def _infer_record(self, expr: ast.RecordExpr) -> Type:
         self._check_duplicate_fields(expr.fields)
@@ -653,9 +721,8 @@ class Checker:
         rt = matches[0]
         field_types = dict(rt.fields)
         for f in expr.fields:
-            self._expect(
-                field_types[f.name], self._check_expr(f.value), f.value.span, f"field {f.name!r}"
-            )
+            want = field_types[f.name]
+            self._expect(want, self._check_expr(f.value, want), f.value.span, f"field {f.name!r}")
         return rt
 
     def _check_duplicate_fields(self, fields: list[ast.FieldInit]) -> None:
@@ -776,6 +843,16 @@ class Checker:
                 else:
                     self._err("TYPE006", "to_str expects 1 argument", expr.span)
                 return STRING
+            if callee.name == "sh" and self._build_mode:
+                # Build intrinsic: run a shell command; Ok on exit 0, Err otherwise.
+                if len(expr.args) == 1:
+                    self._expect(
+                        STRING, self._check_expr(expr.args[0]), expr.args[0].span, "argument"
+                    )
+                else:
+                    self._err("TYPE006", "sh expects 1 argument (the command)", expr.span)
+                self._require_effects({"Process"}, expr.span)
+                return self._target_result(expr.span)
             if callee.name in self.ctors:  # constructor call, e.g. Ok(x)
                 return self._infer_ctor(callee.name, expr.args, expected, expr.span)
             if callee.name in self.generic_fns:  # bounded generic, monomorphized
@@ -788,6 +865,22 @@ class Checker:
                 self._require_effects(self.fn_effects.get(callee.name, set()), expr.span)
                 return fn_ty.ret
         if isinstance(callee, ast.MemberExpr) and isinstance(callee.obj, ast.NameExpr):
+            if callee.obj.name == "flx" and self._build_mode:
+                # Build intrinsics that drive the compiler itself on a glob of
+                # files: flx.check / flx.test / flx.run / flx.expand / flx.build.
+                if callee.name not in _FLX_BUILD_OPS:
+                    self._err("BUILD003", f"unknown build operation flx.{callee.name}", expr.span)
+                    return ERROR
+                if len(expr.args) == 1:
+                    self._expect(
+                        STRING, self._check_expr(expr.args[0]), expr.args[0].span, "argument"
+                    )
+                else:
+                    self._err(
+                        "TYPE006", f"flx.{callee.name} expects 1 argument (a glob)", expr.span
+                    )
+                self._require_effects({"Fs"}, expr.span)
+                return self._target_result(expr.span)
             if callee.obj.name in _EFFECT_MODULES:
                 return self._infer_intrinsic(callee.obj.name, callee.name, expr)
             if callee.obj.name in self.adt_templates and callee.name in self.ctors:
@@ -823,7 +916,7 @@ class Checker:
         return ret
 
     def _require_effects(self, effects: set[str], span: Span) -> None:
-        site = "test" if self.in_test else "function"
+        site = "target" if self.in_target else ("test" if self.in_test else "function")
         for eff in sorted(effects):
             if eff not in self.declared_effects:
                 self._err(
@@ -1052,6 +1145,11 @@ class Checker:
             return self._subst[type_expr.name]
         if type_expr.name in PRIMITIVES and not type_expr.args:
             return PRIMITIVES[type_expr.name]
+        if type_expr.name == "List":
+            if len(type_expr.args) != 1:
+                self._err("TYPE013", "List expects exactly 1 type argument", type_expr.span)
+                return ERROR
+            return ListType(self._resolve_type(type_expr.args[0]))
         if type_expr.name in self.record_types and not type_expr.args:
             self._check_visible(type_expr.name, type_expr.span)
             return self.record_types[type_expr.name]
@@ -1111,7 +1209,7 @@ def _same(a: Type, b: Type) -> bool:
 
 def _is_comparable(ty: Type) -> bool:
     """Whether `==`/`!=`/assert_eq can be lowered for this type (no strings yet)."""
-    if ty is STRING:
+    if ty is STRING or isinstance(ty, ListType):
         return False
     if isinstance(ty, RecordType):
         return all(_is_comparable(t) for _, t in ty.fields)
@@ -1142,5 +1240,6 @@ def check(
     decl_module: dict[str, str] | None = None,
     public: set[str] | None = None,
     file_module: dict[str, str] | None = None,
+    builtin_records: dict[str, RecordType] | None = None,
 ) -> CheckResult:
-    return Checker(module, decl_module, public, file_module).check()
+    return Checker(module, decl_module, public, file_module, builtin_records).check()

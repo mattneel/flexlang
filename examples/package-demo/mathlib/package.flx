@@ -1,0 +1,5 @@
+module Package
+
+fn manifest() -> Manifest = {
+  { name = "mathlib", version = "0.1.0", entry = "Mathlib.flx", dependencies = [] }
+}

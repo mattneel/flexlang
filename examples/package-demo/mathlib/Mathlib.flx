@@ -1,0 +1,8 @@
+module Mathlib
+
+pub fn square(n: I64) -> I64 = { n * n }
+
+pub fn cube(n: I64) -> I64 = { n * square(n) }
+
+// Private: callable inside Mathlib only.
+fn unused_helper() -> I64 = { 0 }

@@ -58,6 +58,12 @@ def _dump_item(item: ast.Item, depth: int, out: list[str]) -> None:
     elif isinstance(item, ast.MacroDecl):
         params = ", ".join(item.params)
         out.append(f"{_indent(depth)}Macro {item.name}({params}) = {_expr(item.body)}")
+    elif isinstance(item, ast.TargetDecl):
+        uses = f" uses {{{', '.join(item.effects)}}}" if item.effects else ""
+        out.append(f"{_indent(depth)}Target {item.name}{uses}")
+        _dump_block(item.body, depth + 1, out)
+    elif isinstance(item, ast.DefaultTargetDecl):
+        out.append(f"{_indent(depth)}Target default = {item.name}")
 
 
 def _type(t: ast.TypeExpr) -> str:
@@ -117,6 +123,8 @@ def _expr(expr: ast.Expr) -> str:
     if isinstance(expr, ast.IfExpr):
         base = f"if {_expr(expr.cond)} {{...}}"
         return base + " else {...}" if expr.else_block else base
+    if isinstance(expr, ast.ListExpr):
+        return "[" + ", ".join(_expr(i) for i in expr.items) + "]"
     if isinstance(expr, ast.RecordExpr):
         return "{" + ", ".join(f"{f.name} = {_expr(f.value)}" for f in expr.fields) + "}"
     if isinstance(expr, ast.RecordUpdateExpr):

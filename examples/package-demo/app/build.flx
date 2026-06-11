@@ -1,0 +1,19 @@
+module Build
+
+// Targets are effect-checked: shelling out needs Process, driving the compiler
+// needs Fs, and calling another target demands its effects too.
+
+target default = ci
+
+target check uses { Fs } {
+  flx.check("main.flx")?
+}
+
+target test uses { Fs } {
+  flx.test("main.flx")?
+}
+
+target ci uses { Fs } {
+  check()?
+  test()?
+}

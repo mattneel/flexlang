@@ -99,6 +99,12 @@ class FieldInit:
 
 
 @dataclass(frozen=True)
+class ListExpr(Expr):
+    items: list[Expr]
+    span: Span
+
+
+@dataclass(frozen=True)
 class RecordExpr(Expr):
     fields: list[FieldInit]
     span: Span
@@ -307,6 +313,25 @@ class FnDecl(Item):
 
 
 @dataclass(frozen=True)
+class TargetDecl(Item):
+    """A `build.flx` target: an effect-checked, runnable unit of build logic.
+    `target name uses { Fs, Process } { body }`."""
+
+    name: str
+    effects: list[str]
+    body: Block
+    span: Span
+
+
+@dataclass(frozen=True)
+class DefaultTargetDecl(Item):
+    """`target default = name` — which target `flx build` runs bare."""
+
+    name: str
+    span: Span
+
+
+@dataclass(frozen=True)
 class TestDecl(Item):
     name: str
     effects: list[str]
@@ -416,3 +441,14 @@ class Module:
     @property
     def impls(self) -> list[ImplDecl]:
         return [it for it in self.items if isinstance(it, ImplDecl)]
+
+    @property
+    def targets(self) -> list[TargetDecl]:
+        return [it for it in self.items if isinstance(it, TargetDecl)]
+
+    @property
+    def default_target(self) -> str | None:
+        for it in self.items:
+            if isinstance(it, DefaultTargetDecl):
+                return it.name
+        return None

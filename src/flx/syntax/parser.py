@@ -149,6 +149,8 @@ class Parser:
                 item = self._macro()
             elif pub_tok is None and self._at(TokenKind.KW_IMPL):
                 item = self._impl_decl()
+            elif pub_tok is None and self._at(TokenKind.KW_TARGET):
+                item = self._target_decl()
             else:
                 tok = self._peek()
                 if pub_tok is not None:
@@ -290,6 +292,26 @@ class Parser:
         effects = self._uses_clause()
         body = self._block()
         return ast.TestDecl(name, effects, body, start.to(body.span))
+
+    def _target_name(self) -> Token:
+        # Target names live in their own (build) namespace, so common ones that
+        # happen to be Flex keywords — `test` above all — are allowed.
+        if self._at(TokenKind.IDENT) or self._at(TokenKind.KW_TEST):
+            return self._advance()
+        tok = self._peek()
+        raise self._error(f"expected a target name, found {self._describe(tok)}", tok.span)
+
+    def _target_decl(self) -> ast.Item:
+        start = self._advance().span  # `target`
+        name_tok = self._target_name()
+        # `target default = <name>` picks what a bare `flx build` runs.
+        if name_tok.text == "default" and self._at(TokenKind.EQ):
+            self._advance()
+            chosen = self._target_name()
+            return ast.DefaultTargetDecl(chosen.text, start.to(chosen.span))
+        effects = self._uses_clause()
+        body = self._block()
+        return ast.TargetDecl(name_tok.text, effects, body, start.to(body.span))
 
     def _derive_list(self) -> list[str]:
         self._advance()  # `derive`
@@ -474,7 +496,12 @@ class Parser:
                 continue
             if kind is TokenKind.DOT and min_bp < _POSTFIX_BP and same_line:
                 self._advance()
-                name_tok = self._expect(TokenKind.IDENT, "a member name")
+                # `test` stays usable as a member name (e.g. the build intrinsic
+                # `flx.test(...)`) even though it lexes as a keyword.
+                if self._at(TokenKind.KW_TEST):
+                    name_tok = self._advance()
+                else:
+                    name_tok = self._expect(TokenKind.IDENT, "a member name")
                 lhs = ast.MemberExpr(lhs, name_tok.text, lhs.span.to(name_tok.span))
                 continue
             if kind is TokenKind.QUESTION and min_bp < _POSTFIX_BP:
@@ -560,7 +587,24 @@ class Parser:
             return ast.UnquoteSpliceExpr(inner, start.to(end))
         if tok.kind is TokenKind.LBRACE:
             return self._record_expr()
+        if tok.kind is TokenKind.LBRACKET:
+            return self._list_expr()
+        if tok.kind is TokenKind.KW_TEST and self._peek_at(1).kind is TokenKind.LPAREN:
+            # `test(...)` is a call to a target named `test` (a declaration would
+            # have a string after the keyword), so the keyword acts as a name.
+            self._advance()
+            return ast.NameExpr("test", tok.span)
         raise self._error(f"expected an expression, found {self._describe(tok)}", tok.span)
+
+    def _list_expr(self) -> ast.Expr:
+        start = self._expect(TokenKind.LBRACKET, "'['").span
+        items: list[ast.Expr] = []
+        while not self._at(TokenKind.RBRACKET) and not self._at(TokenKind.EOF):
+            items.append(self._expr())
+            if not self._eat(TokenKind.COMMA):
+                break
+        end = self._expect(TokenKind.RBRACKET, "']'").span
+        return ast.ListExpr(items, start.to(end))
 
     def _record_expr(self) -> ast.Expr:
         start = self._expect(TokenKind.LBRACE, "'{'").span

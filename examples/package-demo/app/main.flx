@@ -1,0 +1,10 @@
+module Main
+
+import Mathlib
+
+fn main() -> I64 = { square(5) + cube(2) + 9 }
+
+test "dep math" {
+  assert_eq(square(4), 16)
+  assert_eq(cube(3), 27)
+}

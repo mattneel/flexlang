@@ -142,23 +142,32 @@ ok Main / add works
   hygienic `quote`/`unquote` **macros**, `reflect.fields` + comptime `for` +
   `unquote_splice`, and `derive(Eq, Show)` — viewable with `flx expand`;
 - **multi-file modules** — `import A.B` (path-resolved) with `pub`/private
-  visibility, merged into one program.
+  visibility, merged into one program;
+- **packages** — `package.flx`, a *typed, provably pure* Flex manifest (no TOML)
+  with path dependencies; `flx run`/`test`/`check` need no arguments inside a
+  package ([Packages and Builds](https://mattneel.github.io/flexlang/packages.html));
+- **`build.flx`** — builds are Flex programs: effect-checked `target`s where
+  shelling out requires `Process`, driving the compiler requires `Fs`, calling a
+  target demands its effects, and `?` propagates failure through the memoized
+  build graph. This repo [builds itself](build.flx) with it: `flx build`.
 
 ### Prototype / partial
 
 - **regions** — `region name { … }` parses and checks, but lifetime/escape
   analysis is shallow (scalars copy out, so nothing dangles yet);
 - **native ADT payloads** — variants carrying a record or `String` payload run on
-  the interpreter but are not lowered by the native backend yet.
+  the interpreter but are not lowered by the native backend yet;
+- **lists** — `List<T>` literals run on the interpreter (manifests need them);
+  no native lowering yet.
 
 ### Planned
 
-- a package manager and `build.flx`, a standard library, the borrow checker, and
+- versioned/registry dependencies, a standard library, the borrow checker, and
   the `emit-hir`/`emit-mir`/`explain-*` subcommands (still stubs) — see
   `docs/MVP.md` §3.2.
 
 See `examples/` for `add`, `result`, `records`, `effects`, `regions`, `macros`,
-and `traits`.
+`traits`, and the two-package `package-demo/`.
 
 ## Syntax highlighting
 

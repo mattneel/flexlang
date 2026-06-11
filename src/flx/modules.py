@@ -40,8 +40,11 @@ def _decl_name(item: ast.Item) -> str | None:
     return None
 
 
-def load_program(entry_path: str) -> ProgramInfo:
-    root = Path(entry_path).resolve().parent
+def load_program(entry_path: str, extra_roots: tuple[Path, ...] = ()) -> ProgramInfo:
+    """Load the program rooted at `entry_path`. Imports resolve against the entry
+    file's directory first, then each extra root (package dependency directories,
+    in manifest order). A module found in more than one root is MOD004."""
+    roots = [Path(entry_path).resolve().parent, *[Path(r).resolve() for r in extra_roots]]
     sources: dict[str, str] = {}
     order: list[ast.Module] = []
     seen: set[Path] = set()
@@ -88,7 +91,14 @@ def load_program(entry_path: str) -> ProgramInfo:
         order.append(mod)
         spans = list(mod.import_spans) + [mod.span] * len(mod.imports)  # tolerate missing spans
         for imp, span in zip(mod.imports, spans, strict=False):
-            child = root / Path(*imp.split(".")).with_suffix(".flx")
+            rel = Path(*imp.split(".")).with_suffix(".flx")
+            found = [r / rel for r in roots if (r / rel).is_file()]
+            if len(found) > 1:
+                listing = " and ".join(str(c) for c in found)
+                raise FlexError(
+                    [Diagnostic("MOD004", f"import {imp!r} is ambiguous: {listing}", span)]
+                )
+            child = found[0] if found else roots[0] / rel
             visit(child, imp, span)
 
     visit(Path(entry_path), None, None)

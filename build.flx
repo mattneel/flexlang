@@ -1,0 +1,27 @@
+module Build
+
+// The Flex compiler's own build file, in Flex. Targets are effect-checked:
+// a target that shells out must declare Process, and calling another target
+// demands its effects too. Run with `flx build [target]`; see `flx build --explain`.
+
+target default = test
+
+target fmt uses { Process } {
+  sh("uv run ruff format src tests")?
+}
+
+target check uses { Process } {
+  sh("uv run ruff check src tests")?
+  sh("uv run ruff format --check src tests")?
+  sh("uv run mypy")?
+}
+
+target test uses { Fs, Process } {
+  check()?
+  sh("uv run pytest -q")?
+  flx.test("examples/macros.flx")?
+}
+
+target examples uses { Fs } {
+  flx.check("examples/*.flx")?
+}

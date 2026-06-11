@@ -240,6 +240,8 @@ class Interpreter:
             raise FlexRuntimeError(f"no field .{expr.name}")
         if isinstance(expr, ast.CallExpr):
             return self._call(expr, env)
+        if isinstance(expr, ast.ListExpr):
+            return [self.eval(item, env) for item in expr.items]
         if isinstance(expr, ast.RecordExpr):
             return {f.name: self.eval(f.value, env) for f in expr.fields}
         if isinstance(expr, ast.RecordUpdateExpr):
