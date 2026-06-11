@@ -145,6 +145,8 @@ def _expr(expr: ast.Expr) -> str:
         arms = " ".join(f"{_pattern(a.pattern)} => {_expr(a.body)}" for a in expr.arms)
         return f"match {_expr(expr.scrutinee)} {{ {arms} }}"
     if isinstance(expr, ast.BlockExpr):
+        if len(expr.body.stmts) > 1:
+            return f"{{ ...; {_block_value(expr.body)} }}"  # statements elided
         return f"{{ {_block_value(expr.body)} }}"
     if isinstance(expr, ast.ComptimeExpr):
         return f"comptime {{ {_block_value(expr.body)} }}"

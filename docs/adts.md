@@ -113,9 +113,19 @@ fn main() -> I64 uses { Log } = {
 }
 ```
 
+## Recursion depth
+
+Recursive data means recursive functions. The interpreter guards its stack at
+2000 Flex call frames and reports `stack overflow (recursion too deep)`; native
+binaries are bound by the OS stack instead — typically much deeper, and tail
+calls are optimized — and report the same error if they do run out. Programs
+within the interpreter's limit behave identically on both backends.
+
 ## Not yet
 
 - String literal patterns (`M("a") => …`) — bind and compare with `.eq()`.
 - Range and record patterns.
 - Full usefulness analysis (bool-literal splits like `Pair(true, _)` /
   `Pair(false, _)` still want a catch-all).
+- Polymorphic recursion (`| Wrap(Bad<Option<T>>)`) — recursive payloads must
+  use the type's own parameters unchanged.

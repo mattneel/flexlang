@@ -12,8 +12,36 @@ BASE_RUNTIME_C = """#include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
+#include <signal.h>
+#include <unistd.h>
 
 typedef struct { const char *ptr; long long len; } FlxStr;
+
+// Deep recursion must not die as a raw SIGSEGV: report it like the
+// interpreter's stack guard does and exit 1. The handler runs on its own
+// stack (the overflowed one is unusable) and uses only async-signal-safe
+// calls. A fixed buffer because SIGSTKSZ is not a constant on glibc >= 2.34.
+static char __flx_sigstack[65536];
+static void __flx_on_segv(int sig) {
+    (void)sig;
+    static const char msg[] =
+        "flx: runtime error: stack overflow (recursion too deep)\\n";
+    ssize_t ignored = write(2, msg, sizeof(msg) - 1);
+    (void)ignored;
+    _exit(1);
+}
+__attribute__((constructor)) static void __flx_install_stack_guard(void) {
+    stack_t ss;
+    memset(&ss, 0, sizeof ss);
+    ss.ss_sp = __flx_sigstack;
+    ss.ss_size = sizeof __flx_sigstack;
+    sigaltstack(&ss, 0);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = __flx_on_segv;
+    sa.sa_flags = SA_ONSTACK;
+    sigaction(SIGSEGV, &sa, 0);
+}
 
 void __flx_match_fail(void) {
     fputs("flex: non-exhaustive match reached\\n", stderr);

@@ -216,6 +216,7 @@ class Checker:
         # their variants resolve, so recursive payloads tie back to the same
         # object instead of recursing forever.
         self._adt_cache: dict[tuple[str, tuple[Type, ...]], AdtType] = {}
+        self._inst_depth = 0  # guards polymorphic recursion (TYPE023)
         self.ctors: dict[str, tuple[str, int]] = {}  # variant name -> (adt name, index)
         self._subst: dict[str, Type] = {}  # active type-parameter substitution
         # traits / impls
@@ -243,27 +244,87 @@ class Checker:
     # --- entry ----------------------------------------------------------------
 
     def check(self) -> CheckResult:
+        # Builtins first, so user declarations collide INTO them (never silently
+        # replace them — `?` and Ok/Err/Some/None assume the prelude shapes).
+        for name, template in _BUILTIN_ADTS.items():
+            self.adt_templates[name] = template
+            for i, (vname, _) in enumerate(template[1]):
+                self.ctors[vname] = (name, i)
         for adt in self.module.adts:
             self._check_type_name(adt.name, adt.span)
+            if adt.name in _BUILTIN_ADTS:
+                continue  # reported by _check_type_name; keep the builtin shape
             if adt.name in self.adt_templates:
                 self._err_duplicate("type", adt.name, adt.span)
+            # Constructors share ONE program-wide namespace (an unqualified
+            # `X(...)` must mean exactly one thing), so collisions — within an
+            # ADT, across ADTs, or with the prelude — are errors, not last-wins.
+            seen_variants: set[str] = set()
+            for i, variant in enumerate(adt.variants):
+                if variant.name in seen_variants:
+                    self._err(
+                        "TYPE002",
+                        f"variant {variant.name!r} is declared twice in type {adt.name!r}",
+                        variant.span,
+                    )
+                    continue
+                seen_variants.add(variant.name)
+                prior = self.ctors.get(variant.name)
+                if prior is not None:
+                    self._err(
+                        "TYPE002",
+                        f"constructor {variant.name!r} is already defined by type {prior[0]!r}",
+                        variant.span,
+                        help="constructor names share one namespace; rename the variant",
+                    )
+                    continue
+                self.ctors[variant.name] = (adt.name, i)
             self.adt_templates[adt.name] = (
                 adt.type_params,
                 [(v.name, v.payload) for v in adt.variants],
             )
-        for name, template in _BUILTIN_ADTS.items():
-            self.adt_templates.setdefault(name, template)
-        for adt_name, (_, variants) in self.adt_templates.items():
-            for i, (vname, _) in enumerate(variants):
-                self.ctors[vname] = (adt_name, i)
 
         self.record_types.update(self._builtin_records)
+        # Records register in two passes so field types may name records
+        # declared later (or recurse through an ADT): names first, fields after.
+        user_records: list[ast.RecordDecl] = []
         for record in self.module.records:
             self._check_type_name(record.name, record.span)
             if record.name in self.record_types or record.name in self.adt_templates:
                 self._err_duplicate("type", record.name, record.span)
+                continue
+            self.record_types[record.name] = RecordType(record.name, ())
+            user_records.append(record)
+        for record in user_records:
             fields = tuple((f.name, self._resolve_type(f.type)) for f in record.fields)
-            self.record_types[record.name] = RecordType(record.name, fields)
+            object.__setattr__(self.record_types[record.name], "fields", fields)
+        # A record that reaches itself through record fields alone is infinite
+        # in size — only an ADT payload (which boxes) can break the cycle.
+        color: dict[str, int] = {}  # 1 = in progress, 2 = done
+
+        def _on_record_cycle(rt: RecordType) -> bool:
+            state = color.get(rt.name, 0)
+            if state == 1:
+                return True  # back-edge: this record is on the current path
+            if state == 2:
+                return False
+            color[rt.name] = 1
+            hit = any(isinstance(fty, RecordType) and _on_record_cycle(fty) for _, fty in rt.fields)
+            color[rt.name] = 2
+            return hit
+
+        for record in user_records:
+            if _on_record_cycle(self.record_types[record.name]):
+                self._err(
+                    "TYPE023",
+                    f"record {record.name!r} contains itself (directly or through "
+                    "other records), so it would have infinite size",
+                    record.span,
+                    help="wrap the recursive field in an ADT "
+                    "(e.g. `type Link = | End | More(Node)`) to give it a boxed "
+                    "representation",
+                )
+                break  # one report covers the cycle
 
         # Every type expression in an ADT payload or trait signature is validated
         # NOW, not at first use — an uninstantiated `type T = | A(Bogus)` is still
@@ -484,12 +545,13 @@ class Checker:
                 call.span,
             )
             return ERROR
-        # Solve the substitution positionally: a parameter written exactly as a
-        # type-parameter name binds it to that argument's type.
+        # Solve the substitution by unifying each declared parameter type with
+        # the argument's type: bare `T` binds directly, and `Chain<T>` against
+        # Chain<I64> binds T = I64 (same unifier as constructor inference).
         subst: dict[str, Type] = {}
         for param, at in zip(template.params, arg_types, strict=True):
-            if param.type.name in tp_names and not param.type.args and at is not ERROR:
-                subst.setdefault(param.type.name, at)
+            if at is not ERROR:
+                self._unify_typeexpr(param.type, at, tp_names, subst)
         for tp in template.type_params:
             if tp.name not in subst:
                 self._err(
@@ -699,6 +761,14 @@ class Checker:
                 "type name 'I32' is reserved (the FFI boundary type)",
                 span,
             )
+        elif name in PRIMITIVES or name == "List" or name in _BUILTIN_ADTS:
+            self._err(
+                "TYPE002",
+                f"cannot redefine the builtin type {name!r}",
+                span,
+                help="primitives, List, Result, and Option are part of the prelude; "
+                "pick another name",
+            )
 
     def _validate_type_expr(self, te: ast.TypeExpr, params: set[str], *, allow_self: bool) -> None:
         """Eagerly check that every name in a type expression exists (type
@@ -715,6 +785,19 @@ class Checker:
         if not known:
             self._err("TYPE001", f"unknown type {name!r}", te.span)
             return
+        arity: int | None = None
+        if name == "List":
+            arity = 1
+        elif name in self.adt_templates:
+            arity = len(self.adt_templates[name][0])
+        elif name in PRIMITIVES or name in self.record_types or name in params:
+            arity = 0
+        if arity is not None and len(te.args) != arity:
+            self._err(
+                "TYPE013",
+                f"type {name!r} expects {arity} type argument(s), got {len(te.args)}",
+                te.span,
+            )
         for arg in te.args:
             self._validate_type_expr(arg, params, allow_self=allow_self)
 
@@ -1013,6 +1096,15 @@ class Checker:
         return ERROR
 
     def _infer_unary(self, expr: ast.UnaryExpr) -> Type:
+        if (
+            expr.op == "-"
+            and isinstance(expr.operand, ast.IntLit)
+            and expr.operand.value == 1 << 63
+        ):
+            # INT64_MIN: the magnitude alone overflows I64, but the negated
+            # literal is representable (and legal in pattern position).
+            self.expr_types[id(expr.operand)] = I64
+            return I64
         operand = self._check_expr(expr.operand)
         if expr.op == "-":
             self._expect(I64, operand, expr.operand.span, "operand of unary `-`")
@@ -1022,7 +1114,11 @@ class Checker:
 
     def _infer_binary(self, expr: ast.BinaryExpr) -> Type:
         left = self._check_expr(expr.left)
-        right = self._check_expr(expr.right)
+        # The right operand sees the left's type, so `r == Ok(3)` can infer the
+        # constructor's type arguments from what it's compared against.
+        right = self._check_expr(
+            expr.right, left if expr.op in _EQUALITY and left is not ERROR else None
+        )
         op = expr.op
         if op == "++":
             self._expect(STRING, left, expr.left.span, "left operand of `++`")
@@ -1195,7 +1291,13 @@ class Checker:
         for pe, at in zip(payload_exprs, arg_types, strict=False):
             self._unify_typeexpr(pe, at, params, subst)
         if any(p not in subst for p in params):
-            self._err("TYPE016", f"cannot infer type arguments for {name!r} from context", span)
+            self._err(
+                "TYPE016",
+                f"cannot infer type arguments for {name!r} from context",
+                span,
+                help="use the value where its full type is known, or annotate it "
+                "(e.g. `fn f() -> Result<I64, String> = { Ok(2) }`)",
+            )
             return ERROR
         adt = self._instantiate(adt_name, [subst[p] for p in params], span)
         for arg, at, pty in zip(args, arg_types, adt.variants[vidx].payload, strict=False):
@@ -1203,7 +1305,7 @@ class Checker:
         return adt
 
     def _unify_typeexpr(
-        self, pe: ast.TypeExpr, at: Type, params: list[str], subst: dict[str, Type]
+        self, pe: ast.TypeExpr, at: Type, params: list[str] | set[str], subst: dict[str, Type]
     ) -> None:
         """Bind type parameters in `pe` by matching it structurally against `at`.
         Best-effort: mismatched heads bind nothing (the later _expect reports)."""
@@ -1213,10 +1315,15 @@ class Checker:
         if isinstance(at, AdtType) and pe.name == at.name and len(pe.args) == len(at.type_args):
             for sub_pe, sub_at in zip(pe.args, at.type_args, strict=True):
                 self._unify_typeexpr(sub_pe, sub_at, params, subst)
+            return
+        if isinstance(at, ListType) and pe.name == "List" and len(pe.args) == 1:
+            self._unify_typeexpr(pe.args[0], at.elem, params, subst)
 
     def _infer_try(self, expr: ast.TryExpr) -> Type:
         inner = self._check_expr(expr.expr)
-        if not (isinstance(inner, AdtType) and inner.name == "Result"):
+        if not (
+            isinstance(inner, AdtType) and inner.name == "Result" and len(inner.type_args) == 2
+        ):
             if inner is not ERROR:
                 self._err("QUEST001", f"`?` requires a Result, found {inner}", expr.span)
             return ERROR
@@ -1253,6 +1360,12 @@ class Checker:
         catchall = False
         result: Type | None = None
         for arm in expr.arms:
+            if catchall:
+                self._err(
+                    "MATCH002",
+                    "unreachable arm: a catch-all pattern precedes it",
+                    arm.pattern.span,
+                )
             self.scope.push()
             if self._bind_pattern(arm.pattern, scrut, variants, covered):
                 catchall = True
@@ -1316,8 +1429,9 @@ class Checker:
                     f"{pattern.name!r} expects {len(variant.payload)} pattern argument(s)",
                     pattern.span,
                 )
+            bound: set[str] = set()
             for sub, pty in zip(pattern.args, variant.payload, strict=False):
-                self._check_subpattern(sub, pty)
+                self._check_subpattern(sub, pty, bound)
             # Only an arm that takes the WHOLE variant (every argument
             # irrefutable) counts toward exhaustiveness; `Succ(Zero)` does not
             # cover Succ. Refutable arms for an already-covered variant are
@@ -1334,8 +1448,16 @@ class Checker:
                 )
         return False
 
-    def _check_subpattern(self, pattern: ast.Pattern, ty: Type) -> None:
+    def _check_subpattern(self, pattern: ast.Pattern, ty: Type, bound: set[str]) -> None:
         if isinstance(pattern, ast.BindPattern):
+            if pattern.name in bound:
+                self._err(
+                    "NAME002",
+                    f"pattern binds {pattern.name!r} more than once",
+                    pattern.span,
+                    help="rename one of the binders (patterns are not equality constraints)",
+                )
+            bound.add(pattern.name)
             self.scope.define(pattern.name, _Binding(ty, mutable=False))
         elif isinstance(pattern, ast.LiteralPattern):
             self._check_literal_pattern(pattern, ty)
@@ -1359,7 +1481,7 @@ class Checker:
                     pattern.span,
                 )
             for sub, pty in zip(pattern.args, variant.payload, strict=False):
-                self._check_subpattern(sub, pty)
+                self._check_subpattern(sub, pty, bound)
 
     def _check_literal_pattern(self, pattern: ast.LiteralPattern, ty: Type) -> None:
         lit_ty = BOOL if isinstance(pattern.value, bool) else I64
@@ -1367,6 +1489,14 @@ class Checker:
             self._err(
                 "TYPE003",
                 f"pattern has type {lit_ty}, but matches a value of type {ty}",
+                pattern.span,
+            )
+        if not isinstance(pattern.value, bool) and not (-(1 << 63) <= pattern.value <= _I64_MAX):
+            # Same range rule as expression literals (TYPE011): unchecked, the
+            # interpreter compares bignums while native wraps or fails to build.
+            self._err(
+                "TYPE011",
+                f"integer literal {pattern.value} is out of range for I64",
                 pattern.span,
             )
 
@@ -1436,6 +1566,14 @@ class Checker:
             return UNIT
         then_ty = self._check_block(expr.then_block, expected)
         if expr.else_block is None:
+            # Value position with no else: there is no value on the false path.
+            if then_ty is not UNIT and then_ty is not ERROR and not _diverges(expr.then_block):
+                self._err(
+                    "TYPE008",
+                    f"`if` without `else` has no value, but its branch yields {then_ty}",
+                    expr.span,
+                    help="add an `else` branch to use the `if` as a value",
+                )
             return UNIT
         else_ty = self._check_block(expr.else_block, expected)
         if not _same(then_ty, else_ty):
@@ -1487,6 +1625,22 @@ class Checker:
         cached = self._adt_cache.get(key)
         if cached is not None:
             return cached
+        if self._inst_depth > 64:
+            # Regular recursion hits the cache above; only a payload whose type
+            # arguments GROW (polymorphic recursion, e.g. `| Wrap(Bad<Option<T>>)`)
+            # gets here. Fail fast: every unwind level would otherwise retry.
+            raise FlexError(
+                [
+                    Diagnostic(
+                        "TYPE023",
+                        f"instantiating type {adt_name!r} does not converge "
+                        "(polymorphic recursion is not supported)",
+                        span,
+                        help="a recursive payload must use the type's own parameters "
+                        "unchanged, e.g. `| Wrap(Bad<T>)`, not `| Wrap(Bad<Option<T>>)`",
+                    )
+                ]
+            )
         # Cache the instantiation BEFORE resolving its payloads: a recursive
         # payload re-demands this same key and gets this same object, so the
         # recursion bottoms out and the knot ties back to one node.
@@ -1494,11 +1648,15 @@ class Checker:
         self._adt_cache[key] = adt
         saved = self._subst
         self._subst = dict(zip(params, type_args, strict=True))
-        defs = tuple(
-            VariantDef(vname, tuple(self._resolve_type(pe) for pe in payload))
-            for vname, payload in variants
-        )
-        self._subst = saved
+        self._inst_depth += 1
+        try:
+            defs = tuple(
+                VariantDef(vname, tuple(self._resolve_type(pe) for pe in payload))
+                for vname, payload in variants
+            )
+        finally:
+            self._inst_depth -= 1
+            self._subst = saved
         object.__setattr__(adt, "variants", defs)  # settle the frozen placeholder
         return adt
 
@@ -1573,13 +1731,22 @@ def _diverges(block: ast.Block) -> bool:
     last = block.stmts[-1]
     if isinstance(last, ast.ReturnStmt):
         return True
-    if isinstance(last, ast.ExprStmt) and isinstance(last.expr, ast.IfExpr):
-        branch = last.expr
+    if isinstance(last, ast.ExprStmt):
+        return _expr_diverges(last.expr)
+    return False
+
+
+def _expr_diverges(expr: ast.Expr) -> bool:
+    if isinstance(expr, ast.IfExpr):
         return (
-            branch.else_block is not None
-            and _diverges(branch.then_block)
-            and _diverges(branch.else_block)
+            expr.else_block is not None
+            and _diverges(expr.then_block)
+            and _diverges(expr.else_block)
         )
+    if isinstance(expr, ast.MatchExpr):
+        return bool(expr.arms) and all(_expr_diverges(arm.body) for arm in expr.arms)
+    if isinstance(expr, ast.BlockExpr):
+        return _diverges(expr.body)
     return False
 
 

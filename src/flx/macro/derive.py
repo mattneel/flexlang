@@ -114,7 +114,11 @@ def _render(value: ast.Expr, type_name: str, sp: Span) -> ast.Expr:
         return ast.IfExpr(value, then, els, sp)
     if type_name == "String":
         return value
-    return ast.StringLit("<?>", sp)
+    # Any other type renders through ITS Show impl — recursive derives work
+    # (the impl being generated resolves its own self-calls), and a payload
+    # with no Show in scope reports DISP001 at the use site instead of
+    # silently printing a placeholder.
+    return ast.CallExpr(ast.MemberExpr(value, "show", sp), [], sp)
 
 
 def _derive_show(type_name: str, sp: Span, exp: Expander) -> ast.FnDecl:

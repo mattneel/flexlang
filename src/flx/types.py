@@ -27,10 +27,23 @@ class FnType(Type):
         return f"({args}) -> {self.ret}"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class RecordType(Type):
+    """A named record. Identity is NOMINAL (the name): record names are unique
+    per program, the checker keeps one object per name (created field-less and
+    settled in place so fields may reference later declarations), and a stable
+    hash must not depend on the fields settling."""
+
     name: str
     fields: tuple[tuple[str, Type], ...]
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, RecordType):
+            return NotImplemented
+        return self.name == other.name
+
+    def __hash__(self) -> int:
+        return hash(self.name)
 
     def __str__(self) -> str:
         return self.name

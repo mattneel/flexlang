@@ -692,6 +692,13 @@ class FunctionLowerer:
         return self._decode_payload_field(payload, ok_payload, 0)
 
     def _lower_unary(self, expr: ast.UnaryExpr) -> str:
+        if (
+            expr.op == "-"
+            and isinstance(expr.operand, ast.IntLit)
+            and expr.operand.value == 1 << 63
+        ):
+            # INT64_MIN: the positive magnitude is not a valid i64 constant.
+            return self._const(str(-(1 << 63)), "i64")
         operand = self.lower_expr(expr.operand)
         out = self._fresh()
         if expr.op == "-":
