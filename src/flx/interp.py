@@ -253,6 +253,34 @@ def _print_raw(message: str, end: str = "\n") -> None:
     sys.stdout.buffer.flush()
 
 
+_strtod_fn: object = None  # lazily configured ctypes strtod, or False if unavailable
+
+
+def _strtod(s: str) -> float:
+    """C strtod of the longest valid prefix (0.0 if none) — the SAME libc call
+    the native runtime makes, so the result bits match by construction (same
+    rounding, same overflow-to-inf, same denormals, same locale)."""
+    global _strtod_fn
+    if _strtod_fn is None:
+        try:
+            libc = ctypes.CDLL(None)
+            fn = libc.strtod
+            fn.restype = ctypes.c_double
+            fn.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
+            _strtod_fn = fn
+        except OSError, AttributeError:
+            _strtod_fn = False
+    if _strtod_fn is False:
+        # No libc to share (non-POSIX stand-in): Python's parser is also
+        # correctly rounded for the validated grammar parse_float feeds us.
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+    raw = s.encode("utf-8", "surrogateescape")
+    return float(_strtod_fn(raw, None))  # type: ignore[operator]
+
+
 def _checked_byte(b: object) -> int:
     """Validate a string byte for from_byte/from_bytes: 1..255 (byte 0 is the
     NUL terminator and cannot be carried). The message matches the native
@@ -726,6 +754,17 @@ class Interpreter:
             # Decoding canonicalizes: completed UTF-8 sequences become their
             # characters, stray bytes stay surrogates — same form as literals.
             return raw.decode("utf-8", "surrogateescape")
+        if op == "parse_f64":
+            return _strtod(str(self.eval(expr.args[0], env)))
+        if op == "to_str_fixed":
+            x = self.eval(expr.args[0], env)
+            d = self.eval(expr.args[1], env)
+            assert isinstance(x, float) and isinstance(d, int)
+            if not 0 <= d <= 100:
+                raise FlexRuntimeError(f"decimals {d} is outside 0..100")
+            if math.isnan(x):
+                return "nan"  # never "-nan"; matches to_str's canonical form
+            return f"{x:.{d}f}"
         # BYTE semantics, matching the native runtime exactly: index the UTF-8
         # bytes (surrogateescape keeps split sequences lossless).
         data = str(self.eval(expr.args[0], env)).encode("utf-8", "surrogateescape")

@@ -100,6 +100,9 @@ byte-level access — `byte_at`, `substr`, `char_at`, `split`, `parse_int`,
 `from_byte`, `from_bytes` — is in [`Std.Str`](api/Std.Str.md) (generated
 from the compiler, examples executed in CI).
 
+Number formatting and parsing live there too: `parse_float` (strict,
+correctly rounded, `Option<F64>`), `to_str_fixed(x, decimals)`, and
+`repeat`/`pad_left`/`pad_right` for columns.
+
 Still missing, and the compiler says so at the exact place you try them:
-format strings, `parse_float` (declare `extern fn atof(s: String) -> F64`),
-and string literal patterns.
+format strings and string literal patterns.

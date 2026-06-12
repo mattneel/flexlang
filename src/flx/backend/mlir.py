@@ -1016,6 +1016,16 @@ class FunctionLowerer:
                 if obj.name == "Str" and method == "from_bytes":
                     xs = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
                     return self._str_runtime("__flx_from_bytes", ["!llvm.ptr"], [xs])
+                if obj.name == "Str" and method == "parse_f64":
+                    s = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
+                    ptr, _length = self._string_parts(s)  # strings are NUL-terminated
+                    out = self._fresh()
+                    self._emit(f"{out} = func.call @__flx_parse_f64({ptr}) : (!llvm.ptr) -> f64")
+                    return out
+                if obj.name == "Str" and method == "to_str_fixed":
+                    x = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
+                    d = self._materialize(self.lower_expr(expr.args[1]), expr.args[1])
+                    return self._str_runtime("__flx_f64_fixed", ["f64", "i64"], [x, d])
                 if obj.name == "Env" and method == "argv":
                     out = self._fresh()
                     self._emit(f"{out} = func.call @__flx_argv() : () -> !llvm.ptr")
@@ -1187,7 +1197,36 @@ class FunctionLowerer:
             return out
         if isinstance(ty, AdtType):
             tag_eq = self._cmp_field(left, right, mty, 0, "i32")
-            payload_eq = self._cmp_field(left, right, mty, 1, "i64")
+            lslot = self._fresh()
+            self._emit(f"{lslot} = llvm.extractvalue {left}[1] : {mty}")
+            rslot = self._fresh()
+            self._emit(f"{rslot} = llvm.extractvalue {right}[1] : {mty}")
+            payload_eq = self._fresh()
+            self._emit(f"{payload_eq} = arith.cmpi eq, {lslot}, {rslot} : i64")
+            # Variants carrying an F64 compare as FLOATS, not slot bits — bit
+            # equality would make Some(0.0) != Some(-0.0) and Some(nan) ==
+            # Some(nan), diverging from the interpreter's structural equality.
+            float_variants = [
+                i for i, v in enumerate(ty.variants) if len(v.payload) == 1 and v.payload[0] is F64
+            ]
+            if float_variants:
+                lf = self._fresh()
+                self._emit(f"{lf} = arith.bitcast {lslot} : i64 to f64")
+                rf = self._fresh()
+                self._emit(f"{rf} = arith.bitcast {rslot} : i64 to f64")
+                feq = self._fresh()
+                self._emit(f"{feq} = arith.cmpf oeq, {lf}, {rf} : f64")
+                ltag = self._fresh()
+                self._emit(f"{ltag} = llvm.extractvalue {left}[0] : {mty}")
+                for i in float_variants:
+                    # When tags differ tag_eq already kills the AND, so picking
+                    # the comparison by the LEFT tag is sound.
+                    ci = self._const(str(i), "i32")
+                    is_float_arm = self._fresh()
+                    self._emit(f"{is_float_arm} = arith.cmpi eq, {ltag}, {ci} : i32")
+                    nxt = self._fresh()
+                    self._emit(f"{nxt} = arith.select {is_float_arm}, {feq}, {payload_eq} : i1")
+                    payload_eq = nxt
             out = self._fresh()
             self._emit(f"{out} = arith.andi {tag_eq}, {payload_eq} : i1")
             return out

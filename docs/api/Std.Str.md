@@ -241,3 +241,148 @@ assert_eq(parse_int("9223372036854775807"), Some(9223372036854775807))
 assert_eq(parse_int("9223372036854775808"), None)
 assert_eq(parse_int("-9223372036854775808"), Some(-9223372036854775808))
 ```
+
+See also: `parse_float`
+
+## parse_float
+
+```flx
+fn parse_float(s: String) -> Option<F64>
+```
+
+Parse a decimal float; None unless the whole string is a number.
+
+The grammar is strict: `-?digits(.digits)?([eE][+-]?digits)?`, plus the
+exact spellings `nan`, `inf`, and `-inf` that `to_str` produces — so
+`"1."`, `".5"`, `"+1"`, and `" 1"` are all `None`, never a guess.
+Conversion is correctly rounded (libc strtod on both backends), which
+makes the round trip exact: `parse_float(to_str(x))` is `Some(x)` for
+every finite x. A value beyond F64's range saturates to `inf` — floats
+don't wrap, so overflow is not an error.
+
+**Example: parses the grammar** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(parse_float("1.5"), Some(1.5))
+assert_eq(parse_float("-2.5e3"), Some(-2500.0))
+assert_eq(parse_float("42"), Some(42.0))
+assert_eq(parse_float("0.1"), Some(0.1))
+```
+
+**Example: rejects what it cannot promise** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(parse_float(""), None)
+assert_eq(parse_float("1."), None)
+assert_eq(parse_float(".5"), None)
+assert_eq(parse_float("+1"), None)
+assert_eq(parse_float("1e"), None)
+assert_eq(parse_float(" 1"), None)
+assert_eq(parse_float("1.5x"), None)
+```
+
+**Example: round-trips to_str exactly** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(parse_float(to_str(0.1)), Some(0.1))
+assert_eq(parse_float(to_str(1.0 / 3.0)), Some(1.0 / 3.0))
+assert_eq(parse_float(to_str(1.0e308)), Some(1.0e308))
+```
+
+**Example: edges: overflow saturates, nan is unequal to itself** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(parse_float("1e999"), Some(1.0 / 0.0))
+assert_eq(parse_float("-inf"), Some(-1.0 / 0.0))
+match parse_float("nan") {
+  Some(x) => { assert(x != x) }
+  None => { fail("nan did not parse") }
+}
+```
+
+See also: `parse_int`, `to_str_fixed`
+
+## to_str_fixed
+
+```flx
+fn to_str_fixed(x: F64, decimals: I64) -> String
+```
+
+Format with exactly N digits after the point (C's %.*f).
+
+Correctly rounded to the decimal place (ties go to the nearest even
+digit, like printf): `to_str_fixed(2.675, 2)` is `"2.67"` because the
+F64 nearest 2.675 is just below it. Panics unless 0 <= decimals <= 100.
+`nan` and `inf` format as their `to_str` spellings.
+
+**Example: fixed-point formatting** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(to_str_fixed(3.14159, 2), "3.14")
+assert_eq(to_str_fixed(2.0, 0), "2")
+assert_eq(to_str_fixed(1.0, 3), "1.000")
+assert_eq(to_str_fixed(-0.5, 1), "-0.5")
+assert_eq(to_str_fixed(2.675, 2), "2.67")
+assert_eq(to_str_fixed(1.0 / 0.0, 2), "inf")
+assert_eq(to_str_fixed(0.0 / 0.0, 2), "nan")
+```
+
+See also: `parse_float`, `pad_left`
+
+## repeat
+
+```flx
+fn repeat(s: String, n: I64) -> String
+```
+
+The string repeated n times ("" when n <= 0).
+
+**Example: repeats** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(repeat("ab", 3), "ababab")
+assert_eq(repeat("x", 0), "")
+assert_eq(repeat("x", -1), "")
+```
+
+See also: `pad_left`
+
+## pad_left
+
+```flx
+fn pad_left(s: String, width: I64) -> String
+```
+
+Right-align to a byte width with spaces (unchanged if already wider).
+
+Width counts BYTES, like `length` — a multi-byte UTF-8 character is wider
+than one column. Compose `repeat` for other pad characters:
+`repeat("0", 3 - length(s)) ++ s` zero-pads.
+
+**Example: aligns a column** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(pad_left("7", 3), "  7")
+assert_eq(pad_left("123", 3), "123")
+assert_eq(pad_left("1234", 3), "1234")
+assert_eq(pad_left(to_str_fixed(9.5, 2), 8), "    9.50")
+```
+
+See also: `pad_right`
+
+## pad_right
+
+```flx
+fn pad_right(s: String, width: I64) -> String
+```
+
+Left-align to a byte width with spaces (unchanged if already wider).
+
+**Example: aligns a column** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(pad_right("7", 3), "7  ")
+assert_eq(pad_right("1234", 3), "1234")
+```
+
+See also: `pad_left`

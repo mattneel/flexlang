@@ -93,8 +93,15 @@ The rules that keep the effect system sound:
   storing them (records, lists, ADT payloads, `mut`) is not supported yet.
 - No closures yet — a function value is a name, not a capture.
 
+## Float ↔ text
+
+Both directions live in [`Std.Str`](api/Std.Str.md): `parse_float(s)` returns
+`Option<F64>` (strict grammar, correctly rounded via libc strtod on both
+backends — `parse_float(to_str(x))` round-trips exactly), and
+`to_str_fixed(x, decimals)` is C's `%.*f`. `pad_left`/`pad_right` align
+columns.
+
 ## Not yet
 
-- `parse_float`, float formatting control (`%.2f`-style).
 - `~` bitwise not — write `x ^ -1`.
 - Closures, lambdas, and functions returning functions.

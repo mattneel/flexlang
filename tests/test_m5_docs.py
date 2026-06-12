@@ -204,9 +204,10 @@ def test_member_call_hints_free_function(tmp_path: Path, capfd: pytest.CaptureFi
     assert "TYPE010" in err and "free function" in err
 
 
-def test_parse_float_absent_hint() -> None:
-    diags = _diag('fn main() -> I64 = { let x = parse_float("1.5")\n 0 }\n')
-    assert any("atof" in (d.help or "") for d in diags)
+def test_to_float_hint_names_parse_float() -> None:
+    # parse_float itself shipped in M7; the absent-name hint moved to to_float.
+    diags = _diag('fn main() -> I64 = { let x = to_float("1.5")\n 0 }\n')
+    assert any("parse_float" in (d.help or "") for d in diags)
 
 
 # --- contract fixes ---------------------------------------------------------------------

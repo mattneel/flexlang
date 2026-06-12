@@ -158,15 +158,14 @@ _KNOWN_ABSENT: dict[str, str] = {
     "continue": "loops have no continue; guard the rest of the body with an `if`",
     "chr": 'Flex calls it from_byte: import Std.Str, then from_byte(65) is "A" '
     "(from_bytes builds a string from a whole List<I64>)",
-    "parse_float": "parse_float does not exist yet; declare libc's parser: "
-    "`extern fn atof(s: String) -> F64` (import Std.Str for parse_int)",
-    "to_float": "see parse_float: declare `extern fn atof(s: String) -> F64`",
+    "to_float": "Flex calls it parse_float (import Std.Str) for strings, and to_f64 for I64 values",
     "sort": "List has no built-in sort yet; insertion sort with List.set is ~15 lines, "
     "and comparison functions can be passed as values",
     "sorted": "see `sort` — no built-in sort yet",
     "format": "there are no format strings yet; build output with `++`, to_str, and "
-    "Std.Str substr/char_at",
-    "printf": "there is no printf; use println (import Std.IO) with `++` and to_str",
+    "Std.Str's to_str_fixed/pad_left/pad_right",
+    "printf": "there is no printf; use println (import Std.IO) with `++`, to_str, "
+    "and Std.Str's to_str_fixed/pad_left/pad_right",
     "input": "use read_line() (import Std.IO, uses { Fs })",
 }
 
@@ -180,11 +179,16 @@ _NEEDS_IMPORT: dict[str, str] = (
             "is_empty",
             "split",
             "parse_int",
+            "parse_float",
             "byte_at",
             "substr",
             "char_at",
             "from_byte",
             "from_bytes",
+            "to_str_fixed",
+            "repeat",
+            "pad_left",
+            "pad_right",
         ),
         "Std.Str",
     )
@@ -233,6 +237,11 @@ _INTRINSICS: dict[tuple[str, str], tuple[str, tuple[Type, ...], Type | _Instanti
     ("Str", "substr"): ("", (STRING, I64, I64), STRING),  # clamps to the string
     ("Str", "from_byte"): ("", (I64,), STRING),  # panics outside 1..255
     ("Str", "from_bytes"): ("", (ListType(I64),), STRING),  # panics per element
+    # C strtod of the longest valid prefix (0.0 if none) — the SAME libc call
+    # on both backends, so the bits match by construction. Std.Str.parse_float
+    # validates the strict whole-string grammar before calling this.
+    ("Str", "parse_f64"): ("", (STRING,), F64),
+    ("Str", "to_str_fixed"): ("", (F64, I64), STRING),  # %.*f; decimals 0..100 or panic
     ("Env", "argv"): ("Process", (), ListType(STRING)),  # user args, no argv[0]
 }
 
@@ -2207,11 +2216,15 @@ def _irrefutable_args(pattern: ast.CtorPattern) -> bool:
 
 def _slot_inline(ty: Type) -> bool:
     """Whether an ADT payload of this type lives in the i64 payload slot by
-    VALUE natively (anything else is boxed behind a pointer)."""
+    VALUE natively (anything else is boxed behind a pointer). F64 qualifies —
+    its bits ride the slot, and the native equality lowering compares those
+    variants as FLOATS (so Some(0.0) == Some(-0.0) and Some(nan) != Some(nan),
+    matching the interpreter)."""
     return (
         ty is I64
         or ty is BOOL
         or ty is UNIT
+        or ty is F64
         or (isinstance(ty, AdtType) and all(not v.payload for v in ty.variants))
     )
 

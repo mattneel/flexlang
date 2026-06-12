@@ -270,6 +270,30 @@ void __flx_from_bytes(void *lp, FlxStr *out) {
     out->ptr = buf;
     out->len = l->len;
 }
+// Float <-> text (Std.Str parse_float / to_str_fixed). parse_f64 is strtod of
+// the longest valid prefix (0.0 if none) — the interpreter calls the SAME
+// libc strtod via ctypes, so the bits match by construction; Std.Str's
+// parse_float validates the strict whole-string grammar before calling it.
+double __flx_parse_f64(const char *p) {
+    return strtod(p, NULL);
+}
+void __flx_f64_fixed(double x, long long d, FlxStr *out) {
+    if (d < 0 || d > 100) {
+        char msg[64];
+        snprintf(msg, sizeof msg, "decimals %lld is outside 0..100", d);
+        __flx_runtime_fail(msg);
+    }
+    if (x != x) {
+        out->ptr = "nan"; /* never "-nan"; matches to_str's canonical form */
+        out->len = 3;
+        return;
+    }
+    int need = snprintf(NULL, 0, "%.*f", (int)d, x);
+    char *buf = (char *)__flx_box(need + 1);
+    snprintf(buf, (size_t)need + 1, "%.*f", (int)d, x);
+    out->ptr = buf;
+    out->len = need;
+}
 // Program arguments, captured by the run shim's main(). Env.argv() yields the
 // USER arguments only (argv[0] is the executable path, which differs across
 // backends, so it is deliberately excluded).
@@ -313,6 +337,8 @@ BASE_RUNTIME_DECLS = (
     "func.func private @__flx_substr(!llvm.ptr, i64, i64, i64, !llvm.ptr)\n"
     "func.func private @__flx_from_byte(i64, !llvm.ptr)\n"
     "func.func private @__flx_from_bytes(!llvm.ptr, !llvm.ptr)\n"
+    "func.func private @__flx_parse_f64(!llvm.ptr) -> f64\n"
+    "func.func private @__flx_f64_fixed(f64, i64, !llvm.ptr)\n"
     "func.func private @__flx_argv() -> !llvm.ptr\n"
     "func.func private @__flx_f64_to_str(f64, !llvm.ptr)\n"
     "func.func private @__flx_f64_to_i64(f64) -> i64\n"
