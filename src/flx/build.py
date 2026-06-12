@@ -169,7 +169,11 @@ def run_build(target_name: str | None = None, explain: bool = False) -> int:
         loaded = load_program(str(build_file), roots)
         module = expand(loaded.module)
         result = check_and_monomorphize(
-            module, loaded.decl_module, loaded.public, loaded.file_module
+            module,
+            loaded.decl_module,
+            loaded.public,
+            loaded.file_module,
+            loaded.module_spans,
         )
     except FlexError as err:
         driver._report(err, {})

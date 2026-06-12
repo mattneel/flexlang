@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+from flx.diagnostics import Span
 from flx.syntax import ast
 from flx.types import (
     F64,
@@ -418,6 +419,7 @@ class Interpreter:
         self.types = checked.expr_types
         self.constructors = checked.constructors
         self.method_targets = checked.method_targets
+        self.qualified_calls = checked.qualified_calls
         # Variants of payloadless enums lower to a scalar tag natively, so the
         # native harness reports assert failures on them with the tag index.
         self.enum_index: dict[str, int] = {}
@@ -436,6 +438,18 @@ class Interpreter:
         # already loaded in this process (libc and friends).
         self.extern_fns = checked.extern_fns
         self._extern_cache: dict[str, object] = {}
+
+    def _module_of(self, span: Span | None, default: str) -> str:
+        if span is None:
+            return default
+        for name, module_span in self.checked.module_spans:
+            if (
+                module_span.file == span.file
+                and module_span.start.offset <= span.start.offset
+                and span.end.offset <= module_span.end.offset
+            ):
+                return name
+        return self.checked.file_module.get(span.file, default)
 
     def _show_impl_symbol(self, ty: Type) -> str | None:
         if not isinstance(ty, (PrimType, RecordType, AdtType)):
@@ -482,7 +496,7 @@ class Interpreter:
         passed = failed = 0
         for test in tests:
             # Imported tests report under their own module, not the entry's.
-            module_name = self.checked.file_module.get(test.span.file, default_module)
+            module_name = self._module_of(test.span, default_module)
             self.in_test = True
             # Labels and failure reports go through _print_raw: a test name (or
             # an asserted string) can carry raw bytes, which native printf
@@ -560,7 +574,7 @@ class Interpreter:
         default_module = self.checked.module.name
         results: list[dict[str, object]] = []
         for test in tests:
-            module_name = self.checked.file_module.get(test.span.file, default_module)
+            module_name = self._module_of(test.span, default_module)
             self.in_test = True
             output = io.StringIO()
             status = "passed"
@@ -862,6 +876,11 @@ class Interpreter:
 
     def _call(self, expr: ast.CallExpr, env: _Env) -> object:
         callee = expr.callee
+
+        qualified_symbol = self.qualified_calls.get(id(expr))
+        if qualified_symbol is not None:
+            fn = self.functions[qualified_symbol]
+            return self.call(fn, [self.eval(a, env) for a in expr.args])
 
         # Statically-resolved method / generic call: the checker recorded the
         # concrete target symbol; methods pass the receiver as argument zero.

@@ -32,6 +32,7 @@ class ProgramInfo:
     decl_module: dict[str, str] = field(default_factory=dict)  # top-level name -> module
     public: set[str] = field(default_factory=set)  # names declared `pub`
     file_module: dict[str, str] = field(default_factory=dict)  # file path -> module name
+    module_spans: list[tuple[str, Span]] = field(default_factory=list)
 
 
 def _decl_name(item: ast.Item) -> str | None:
@@ -49,6 +50,22 @@ def std_root() -> Path:
     return Path(__file__).resolve().parent / "std"
 
 
+def _contains(outer: Span, inner: Span | None) -> bool:
+    return (
+        inner is not None
+        and outer.file == inner.file
+        and outer.start.offset <= inner.start.offset
+        and inner.end.offset <= outer.end.offset
+    )
+
+
+def _module_for_item(blocks: list[ast.ModuleBlock], item: ast.Item, fallback: str) -> str:
+    for block in blocks:
+        if _contains(block.span, item.span):
+            return block.name
+    return fallback
+
+
 def load_program(entry_path: str, extra_roots: tuple[Path, ...] = ()) -> ProgramInfo:
     """Load the program rooted at `entry_path`. Imports resolve against the entry
     file's directory first, then each extra root (package dependency directories,
@@ -61,6 +78,26 @@ def load_program(entry_path: str, extra_roots: tuple[Path, ...] = ()) -> Program
     seen: set[Path] = set()
     file_module: dict[str, str] = {}
     module_file: dict[str, str] = {}  # declared module name -> file (MOD003)
+    module_spans: list[tuple[str, Span]] = []
+
+    def defines_module(path: Path, module_name: str) -> bool:
+        try:
+            src = path.read_text(encoding="utf-8")
+            mod = parse(src, str(path.resolve()))
+        except OSError, UnicodeDecodeError, FlexError:
+            return False
+        return any(block.name == module_name for block in mod.blocks)
+
+    def find_block_module(module_name: str) -> list[Path]:
+        matches: list[Path] = []
+        for root in roots:
+            for path in sorted(root.rglob("*.flx")):
+                resolved = path.resolve()
+                if resolved in seen:
+                    continue
+                if defines_module(path, module_name):
+                    matches.append(path)
+        return matches
 
     def visit(path: Path, expected_name: str | None, import_span: Span | None) -> None:
         resolved = path.resolve()
@@ -79,61 +116,69 @@ def load_program(entry_path: str, extra_roots: tuple[Path, ...] = ()) -> Program
         key = str(resolved)
         sources[key] = src
         mod = parse(src, key)
-        if expected_name is not None and mod.name != expected_name:
+        order.append(mod)
+        block_names = {block.name for block in mod.blocks}
+        if expected_name is not None and expected_name not in block_names:
             raise FlexError(
                 [
                     Diagnostic(
                         "MOD002",
-                        f"{path} declares module {mod.name!r} but is imported as {expected_name!r}",
-                        import_span,
-                        help=f"add `module {expected_name}` at the top of {path.name}",
-                    )
-                ]
-            )
-        other = module_file.get(mod.name)
-        if other is not None:
-            raise FlexError(
-                [
-                    Diagnostic(
-                        "MOD003",
-                        f"module {mod.name!r} is declared by both {other} and {key}",
+                        f"{path} does not define imported module {expected_name!r}",
                         import_span,
                     )
                 ]
             )
-        module_file[mod.name] = key
-        file_module[key] = mod.name
-        order.append(mod)
-        spans = list(mod.import_spans) + [mod.span] * len(mod.imports)  # tolerate missing spans
-        in_std = std_root() in resolved.parents
-        for imp, span in zip(mod.imports, spans, strict=False):
-            rel = Path(*imp.split(".")).with_suffix(".flx")
-            if in_std and (std_root() / rel).is_file():
-                # The stdlib's own dependency graph is pinned: a user/dep file at
-                # Std/X.flx shadows what the USER imports, never what the bundled
-                # std modules import from each other.
-                visit(std_root() / rel, imp, span)
-                continue
-            found = [r / rel for r in roots if (r / rel).is_file()]
-            if len(found) > 1:
-                listing = " and ".join(str(c) for c in found)
-                raise FlexError(
-                    [Diagnostic("MOD004", f"import {imp!r} is ambiguous: {listing}", span)]
-                )
-            if not found and (std_root() / rel).is_file():
-                found = [std_root() / rel]  # the stdlib is the fallback root
-            if not found and imp.startswith("Std."):
+        for block in mod.blocks:
+            other = module_file.get(block.name)
+            if other is not None:
                 raise FlexError(
                     [
                         Diagnostic(
-                            "MOD001",
-                            f"the standard library has no module {imp!r} (yet)",
-                            span,
+                            "MOD003",
+                            f"module {block.name!r} is declared by both {other} and {key}",
+                            import_span,
                         )
                     ]
                 )
-            child = found[0] if found else roots[0] / rel
-            visit(child, imp, span)
+            module_file[block.name] = key
+            module_spans.append((block.name, block.span))
+        file_module[key] = mod.name
+        in_std = std_root() in resolved.parents
+        for block in mod.blocks:
+            spans = list(block.import_spans) + [block.span] * len(block.imports)
+            imports = zip(block.imports, spans, strict=False)
+            for imp, span in imports:
+                if imp in module_file:
+                    continue
+                rel = Path(*imp.split(".")).with_suffix(".flx")
+                if in_std and (std_root() / rel).is_file():
+                    # The stdlib's own dependency graph is pinned: a user/dep file at
+                    # Std/X.flx shadows what the USER imports, never what the bundled
+                    # std modules import from each other.
+                    visit(std_root() / rel, imp, span)
+                    continue
+                found = [r / rel for r in roots if (r / rel).is_file()]
+                if not found:
+                    found = find_block_module(imp)
+                if len(found) > 1:
+                    listing = " and ".join(str(c) for c in found)
+                    raise FlexError(
+                        [Diagnostic("MOD004", f"import {imp!r} is ambiguous: {listing}", span)]
+                    )
+                if not found and (std_root() / rel).is_file():
+                    found = [std_root() / rel]  # the stdlib is the fallback root
+                if not found and imp.startswith("Std."):
+                    raise FlexError(
+                        [
+                            Diagnostic(
+                                "MOD001",
+                                f"the standard library has no module {imp!r} (yet)",
+                                span,
+                            )
+                        ]
+                    )
+                child = found[0] if found else roots[0] / rel
+                visit(child, imp, span)
 
     visit(Path(entry_path), None, None)
 
@@ -145,9 +190,9 @@ def load_program(entry_path: str, extra_roots: tuple[Path, ...] = ()) -> Program
             merged_items.append(item)
             name = _decl_name(item)
             if name is not None:
-                decl_module.setdefault(name, mod.name)
+                decl_module.setdefault(name, _module_for_item(mod.blocks, item, mod.name))
                 if getattr(item, "pub", False):
                     public.add(name)
 
     merged = replace(order[0], imports=[], items=merged_items, import_spans=[])
-    return ProgramInfo(merged, sources, decl_module, public, file_module)
+    return ProgramInfo(merged, sources, decl_module, public, file_module, module_spans)

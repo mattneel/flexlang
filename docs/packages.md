@@ -49,9 +49,11 @@ flx check        # checks it (and `flx check package.flx` validates the manifest
 
 Dependencies are **path dependencies** today. Each names a directory that
 becomes an additional import-resolution root, so `import Mathlib` in the app
-resolves to `Mathlib.flx` in the dependency — with `pub`/private visibility
-enforced across the package boundary, transitive dependencies included, and
-ambiguous imports (two roots providing the same module) rejected (MOD004). See
+resolves to `Mathlib.flx` in the dependency, or to a `module Mathlib { ... }`
+block in another `.flx` file when the conventional path does not exist — with
+`pub`/private visibility enforced across the package boundary, transitive
+dependencies included, and ambiguous imports (two roots providing the same
+module) rejected (MOD004). See
 [`examples/package-demo/`](https://github.com/mattneel/flexlang/tree/main/examples/package-demo)
 for a complete two-package project.
 

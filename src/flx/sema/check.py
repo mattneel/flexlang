@@ -314,6 +314,7 @@ class CheckResult:
     functions: dict[str, FnType]
     constructors: set[str]
     method_targets: dict[int, str]  # id(CallExpr) -> resolved impl/spec symbol
+    qualified_calls: dict[int, str] = field(default_factory=dict)
     # id(assert_eq/assert_ne CallExpr) -> the Eq impl symbol carrying the
     # comparison. A SEPARATE channel from method_targets: the generic
     # method-dispatch interceptors fire before builtin handling on both
@@ -333,6 +334,7 @@ class CheckResult:
     instantiations: set[tuple[str, tuple[str, ...]]] = field(default_factory=set)
     inst_subst: dict[tuple[str, tuple[str, ...]], dict[str, Type]] = field(default_factory=dict)
     file_module: dict[str, str] = field(default_factory=dict)  # file path -> module name
+    module_spans: list[tuple[str, Span]] = field(default_factory=list)
 
 
 @dataclass
@@ -362,6 +364,7 @@ class Checker:
         decl_module: dict[str, str] | None = None,
         public: set[str] | None = None,
         file_module: dict[str, str] | None = None,
+        module_spans: list[tuple[str, Span]] | None = None,
         builtin_records: dict[str, RecordType] | None = None,
     ) -> None:
         # Pre-registered record types (e.g. Manifest/Dependency when checking a
@@ -375,6 +378,7 @@ class Checker:
         self.decl_module = decl_module or {}
         self.public = public or set()
         self.file_module = file_module or {}
+        self.module_spans = module_spans or []
         self.current_module: str | None = None
         self.diags: list[Diagnostic] = []
         self.expr_types: dict[int, Type] = {}
@@ -401,6 +405,7 @@ class Checker:
         self.impls: dict[tuple[str, str], dict[str, str]] = {}  # (trait,key) -> method->symbol
         self._impl_spans: dict[tuple[str, str], Span] = {}  # for IMPL006 "first at" notes
         self.method_targets: dict[int, str] = {}  # id(CallExpr) -> impl symbol
+        self.qualified_calls: dict[int, str] = {}
         self._impl_fns: list[ast.FnDecl] = []  # renamed impl methods, emitted as functions
         self._self_type: Type | None = None
         # bounded generics: templates kept out of `functions`; instantiations
@@ -595,6 +600,7 @@ class Checker:
             self.functions,
             set(self.ctors),
             self.method_targets,
+            qualified_calls=self.qualified_calls,
             assert_impls=self.assert_impls,
             extern_fns=self.extern_fns,
             extern_abi=self.extern_abi,
@@ -602,6 +608,7 @@ class Checker:
             instantiations=self.instantiations,
             inst_subst=self.inst_subst,
             file_module=self.file_module,
+            module_spans=self.module_spans,
         )
 
     # --- traits / impls -------------------------------------------------------
@@ -807,7 +814,31 @@ class Checker:
         mangled name."""
         if span is None:
             return None
+        for name, module_span in self.module_spans:
+            if (
+                module_span.file == span.file
+                and module_span.start.offset <= span.start.offset
+                and span.end.offset <= module_span.end.offset
+            ):
+                return name
         return self.file_module.get(span.file)
+
+    def _loaded_modules(self) -> set[str]:
+        loaded = set(self.decl_module.values())
+        loaded.update(name for name, _ in self.module_spans)
+        if self.module.name:
+            loaded.add(self.module.name)
+        return loaded
+
+    def _member_path(self, expr: ast.Expr) -> list[str] | None:
+        if isinstance(expr, ast.NameExpr):
+            return [expr.name]
+        if isinstance(expr, ast.MemberExpr):
+            prefix = self._member_path(expr.obj)
+            if prefix is None:
+                return None
+            return [*prefix, expr.name]
+        return None
 
     def _name_visible(self, name: str) -> bool:
         if self.current_module is None or name in self.public:
@@ -1719,6 +1750,10 @@ class Checker:
 
     def _infer_call(self, expr: ast.CallExpr, expected: Type | None) -> Type:
         callee = expr.callee
+        if isinstance(callee, ast.MemberExpr):
+            qualified = self._infer_qualified_call(callee, expr, expected)
+            if qualified is not None:
+                return qualified
         # A local binding shadows every name-based dispatch (builtins, ctors,
         # global functions): a function-typed parameter named like a global
         # must call the PARAMETER, on every backend.
@@ -1831,6 +1866,49 @@ class Checker:
             return callee_ty.ret
         if callee_ty is not ERROR:
             self._err("TYPE004", "expression is not callable", callee.span)
+        return ERROR
+
+    def _infer_qualified_call(
+        self, callee: ast.MemberExpr, expr: ast.CallExpr, expected: Type | None
+    ) -> Type | None:
+        path = self._member_path(callee)
+        if path is None or len(path) < 2:
+            return None
+        if self.scope.lookup(path[0]) is not None:
+            return None
+        module_name = ".".join(path[:-1])
+        function_name = path[-1]
+        if module_name not in self._loaded_modules():
+            return None
+        if self.decl_module.get(function_name) != module_name:
+            for arg in expr.args:
+                self._check_expr(arg)
+            self._err(
+                "NAME001",
+                f"module {module_name!r} has no function {function_name!r}",
+                expr.span,
+            )
+            return ERROR
+        self._check_visible(function_name, callee.span)
+        if function_name in self.generic_fns:
+            ret = self._infer_generic_call(function_name, expr, expected)
+            symbol = self.method_targets.pop(id(expr), None)
+            if symbol is not None:
+                self.qualified_calls[id(expr)] = symbol
+            return ret
+        if function_name in self.functions:
+            fn_ty = self.functions[function_name]
+            self._check_args(f"{module_name}.{function_name}", fn_ty, expr)
+            self._require_effects(self.fn_effects.get(function_name, set()), expr.span)
+            self.qualified_calls[id(expr)] = function_name
+            return fn_ty.ret
+        for arg in expr.args:
+            self._check_expr(arg)
+        self._err(
+            "NAME001",
+            f"module {module_name!r} has no function {function_name!r}",
+            expr.span,
+        )
         return ERROR
 
     def _infer_container_method(
@@ -2664,6 +2742,7 @@ def check(
     decl_module: dict[str, str] | None = None,
     public: set[str] | None = None,
     file_module: dict[str, str] | None = None,
+    module_spans: list[tuple[str, Span]] | None = None,
     builtin_records: dict[str, RecordType] | None = None,
 ) -> CheckResult:
-    return Checker(module, decl_module, public, file_module, builtin_records).check()
+    return Checker(module, decl_module, public, file_module, module_spans, builtin_records).check()

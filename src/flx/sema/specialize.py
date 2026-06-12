@@ -20,7 +20,7 @@ import dataclasses
 from dataclasses import replace
 from typing import Any, cast
 
-from flx.diagnostics import Diagnostic, FlexError
+from flx.diagnostics import Diagnostic, FlexError, Span
 from flx.sema.check import CheckResult, check, spec_symbol
 from flx.syntax import ast
 from flx.types import AdtType, ListType, MapType, PrimType, RecordType, Type
@@ -36,17 +36,18 @@ def check_and_monomorphize(
     decl_module: dict[str, str] | None = None,
     public: set[str] | None = None,
     file_module: dict[str, str] | None = None,
+    module_spans: list[tuple[str, Span]] | None = None,
     builtin_records: dict[str, RecordType] | None = None,
 ) -> CheckResult:
     """Type-check `module`, then specialize every generic instantiation it
     demands, re-checking until the set of instantiations is closed."""
-    result = check(module, decl_module, public, file_module, builtin_records)
+    result = check(module, decl_module, public, file_module, module_spans, builtin_records)
     if not result.generic_fns:
         return result  # nothing generic: the first check is already complete
 
     current = module
     for _ in range(_MONO_LIMIT):
-        result = check(current, decl_module, public, file_module, builtin_records)
+        result = check(current, decl_module, public, file_module, module_spans, builtin_records)
         pending = [
             (name, key)
             for (name, key) in result.instantiations

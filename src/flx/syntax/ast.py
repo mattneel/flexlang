@@ -534,6 +534,16 @@ class ImplDecl(Item):
 
 
 @dataclass(frozen=True)
+class ModuleBlock:
+    name: str
+    imports: list[str]
+    items: list[Item]
+    span: Span
+    # span of each `import` statement, parallel to `imports` (for diagnostics)
+    import_spans: list[Span] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class Module:
     name: str
     imports: list[str]
@@ -541,6 +551,7 @@ class Module:
     span: Span
     # span of each `import` statement, parallel to `imports` (for diagnostics)
     import_spans: list[Span] = field(default_factory=list)
+    blocks: list[ModuleBlock] = field(default_factory=list)
 
     @property
     def functions(self) -> list[FnDecl]:

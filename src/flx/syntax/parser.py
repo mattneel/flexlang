@@ -149,6 +149,29 @@ class Parser:
 
     def parse_module(self) -> ast.Module:
         start = self._peek().span
+        if self._at(TokenKind.KW_MODULE):
+            save = self.pos
+            self._advance()
+            self._dotted_name()
+            is_block = self._at(TokenKind.LBRACE)
+            self.pos = save
+            if is_block:
+                blocks: list[ast.ModuleBlock] = []
+                items: list[ast.Item] = []
+                while not self._at(TokenKind.EOF):
+                    block = self._module_block()
+                    blocks.append(block)
+                    items.extend(block.items)
+                end = self._peek().span
+                items.extend(self._lambda_items)
+                return ast.Module(
+                    blocks[0].name,
+                    [],
+                    items,
+                    start.to(end),
+                    [],
+                    blocks,
+                )
         name = "Main"
         imports: list[str] = []
         if self._at(TokenKind.KW_MODULE):
@@ -160,49 +183,72 @@ class Parser:
             imports.append(self._dotted_name())
             import_spans.append(kw.span)
 
+        items = self._items_until(TokenKind.EOF)
+        end = self._peek().span
+        items = [*items, *self._lambda_items]
+        block = ast.ModuleBlock(name, imports, items, start.to(end), import_spans)
+        return ast.Module(name, imports, items, start.to(end), import_spans, [block])
+
+    def _module_block(self) -> ast.ModuleBlock:
+        start = self._expect(TokenKind.KW_MODULE, "'module'").span
+        name = self._dotted_name()
+        self._expect(TokenKind.LBRACE, "'{'")
+        imports: list[str] = []
+        import_spans: list[Span] = []
+        while self._at(TokenKind.KW_IMPORT):
+            kw = self._advance()
+            imports.append(self._dotted_name())
+            import_spans.append(kw.span)
+        items = self._items_until(TokenKind.RBRACE)
+        end = self._expect(TokenKind.RBRACE, "'}'").span
+        return ast.ModuleBlock(name, imports, items, start.to(end), import_spans)
+
+    def _items_until(self, end_kind: TokenKind) -> list[ast.Item]:
         items: list[ast.Item] = []
-        while not self._at(TokenKind.EOF):
-            pub_tok = self._peek() if self._at(TokenKind.KW_PUB) else None
+        while not self._at(end_kind) and not self._at(TokenKind.EOF):
+            items.append(self._item())
+        return items
+
+    def _item(self) -> ast.Item:
+        pub_tok = self._peek() if self._at(TokenKind.KW_PUB) else None
+        if pub_tok is not None:
+            self._advance()
+        if self._at(TokenKind.KW_FN):
+            item: ast.Item = self._fn()
+        elif self._at(TokenKind.KW_EXTERN):
+            item = self._extern_fn()
+        elif self._at(TokenKind.KW_TYPE):
+            item = self._type_decl([])
+        elif self._at(TokenKind.KW_DERIVE):
+            item = self._type_decl(self._derive_list())
+        elif self._at(TokenKind.KW_TRAIT):
+            item = self._trait_decl()
+        elif pub_tok is None and self._at(TokenKind.KW_TEST):
+            item = self._test()
+        elif pub_tok is None and self._at(TokenKind.KW_MACRO):
+            item = self._macro()
+        elif pub_tok is None and self._at(TokenKind.KW_IMPL):
+            item = self._impl_decl()
+        elif pub_tok is None and self._at(TokenKind.KW_TARGET):
+            item = self._target_decl()
+        elif pub_tok is None and self._at(TokenKind.KW_DOC):
+            item = self._doc_decl()
+        else:
+            tok = self._peek()
             if pub_tok is not None:
-                self._advance()
-            if self._at(TokenKind.KW_FN):
-                item: ast.Item = self._fn()
-            elif self._at(TokenKind.KW_EXTERN):
-                item = self._extern_fn()
-            elif self._at(TokenKind.KW_TYPE):
-                item = self._type_decl([])
-            elif self._at(TokenKind.KW_DERIVE):
-                item = self._type_decl(self._derive_list())
-            elif self._at(TokenKind.KW_TRAIT):
-                item = self._trait_decl()
-            elif pub_tok is None and self._at(TokenKind.KW_TEST):
-                item = self._test()
-            elif pub_tok is None and self._at(TokenKind.KW_MACRO):
-                item = self._macro()
-            elif pub_tok is None and self._at(TokenKind.KW_IMPL):
-                item = self._impl_decl()
-            elif pub_tok is None and self._at(TokenKind.KW_TARGET):
-                item = self._target_decl()
-            elif pub_tok is None and self._at(TokenKind.KW_DOC):
-                item = self._doc_decl()
-            else:
-                tok = self._peek()
-                if pub_tok is not None:
-                    raise self._error(
-                        f"`pub` can only precede a function, extern fn, type, or trait, "
-                        f"found {self._describe(tok)}",
-                        tok.span,
-                    )
                 raise self._error(
-                    f"expected a function, test, type, macro, trait, impl, or doc, "
+                    f"`pub` can only precede a function, extern fn, type, or trait, "
                     f"found {self._describe(tok)}",
                     tok.span,
                 )
-            if pub_tok is not None:
-                item = replace(item, pub=True)  # type: ignore[type-var]
-            items.append(item)
-        end = self._peek().span
-        return ast.Module(name, imports, [*items, *self._lambda_items], start.to(end), import_spans)
+            raise self._error(
+                f"expected a function, test, type, macro, trait, impl, or doc, "
+                f"found {self._describe(tok)}",
+                tok.span,
+            )
+        if pub_tok is not None:
+            item = replace(item, pub=True)  # type: ignore[type-var]
+        return item
 
     def _dotted_name(self) -> str:
         parts = [self._expect(TokenKind.IDENT, "a name").text]

@@ -17,7 +17,7 @@ from flx.backend.harness import generate_harness
 from flx.backend.mlir import BackendError, emit_module, emit_program
 from flx.backend.runtime import BASE_RUNTIME_C
 from flx.backend.toolchain import build_executable, run_executable
-from flx.diagnostics import Diagnostic, FlexError
+from flx.diagnostics import Diagnostic, FlexError, Span
 from flx.macro import expand
 from flx.modules import ProgramInfo, load_program
 from flx.sema.check import CheckResult
@@ -133,7 +133,11 @@ def _frontend(
                 loaded.sources,
             )
         result = check_and_monomorphize(
-            module, loaded.decl_module, loaded.public, loaded.file_module
+            module,
+            loaded.decl_module,
+            loaded.public,
+            loaded.file_module,
+            loaded.module_spans,
         )
         return result, loaded.sources
     except FlexError as err:
@@ -389,8 +393,21 @@ def cmd_test(
         return 2
 
     module = result.module
+
+    def _module_of_test(test_span: Span | None) -> str:
+        if test_span is None:
+            return module.name
+        for name, module_span in result.module_spans:
+            if (
+                module_span.file == test_span.file
+                and module_span.start.offset <= test_span.start.offset
+                and test_span.end.offset <= module_span.end.offset
+            ):
+                return name
+        return result.file_module.get(test_span.file, module.name)
+
     selected = [
-        (i, f"{result.file_module.get(t.span.file, module.name)} / {t.name}")
+        (i, f"{_module_of_test(t.span)} / {t.name}")
         for i, t in enumerate(module.tests)
         if test_filter is None or test_filter in t.name
     ]

@@ -145,8 +145,8 @@ ok Main / add works
 - **compile-time metaprogramming** (`docs/MVP.md` §10): `comptime { }` folding,
   hygienic `quote`/`unquote` **macros**, `reflect.fields` + comptime `for` +
   `unquote_splice`, and `derive(Eq, Show)` — viewable with `flx expand`;
-- **multi-file modules** — `import A.B` (path-resolved) with `pub`/private
-  visibility, merged into one program;
+- **block-scoped modules** — `module A.B { ... }`, multiple modules per file,
+  `import A.B`, module-qualified calls, and `pub`/private visibility;
 - **packages** — `package.flx`, a *typed, provably pure* Flex manifest (no TOML)
   with path dependencies; `flx run`/`test`/`check` need no arguments inside a
   package ([Packages and Builds](https://mattneel.github.io/flexlang/packages.html));

@@ -181,6 +181,7 @@ class FunctionLowerer:
         self.functions = checked.functions
         self.constructors = checked.constructors
         self.method_targets = checked.method_targets
+        self.qualified_calls = checked.qualified_calls
         self.extern_fns = checked.extern_fns
         self.extern_abi = checked.extern_abi
         self.globals: list[str] = []  # module-level string constants (not reset)
@@ -1199,6 +1200,11 @@ class FunctionLowerer:
         return out
 
     def _lower_call(self, expr: ast.CallExpr) -> str | None:
+        qualified_symbol = self.qualified_calls.get(id(expr))
+        if qualified_symbol is not None:
+            fn_ty = self.functions[qualified_symbol]
+            args = [self._materialize(self.lower_expr(a), a) for a in expr.args]
+            return self._emit_call(_flex_symbol(qualified_symbol), args, fn_ty)
         # Trait method call (p.show()) -> direct call to the resolved impl symbol.
         if isinstance(expr.callee, ast.MemberExpr):
             symbol = self.method_targets.get(id(expr))
@@ -1392,11 +1398,11 @@ class FunctionLowerer:
         if name in _BUILTINS:
             self._lower_builtin(name, expr)
             return None
-        fn_ty = self.functions.get(name)
-        if fn_ty is None:
+        direct_ty = self.functions.get(name)
+        if direct_ty is None:
             raise BackendError(f"call to non-function {name!r}")
         args = [self._materialize(self.lower_expr(a), a) for a in expr.args]
-        return self._emit_call(_flex_symbol(name), args, fn_ty)
+        return self._emit_call(_flex_symbol(name), args, direct_ty)
 
     def _lower_builtin(self, name: str, call: ast.CallExpr) -> None:
         if not self.test_mode:

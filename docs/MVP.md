@@ -254,17 +254,41 @@ Flex syntax should feel ML/F#/Elm-adjacent, but use braces where useful for pars
 ### 4.1 Modules
 
 ```flx
-module Video.Decode
+module Video.Decode {
+  pub fn width() -> I64 = { 1920 }
+}
+
+module Main {
+  import Video.Decode
+
+  fn main() -> I64 = { Video.Decode.width() }
+}
 ```
 
-### 4.2 Imports
+The legacy header form is still accepted as a shorthand for a single module
+whose body is the rest of the file:
 
-MVP can ignore imports or support a minimal form:
+```flx
+module Main
+
+fn main() -> I64 = { 0 }
+```
+
+A file may contain more than one `module Name { ... }` block. Module blocks are
+lexical scopes for `pub`/private visibility; a private declaration is visible
+inside its own block only.
+
+### 4.2 Imports
 
 ```flx
 import Core.Result
 import Std.Fs
 ```
+
+Imports load modules by name. The conventional path `Core/Result.flx` is tried
+first; if no such file exists, the loader can find a `module Core.Result { ... }`
+block in another loaded root file. Public functions can also be called with the
+full module prefix, e.g. `Core.Result.unwrap(x)`.
 
 ### 4.3 Functions
 
