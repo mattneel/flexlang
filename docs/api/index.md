@@ -10,6 +10,7 @@
 - [Std.Env](Std.Env.md)
 - [Std.Fs](Std.Fs.md)
 - [Std.IO](Std.IO.md)
+- [Std.Json](Std.Json.md)
 - [Std.List](Std.List.md)
 - [Std.Map](Std.Map.md)
 - [Std.Math](Std.Math.md)

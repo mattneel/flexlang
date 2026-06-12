@@ -24,6 +24,7 @@
   - [Std.Env](api/Std.Env.md)
   - [Std.Fs](api/Std.Fs.md)
   - [Std.IO](api/Std.IO.md)
+  - [Std.Json](api/Std.Json.md)
   - [Std.List](api/Std.List.md)
   - [Std.Map](api/Std.Map.md)
   - [Std.Math](api/Std.Math.md)

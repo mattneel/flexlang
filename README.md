@@ -174,9 +174,10 @@ ok Main / add works
   for program arguments
   ([Lists and Iteration](https://mattneel.github.io/flexlang/lists.html));
 - **standard library** — written in Flex, shipped in the package, importable
-  everywhere (`import Std.Math`): `Std.Math`/`Str`/`Env`/`Time`/`Proc`/`List`,
-  with string equality via `impl Eq for String` and byte-level string tools
-  (`char_at`/`substr`/`split`/`parse_int`)
+  everywhere (`import Std.Math`): `Std.Math`/`Str`/`Env`/`Time`/`Proc`/`List`/
+  `Map`/`Arg`/`Fs`/`Csv`/`Json`,
+  with string equality via `impl Eq for String`, byte-level string tools, and
+  small CLI/data helpers
   ([Standard Library](https://mattneel.github.io/flexlang/std.html)).
 
 ### Prototype / partial

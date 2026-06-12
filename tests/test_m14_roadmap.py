@@ -131,6 +131,66 @@ def test_text_data_helpers_parity(tmp_path: Path) -> None:
     assert _test_cmd(path, "interp") == _test_cmd(path, "native")
 
 
+JSON_STDLIB = r"""
+module Main
+
+import Std.Json
+import Std.Str
+
+test "json parse and stringify" {
+  match parse("{\"name\":\"ann\",\"scores\":[1,2],\"ok\":true,\"none\":null}") {
+    Ok(value) => {
+      match value {
+        JsonObj(obj) => {
+          match Map.get(obj, "name") {
+            Some(JsonStr(name)) => assert_eq(name, "ann")
+            _ => fail("missing name")
+          }
+          match Map.get(obj, "scores") {
+            Some(JsonArr(scores)) => {
+              assert_eq(List.len(scores), 2)
+              match scores[0] { JsonNum(n) => assert_eq(n, 1.0)  _ => fail("score 0") }
+            }
+            _ => fail("missing scores")
+          }
+          match Map.get(obj, "ok") {
+            Some(JsonBool(ok)) => assert(ok)
+            _ => fail("missing ok")
+          }
+          match Map.get(obj, "none") {
+            Some(JsonNull) => ()
+            _ => fail("missing none")
+          }
+        }
+        _ => fail("expected object")
+      }
+    }
+    Err(e) => fail(e)
+  }
+
+  let made = JsonArr([JsonNum(1.5), JsonBool(false), JsonNull])
+  assert_eq(stringify(made), "[1.5,false,null]")
+
+  match parse("[1,]") {
+    Ok(_) => fail("bad array parsed")
+    Err(e) => assert(e.eq("expected JSON value"))
+  }
+}
+"""
+
+
+def test_json_stdlib_interp(tmp_path: Path) -> None:
+    path = _write(tmp_path, JSON_STDLIB)
+    code, out = _test_cmd(path)
+    assert code == 0, out.decode(errors="replace")
+
+
+@native
+def test_json_stdlib_parity(tmp_path: Path) -> None:
+    path = _write(tmp_path, JSON_STDLIB)
+    assert _test_cmd(path, "interp") == _test_cmd(path, "native")
+
+
 def test_run_quiet_status_and_missing_file_parity(tmp_path: Path) -> None:
     path = _write(
         tmp_path,

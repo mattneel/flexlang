@@ -34,6 +34,7 @@ an effect-free function is EFFECT001, exactly like any other call.
 | `Std.Math` | `abs`, `min`, `max`, `clamp`, `sign`, `pow` (64-bit wrapping integer math) | pure |
 | `Std.Str` | `length` (bytes), `is_empty`, `eq`, `ne`, `cmp`, `str_lt`, `byte_at`, `substr`, `char_at`, ASCII classifiers/case helpers, `split`, `parse_int`, `parse_float`, `to_str_fixed`, `from_byte`, `from_bytes`, `to_bytes`, `trim`, `to_hex`, `to_unsigned`, `repeat`, `pad_left`, `pad_right`, plus `impl Eq for String` and `impl Show for String` | pure |
 | `Std.Csv` | `parse_csv_line(row)` for one CSV record with quoted fields and doubled quotes | pure |
+| `Std.Json` | `Json`, `parse(text)`, and `stringify(value)` for small CLI/data workflows | pure |
 | `Std.IO` | `print` (no newline), `println`, `eprintln`, `read_line` (one stdin line as `Option<String>`; `None` at EOF) | `Log` / `Fs` |
 | `Std.Fs` | `read_text(path)`, `write_text(path, contents)`, `append_text(path, contents)` for narrow text-file CLIs | `Fs` |
 | `Std.Arg` | `all`, `count`, `at`, `has_flag`, `value_after` over `Env.argv()` | `Process` |
