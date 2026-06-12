@@ -468,6 +468,61 @@ void __flx_f64_to_str(double x, FlxStr *out) {
     out->ptr = buf;
     out->len = (long long)strlen(buf);
 }
+static unsigned long long __flx_umax_bits(long long bits) {
+    return bits >= 64 ? ULLONG_MAX : ((1ULL << bits) - 1ULL);
+}
+static long long __flx_smin_bits(long long bits) {
+    return bits >= 64 ? LLONG_MIN : -(1LL << (bits - 1));
+}
+static long long __flx_smax_bits(long long bits) {
+    return bits >= 64 ? LLONG_MAX : ((1LL << (bits - 1)) - 1LL);
+}
+static void __flx_int_convert_fail(void) {
+    __flx_runtime_fail("integer conversion out of range");
+}
+long long __flx_int_to_int(
+    long long value,
+    long long src_bits,
+    long long src_unsigned,
+    long long dst_bits,
+    long long dst_unsigned
+) {
+    if (src_unsigned) {
+        unsigned long long raw = (unsigned long long)value;
+        if (src_bits < 64) raw &= __flx_umax_bits(src_bits);
+        if (dst_unsigned) {
+            if (dst_bits < 64 && raw > __flx_umax_bits(dst_bits)) __flx_int_convert_fail();
+            return (long long)raw;
+        }
+        unsigned long long max = (unsigned long long)__flx_smax_bits(dst_bits);
+        if (raw > max) __flx_int_convert_fail();
+        return (long long)raw;
+    }
+    if (dst_unsigned) {
+        if (value < 0) __flx_int_convert_fail();
+        unsigned long long raw = (unsigned long long)value;
+        if (dst_bits < 64 && raw > __flx_umax_bits(dst_bits)) __flx_int_convert_fail();
+        return (long long)raw;
+    }
+    if (value < __flx_smin_bits(dst_bits) || value > __flx_smax_bits(dst_bits)) {
+        __flx_int_convert_fail();
+    }
+    return value;
+}
+long long __flx_f64_to_int(double x, long long dst_bits, long long dst_unsigned) {
+    if (dst_unsigned) {
+        long double upper =
+            dst_bits >= 64 ? 18446744073709551616.0L : (long double)(1ULL << dst_bits);
+        if (!((long double)x >= 0.0L && (long double)x < upper)) __flx_int_convert_fail();
+        return (long long)(unsigned long long)x;
+    }
+    long double lower =
+        dst_bits >= 64 ? -9223372036854775808.0L : (long double)__flx_smin_bits(dst_bits);
+    long double upper =
+        dst_bits >= 64 ? 9223372036854775808.0L : (long double)(1LL << (dst_bits - 1));
+    if (!((long double)x >= lower && (long double)x < upper)) __flx_int_convert_fail();
+    return (long long)x;
+}
 // Checked F64 -> I64 truncation: NaN/infinity/out-of-range has no honest
 // answer (LLVM fptosi would be poison), so it panics like indexing does.
 long long __flx_f64_to_i64(double x) {
@@ -526,6 +581,34 @@ void __flx_from_bytes(void *lp, FlxStr *out) {
     buf[l->len] = 0;
     out->ptr = buf;
     out->len = l->len;
+}
+// Raw Bytes buffers: unlike String construction, byte 0 is valid.
+static void __flx_binary_byte_check(long long b) {
+    if (b < 0 || b > 255) {
+        char msg[64];
+        snprintf(msg, sizeof msg, "byte %lld is outside 0..255", b);
+        __flx_runtime_fail(msg);
+    }
+}
+void __flx_bytes_push(void *lp, long long b) {
+    __flx_binary_byte_check(b);
+    __flx_list_push(lp, b);
+}
+void __flx_bytes_to_hex(void *lp, FlxStr *out) {
+    FlxList *l = (FlxList *)lp;
+    __flx_list_check(l);
+    long long out_len = __flx_checked_add_len(l->len, l->len);
+    char *buf = (char *)__flx_malloc_size(__flx_len_with_nul(out_len));
+    const char *digits = "0123456789abcdef";
+    for (long long i = 0; i < l->len; i++) {
+        long long b = l->data[i];
+        __flx_binary_byte_check(b);
+        buf[i * 2] = digits[(b >> 4) & 15];
+        buf[i * 2 + 1] = digits[b & 15];
+    }
+    buf[out_len] = 0;
+    out->ptr = buf;
+    out->len = out_len;
 }
 // Float <-> text (Std.Str parse_float / to_str_fixed). parse_f64 is strtod of
 // the longest valid prefix (0.0 if none) — the interpreter calls the SAME
@@ -617,6 +700,8 @@ BASE_RUNTIME_DECLS = (
     "func.func private @__flx_substr(!llvm.ptr, i64, i64, i64, !llvm.ptr)\n"
     "func.func private @__flx_from_byte(i64, !llvm.ptr)\n"
     "func.func private @__flx_from_bytes(!llvm.ptr, !llvm.ptr)\n"
+    "func.func private @__flx_bytes_push(!llvm.ptr, i64)\n"
+    "func.func private @__flx_bytes_to_hex(!llvm.ptr, !llvm.ptr)\n"
     "func.func private @__flx_parse_f64(!llvm.ptr) -> f64\n"
     "func.func private @__flx_f64_fixed(f64, i64, !llvm.ptr)\n"
     "func.func private @__flx_i64_to_hex(i64, !llvm.ptr)\n"
@@ -624,4 +709,6 @@ BASE_RUNTIME_DECLS = (
     "func.func private @__flx_argv() -> !llvm.ptr\n"
     "func.func private @__flx_f64_to_str(f64, !llvm.ptr)\n"
     "func.func private @__flx_f64_to_i64(f64) -> i64\n"
+    "func.func private @__flx_int_to_int(i64, i64, i64, i64, i64) -> i64\n"
+    "func.func private @__flx_f64_to_int(f64, i64, i64) -> i64\n"
 )

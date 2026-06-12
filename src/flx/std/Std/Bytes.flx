@@ -1,0 +1,9 @@
+module Std.Bytes
+
+// Raw byte buffers. Unlike String, Bytes can carry NUL.
+
+pub fn bytes_len(bs: Bytes) -> I64 = { Bytes.len(bs) }
+
+pub fn bytes_at(bs: Bytes, i: I64) -> U8 = { Bytes.at(bs, i) }
+
+pub fn bytes_to_hex(bs: Bytes) -> String = { Bytes.to_hex(bs) }

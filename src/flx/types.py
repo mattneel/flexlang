@@ -115,20 +115,60 @@ class ErrorType(Type):
         return "<error>"
 
 
+I8 = PrimType("I8")
+U8 = PrimType("U8")
+I16 = PrimType("I16")
+U16 = PrimType("U16")
+I32 = PrimType("I32")
+U32 = PrimType("U32")
 I64 = PrimType("I64")
+U64 = PrimType("U64")
 F64 = PrimType("F64")
 BOOL = PrimType("Bool")
 UNIT = PrimType("Unit")
 STRING = PrimType("String")
+BYTES = PrimType("Bytes")
 REGION = PrimType("Region")
 ERROR = ErrorType()
 
 # Type names usable in annotations for the MVP.
 PRIMITIVES: dict[str, Type] = {
+    "I8": I8,
+    "U8": U8,
+    "I16": I16,
+    "U16": U16,
+    "I32": I32,
+    "U32": U32,
     "I64": I64,
+    "U64": U64,
     "F64": F64,
     "Bool": BOOL,
     "Unit": UNIT,
     "String": STRING,
+    "Bytes": BYTES,
     "Region": REGION,
 }
+
+INT_INFO: dict[str, tuple[int, bool]] = {
+    "I8": (8, True),
+    "U8": (8, False),
+    "I16": (16, True),
+    "U16": (16, False),
+    "I32": (32, True),
+    "U32": (32, False),
+    "I64": (64, True),
+    "U64": (64, False),
+}
+
+
+def is_int_type(ty: Type | None) -> bool:
+    return isinstance(ty, PrimType) and ty.name in INT_INFO
+
+
+def int_bounds(ty: Type) -> tuple[int, int]:
+    if not is_int_type(ty):
+        raise TypeError(f"{ty} is not an integer type")
+    width, signed = INT_INFO[ty.name]  # type: ignore[union-attr]
+    if signed:
+        return (-(1 << (width - 1)), (1 << (width - 1)) - 1)
+    return (0, (1 << width) - 1)

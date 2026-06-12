@@ -5,6 +5,7 @@
 *Generated from `doc` declarations by `flx docs build`.*
 
 - [Std.Arg](Std.Arg.md)
+- [Std.Bytes](Std.Bytes.md)
 - [Std.Env](Std.Env.md)
 - [Std.Fs](Std.Fs.md)
 - [Std.IO](Std.IO.md)

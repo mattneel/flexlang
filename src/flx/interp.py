@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 from flx.syntax import ast
+from flx.types import INT_INFO
 
 if TYPE_CHECKING:
     from flx.sema.check import CheckResult
@@ -93,6 +94,32 @@ def _wrap(value: int) -> int:
     the native `arith` overflow behavior."""
     value &= _I64_MASK
     return value - (1 << 64) if value & _I64_SIGN else value
+
+
+def _int_bounds_name(name: str) -> tuple[int, int]:
+    width, signed = INT_INFO[name]
+    if signed:
+        return (-(1 << (width - 1)), (1 << (width - 1)) - 1)
+    return (0, (1 << width) - 1)
+
+
+def _logical_int_value(value: int, type_name: str | None) -> int:
+    if type_name in INT_INFO and not INT_INFO[type_name][1]:
+        return value & ((1 << INT_INFO[type_name][0]) - 1)
+    return value
+
+
+def _checked_int_convert(value: object, source_type: str | None, target_type: str) -> int:
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise FlexRuntimeError(f"cannot convert {_f64_str(value)} to {target_type}")
+        value = int(value)
+    assert isinstance(value, int)
+    logical = _logical_int_value(value, source_type)
+    lo, hi = _int_bounds_name(target_type)
+    if not lo <= logical <= hi:
+        raise FlexRuntimeError(f"value {logical} is outside {target_type} range ({lo}..{hi})")
+    return logical
 
 
 @dataclass(frozen=True)
@@ -355,6 +382,13 @@ def _checked_byte(b: object) -> int:
     return b
 
 
+def _checked_binary_byte(b: object) -> int:
+    assert isinstance(b, int)
+    if not 0 <= b <= 255:
+        raise FlexRuntimeError(f"byte {b} is outside 0..255")
+    return b
+
+
 class Interpreter:
     def __init__(
         self,
@@ -598,6 +632,8 @@ class Interpreter:
             return expr.value
         if isinstance(expr, ast.StringLit):
             return expr.value
+        if isinstance(expr, ast.BytesLit):
+            return self._bytes_lit(expr, env)
         if isinstance(expr, ast.NameExpr):
             if env.has(expr.name):
                 return env.get(expr.name)
@@ -862,6 +898,8 @@ class Interpreter:
                 return self._map_op(callee.name, expr, env)
             if isinstance(obj, ast.NameExpr) and obj.name == "Str" and not shadowed:
                 return self._str_op(callee.name, expr, env)
+            if isinstance(obj, ast.NameExpr) and obj.name == "Bytes" and not shadowed:
+                return self._bytes_op(callee.name, expr, env)
             if (
                 isinstance(obj, ast.NameExpr)
                 and obj.name == "Env"
@@ -887,17 +925,24 @@ class Interpreter:
             value = self.eval(expr.args[0], env)
             if isinstance(value, float):
                 return _f64_str(value)
+            arg_ty = self.checked.expr_types.get(id(expr.args[0]))
+            ty_name = getattr(arg_ty, "name", "")
+            if isinstance(value, int) and ty_name in {"U8", "U16", "U32", "U64"}:
+                return str(value & ((1 << int(ty_name[1:])) - 1))
             return str(value)
         if name == "to_f64":
-            n = self.eval(expr.args[0], env)
-            assert isinstance(n, int)
-            return float(n)
-        if name == "to_i64":
-            x = self.eval(expr.args[0], env)
-            assert isinstance(x, float)
-            if not math.isfinite(x) or not (-(2.0**63) <= x < 2.0**63):
-                raise FlexRuntimeError(f"cannot convert {_f64_str(x)} to I64")
-            return int(x)  # truncates toward zero
+            value = self.eval(expr.args[0], env)
+            arg_ty = self.checked.expr_types.get(id(expr.args[0]))
+            ty_name = getattr(arg_ty, "name", None)
+            assert isinstance(value, int)
+            return float(_logical_int_value(value, ty_name))
+        if name.startswith("to_") and len(name) >= 5:
+            target = name[3:].upper()
+            if target in INT_INFO:
+                arg_ty = self.checked.expr_types.get(id(expr.args[0]))
+                return _checked_int_convert(
+                    self.eval(expr.args[0], env), getattr(arg_ty, "name", None), target
+                )
         if name in self.constructors:
             return Variant(name, self._ctor_payload(expr.args, env))
         if name in self.extern_fns:
@@ -906,6 +951,30 @@ class Interpreter:
         if func is None:
             raise FlexRuntimeError(f"call to unknown function {name!r}")
         return self.call(func, [self.eval(a, env) for a in expr.args])
+
+    def _bytes_lit(self, expr: ast.BytesLit, env: _Env) -> list[int]:
+        out: list[int] = []
+        for part in expr.parts:
+            if isinstance(part, ast.StringLit):
+                out.extend(part.value.encode("utf-8", "surrogateescape"))
+            else:
+                out.append(_checked_binary_byte(self.eval(part, env)))
+        return out
+
+    def _bytes_op(self, op: str, expr: ast.CallExpr, env: _Env) -> object:
+        bs = self.eval(expr.args[0], env)
+        assert isinstance(bs, list)
+        if op == "len":
+            return len(bs)
+        if op == "at":
+            i = self.eval(expr.args[1], env)
+            assert isinstance(i, int)
+            if not 0 <= i < len(bs):
+                raise FlexRuntimeError(f"index {i} out of bounds (len {len(bs)})")
+            return bs[i]
+        if op == "to_hex":
+            return "".join(f"{_checked_binary_byte(b):02x}" for b in bs)
+        raise FlexRuntimeError(f"cannot interpret Bytes.{op}")
 
     def _list_op(self, op: str, expr: ast.CallExpr, env: _Env) -> object:
         xs = self.eval(expr.args[0], env)

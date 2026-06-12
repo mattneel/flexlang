@@ -55,6 +55,12 @@ class StringLit(Expr):
 
 
 @dataclass(frozen=True)
+class BytesLit(Expr):
+    parts: list[Expr]
+    span: Span
+
+
+@dataclass(frozen=True)
 class NameExpr(Expr):
     name: str
     span: Span

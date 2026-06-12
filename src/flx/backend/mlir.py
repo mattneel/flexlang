@@ -24,20 +24,33 @@ from flx.sema.check import CheckResult
 from flx.syntax import ast
 from flx.types import (
     BOOL,
+    BYTES,
     F64,
     I64,
     STRING,
     UNIT,
+    U64,
     AdtType,
     FnType,
     ListType,
     MapType,
     RecordType,
     Type,
+    is_int_type,
 )
 
 _ARITH_OP = {"+": "addi", "-": "subi", "*": "muli"}
 _BIT_OP = {"&": "andi", "|": "ori", "^": "xori"}
+_INT_CONVERSIONS: dict[str, tuple[int, bool]] = {
+    "to_i8": (8, False),
+    "to_u8": (8, True),
+    "to_i16": (16, False),
+    "to_u16": (16, True),
+    "to_i32": (32, False),
+    "to_u32": (32, True),
+    "to_i64": (64, False),
+    "to_u64": (64, True),
+}
 # Float arithmetic is plain IEEE-754 (divf/remf yield inf/nan, no traps), so it
 # needs no guarded runtime calls. Comparisons are ORDERED (false on NaN), and
 # != lowers as !(oeq) — i.e. une — matching the interpreter and C.
@@ -65,7 +78,7 @@ _RUNTIME_DECLS = (
 
 
 def mlir_type(ty: Type) -> str:
-    if ty is I64:
+    if is_int_type(ty):
         return "i64"
     if ty is F64:
         return "f64"
@@ -77,6 +90,8 @@ def mlir_type(ty: Type) -> str:
         return "i64"
     if ty is STRING:
         return "!llvm.struct<(ptr, i64)>"
+    if ty is BYTES:
+        return "!llvm.ptr"
     if isinstance(ty, RecordType):
         fields = ", ".join(mlir_type(t) for _, t in ty.fields)
         return f"!llvm.struct<({fields})>"
@@ -104,6 +119,13 @@ def _is_enum(ty: AdtType) -> bool:
     return all(not v.payload for v in ty.variants)
 
 
+def _int_layout(ty: Type) -> tuple[int, bool]:
+    name = getattr(ty, "name", "")
+    if not name or name[0] not in ("I", "U"):
+        raise BackendError(f"type {ty} is not an integer type")
+    return int(name[1:]), name[0] == "U"
+
+
 def _payload_inline(ty: Type) -> bool:
     """Whether a payload of this type lives in the i64 slot by value. Everything
     else (strings, records, non-enum ADTs — recursion included — and any
@@ -112,9 +134,11 @@ def _payload_inline(ty: Type) -> bool:
     storable, NOT comparable — the checker still rejects `==` on lists)."""
     return (
         ty is I64
+        or is_int_type(ty)
         or ty is F64
         or ty is BOOL
         or ty is UNIT
+        or ty is BYTES
         or isinstance(ty, (ListType, MapType))
         or (isinstance(ty, AdtType) and _is_enum(ty))
     )
@@ -358,7 +382,10 @@ class FunctionLowerer:
 
     def lower_expr(self, expr: ast.Expr) -> str | None:
         if isinstance(expr, ast.IntLit):
-            return self._const(str(expr.value), "i64")
+            value = expr.value
+            if self._ty_of(expr) is U64 and value >= (1 << 63):
+                value -= 1 << 64
+            return self._const(str(value), "i64")
         if isinstance(expr, ast.FloatLit):
             bits = struct.unpack("<Q", struct.pack("<d", expr.value))[0]
             return self._const(f"0x{bits:016X}", "f64")  # hex = exact raw bits
@@ -368,6 +395,8 @@ class FunctionLowerer:
             return None
         if isinstance(expr, ast.StringLit):
             return self._lower_string(expr)
+        if isinstance(expr, ast.BytesLit):
+            return self._lower_bytes(expr)
         if isinstance(expr, ast.NameExpr):
             return self._lower_name(expr)
         if isinstance(expr, ast.UnaryExpr):
@@ -738,7 +767,7 @@ class FunctionLowerer:
             out = self._fresh()
             self._emit(f"{out} = arith.bitcast {value} : f64 to i64")
             return out
-        if isinstance(ty, (ListType, MapType)):
+        if ty is BYTES or isinstance(ty, (ListType, MapType)):
             out = self._fresh()
             self._emit(f"{out} = llvm.ptrtoint {value} : !llvm.ptr to i64")
             return out
@@ -754,7 +783,7 @@ class FunctionLowerer:
             out = self._fresh()
             self._emit(f"{out} = arith.bitcast {value} : i64 to f64")
             return out
-        if isinstance(ty, (ListType, MapType)):
+        if ty is BYTES or isinstance(ty, (ListType, MapType)):
             out = self._fresh()
             self._emit(f"{out} = llvm.inttoptr {value} : i64 to !llvm.ptr")
             return out
@@ -869,6 +898,21 @@ class FunctionLowerer:
             slot = self._encode_elem(value, ty.elem)
             self._emit(f"func.call @__flx_list_push({lst}, {slot}) : (!llvm.ptr, i64) -> ()")
         return lst
+
+    def _lower_bytes(self, expr: ast.BytesLit) -> str:
+        out = self._fresh()
+        self._emit(f"{out} = func.call @__flx_list_new() : () -> !llvm.ptr")
+        for part in expr.parts:
+            if isinstance(part, ast.StringLit):
+                for b in part.value.encode("utf-8", "surrogateescape"):
+                    value = self._const(str(b), "i64")
+                    self._emit(
+                        f"func.call @__flx_bytes_push({out}, {value}) : (!llvm.ptr, i64) -> ()"
+                    )
+                continue
+            value = self._materialize(self.lower_expr(part), part)
+            self._emit(f"func.call @__flx_bytes_push({out}, {value}) : (!llvm.ptr, i64) -> ()")
+        return out
 
     def _lower_index(self, expr: ast.IndexExpr) -> str:
         obj_ty = self._ty_of(expr.obj)
@@ -1198,6 +1242,22 @@ class FunctionLowerer:
                     return self._lower_list_op(method, expr)
                 if obj.name == "Map":
                     return self._lower_map_op(method, expr)
+                if obj.name == "Bytes" and method == "len":
+                    bs = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
+                    out = self._fresh()
+                    self._emit(f"{out} = func.call @__flx_list_len({bs}) : (!llvm.ptr) -> i64")
+                    return out
+                if obj.name == "Bytes" and method == "at":
+                    bs = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
+                    idx = self._materialize(self.lower_expr(expr.args[1]), expr.args[1])
+                    out = self._fresh()
+                    self._emit(
+                        f"{out} = func.call @__flx_list_get({bs}, {idx}) : (!llvm.ptr, i64) -> i64"
+                    )
+                    return out
+                if obj.name == "Bytes" and method == "to_hex":
+                    bs = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
+                    return self._str_runtime("__flx_bytes_to_hex", ["!llvm.ptr"], [bs])
                 if obj.name == "Str" and method == "byte_at":
                     s = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
                     ptr, length = self._string_parts(s)
@@ -1271,23 +1331,48 @@ class FunctionLowerer:
             return self._emit_call(_flex_symbol(symbol), args, spec_ty)
         if name in self.extern_fns:
             return self._lower_extern_call(name, expr)
+        if name in _INT_CONVERSIONS:
+            target_bits, target_unsigned = _INT_CONVERSIONS[name]
+            arg_expr = expr.args[0]
+            arg = self.lower_expr(arg_expr)
+            assert arg is not None
+            target_bits_v = self._const(str(target_bits), "i64")
+            target_unsigned_v = self._const("1" if target_unsigned else "0", "i64")
+            if self._ty_of(arg_expr) is F64:
+                if name == "to_i64":
+                    out = self._fresh()
+                    self._emit(f"{out} = func.call @__flx_f64_to_i64({arg}) : (f64) -> i64")
+                    return out
+                out = self._fresh()
+                self._emit(
+                    f"{out} = func.call @__flx_f64_to_int({arg}, {target_bits_v}, "
+                    f"{target_unsigned_v}) : (f64, i64, i64) -> i64"
+                )
+                return out
+            source_bits, source_unsigned = _int_layout(self._ty_of(arg_expr))
+            source_bits_v = self._const(str(source_bits), "i64")
+            source_unsigned_v = self._const("1" if source_unsigned else "0", "i64")
+            out = self._fresh()
+            self._emit(
+                f"{out} = func.call @__flx_int_to_int({arg}, {source_bits_v}, "
+                f"{source_unsigned_v}, {target_bits_v}, {target_unsigned_v}) : "
+                "(i64, i64, i64, i64, i64) -> i64"
+            )
+            return out
         if name == "to_str":  # prelude: I64 | F64 -> String
             arg = self.lower_expr(expr.args[0])
             assert arg is not None
             if self._ty_of(expr.args[0]) is F64:
                 return self._str_runtime("__flx_f64_to_str", ["f64"], [arg])
+            if self._ty_of(expr.args[0]) is U64:
+                return self._str_runtime("__flx_i64_to_unsigned", ["i64"], [arg])
             return self._str_runtime("__flx_int_to_str", ["i64"], [arg])
         if name == "to_f64":
             arg = self.lower_expr(expr.args[0])
             assert arg is not None
             out = self._fresh()
-            self._emit(f"{out} = arith.sitofp {arg} : i64 to f64")
-            return out
-        if name == "to_i64":
-            arg = self.lower_expr(expr.args[0])
-            assert arg is not None
-            out = self._fresh()
-            self._emit(f"{out} = func.call @__flx_f64_to_i64({arg}) : (f64) -> i64")
+            op = "uitofp" if self._ty_of(expr.args[0]) is U64 else "sitofp"
+            self._emit(f"{out} = arith.{op} {arg} : i64 to f64")
             return out
         if name in self.constructors:  # variant constructor, e.g. Ok(x)
             adt = self._ty_of(expr)
@@ -1574,7 +1659,9 @@ class FunctionLowerer:
         return self._lower_string(ast.StringLit(text, self.checked.module.span))
 
     def _emit_show(self, value: str, ty: Type) -> str:
-        if ty is I64:
+        if ty is U64:
+            return self._str_runtime("__flx_i64_to_unsigned", ["i64"], [value])
+        if is_int_type(ty):
             return self._str_runtime("__flx_int_to_str", ["i64"], [value])
         if ty is F64:
             return self._str_runtime("__flx_f64_to_str", ["f64"], [value])

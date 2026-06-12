@@ -79,6 +79,7 @@ _EXPR_START = {
     TokenKind.KW_IF,
     TokenKind.KW_FN,
     TokenKind.LPAREN,
+    TokenKind.SHL,
     TokenKind.MINUS,
     TokenKind.BANG,
 }
@@ -790,6 +791,8 @@ class Parser:
         if tok.kind is TokenKind.STRING:
             self._advance()
             return ast.StringLit(tok.text, tok.span)
+        if tok.kind is TokenKind.SHL:
+            return self._bytes_lit()
         if tok.kind in (TokenKind.KW_TRUE, TokenKind.KW_FALSE):
             self._advance()
             return ast.BoolLit(tok.kind is TokenKind.KW_TRUE, tok.span)
@@ -894,6 +897,18 @@ class Parser:
                 break
         end = self._expect(TokenKind.RBRACKET, "']'").span
         return ast.ListExpr(items, start.to(end))
+
+    def _bytes_lit(self) -> ast.Expr:
+        start = self._expect(TokenKind.SHL, "'<<'").span
+        parts: list[ast.Expr] = []
+        item_bp = _INFIX_BP[TokenKind.SHR]
+        while not self._at(TokenKind.SHR) and not self._at(TokenKind.EOF):
+            parts.append(self._expr(item_bp))
+            if self._at(TokenKind.SHR):
+                break
+            self._expect(TokenKind.COMMA, "',' or '>>'")
+        end = self._expect(TokenKind.SHR, "'>>'").span
+        return ast.BytesLit(parts, start.to(end))
 
     def _record_expr(self) -> ast.Expr:
         start = self._expect(TokenKind.LBRACE, "'{'").span

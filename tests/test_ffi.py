@@ -127,7 +127,7 @@ def test_i32_with_type_args_rejected() -> None:
 def test_uninstantiated_bogus_payload_rejected() -> None:
     # Type names in ADT payloads and trait signatures are validated eagerly,
     # even if never used.
-    assert "TYPE001" in _codes("type T = | A(I32) | B\nfn main() -> I64 = { 0 }")
+    assert "TYPE001" in _codes("type T = | A(I31) | B\nfn main() -> I64 = { 0 }")
     assert "TYPE001" in _codes("trait W = { fn w(self: Self) -> Bogus }\nfn main() -> I64 = { 0 }")
 
 

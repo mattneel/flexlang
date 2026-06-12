@@ -14,13 +14,21 @@ from flx.diagnostics import Diagnostic, FlexError, Pos, Span
 from flx.syntax import ast
 from flx.types import (
     BOOL,
+    BYTES,
     ERROR,
     F64,
+    I8,
+    I16,
+    I32,
     I64,
     PRIMITIVES,
     REGION,
     STRING,
     UNIT,
+    U8,
+    U16,
+    U32,
+    U64,
     AdtType,
     FnType,
     ListType,
@@ -29,6 +37,8 @@ from flx.types import (
     RecordType,
     Type,
     VariantDef,
+    int_bounds,
+    is_int_type,
 )
 
 # Builtin generic ADT templates (tag order is fixed): name -> (params, variants),
@@ -112,10 +122,21 @@ def spec_symbol(name: str, key_tuple: tuple[str, ...]) -> str:
 
 # name -> (arity or None for variadic-ish, checker). Builtins are checked ad hoc.
 _BUILTINS = {"assert", "assert_eq", "assert_ne", "fail", "panic"}
+_INT_CONVERSIONS: dict[str, Type] = {
+    "to_i8": I8,
+    "to_u8": U8,
+    "to_i16": I16,
+    "to_u16": U16,
+    "to_i32": I32,
+    "to_u32": U32,
+    "to_i64": I64,
+    "to_u64": U64,
+}
+_CONVERSIONS = {"to_str", "to_f64", *_INT_CONVERSIONS}
 
 # Prelude names docs may reference: builtins plus the always-available
 # conversions. These exist in every program with no import.
-_PRELUDE_DOC_NAMES = _BUILTINS | {"to_str", "to_f64", "to_i64"}
+_PRELUDE_DOC_NAMES = _BUILTINS | _CONVERSIONS
 
 # Per-module top-level names of bundled-but-unloaded std modules, parsed from
 # disk on first use (docs may `see Std.X.y` without importing Std.X).
@@ -262,6 +283,9 @@ _INTRINSICS: dict[tuple[str, str], tuple[str, tuple[Type, ...], Type | _Instanti
     ("Str", "from_bytes"): ("", (ListType(I64),), STRING),  # panics per element
     ("Str", "to_hex"): ("", (I64,), STRING),  # unsigned lowercase hexadecimal
     ("Str", "to_unsigned"): ("", (I64,), STRING),  # unsigned decimal
+    ("Bytes", "len"): ("", (BYTES,), I64),
+    ("Bytes", "at"): ("", (BYTES, I64), U8),  # panics out of bounds
+    ("Bytes", "to_hex"): ("", (BYTES,), STRING),
     # C strtod of the longest valid prefix (0.0 if none) — the SAME libc call
     # on both backends, so the bits match by construction. Std.Str.parse_float
     # validates the strict whole-string grammar before calling this.
@@ -1025,13 +1049,7 @@ class Checker:
                 self.extern_decl_modules.setdefault(ext.name, set()).add(self.current_module)
 
     def _check_type_name(self, name: str, span: Span | None) -> None:
-        if name == "I32":
-            self._err(
-                "TYPE002",
-                "type name 'I32' is reserved (the FFI boundary type)",
-                span,
-            )
-        elif name in PRIMITIVES or name in ("List", "Map") or name in _BUILTIN_ADTS:
+        if name in PRIMITIVES or name in ("List", "Map") or name in _BUILTIN_ADTS:
             self._err(
                 "TYPE002",
                 f"cannot redefine the builtin type {name!r}",
@@ -1089,7 +1107,7 @@ class Checker:
                 f"extern name {name!r} collides with the Flex runtime namespace",
                 ext.span,
             )
-        elif name in _BUILTINS or name in ("to_str", "to_f64", "to_i64", "sh", "flx"):
+        elif name in _BUILTINS or name in _CONVERSIONS or name in ("sh", "flx"):
             self._err("FFI003", f"extern name {name!r} collides with a Flex builtin", ext.span)
         elif name in self.ctors:
             self._err("FFI003", f"extern name {name!r} collides with a constructor", ext.span)
@@ -1259,23 +1277,19 @@ class Checker:
 
     def _infer(self, expr: ast.Expr, expected: Type | None, value_used: bool = True) -> Type:
         if isinstance(expr, ast.IntLit):
-            if expr.value > _I64_MAX:
-                self._err(
-                    "TYPE011",
-                    f"integer literal {expr.value} is out of range for I64 (max {_I64_MAX})",
-                    expr.span,
-                )
-            return I64
+            return self._infer_int_lit(expr, expected)
         if isinstance(expr, ast.FloatLit):
             return F64
         if isinstance(expr, ast.BoolLit):
             return BOOL
         if isinstance(expr, ast.StringLit):
             return STRING
+        if isinstance(expr, ast.BytesLit):
+            return self._infer_bytes(expr)
         if isinstance(expr, ast.NameExpr):
             return self._infer_name(expr, expected)
         if isinstance(expr, ast.UnaryExpr):
-            return self._infer_unary(expr)
+            return self._infer_unary(expr, expected)
         if isinstance(expr, ast.BinaryExpr):
             return self._infer_binary(expr)
         if isinstance(expr, ast.CallExpr):
@@ -1303,6 +1317,42 @@ class Checker:
         if isinstance(expr, ast.TryExpr):
             return self._infer_try(expr)
         return ERROR
+
+    def _infer_int_lit(self, expr: ast.IntLit, expected: Type | None) -> Type:
+        target = expected if is_int_type(expected) else I64
+        self._check_int_literal(expr.value, target, expr.span)
+        return target
+
+    def _check_int_literal(self, value: int, target: Type, span: Span) -> None:
+        lo, hi = int_bounds(target)
+        if lo <= value <= hi:
+            return
+        if target is I64 and value > hi:
+            message = f"integer literal {value} is out of range for I64 (max {_I64_MAX})"
+        else:
+            message = f"integer literal {value} is out of range for {target} ({lo}..{hi})"
+        self._err("TYPE011", message, span)
+
+    def _infer_bytes(self, expr: ast.BytesLit) -> Type:
+        for part in expr.parts:
+            if isinstance(part, ast.StringLit):
+                self.expr_types[id(part)] = STRING
+                continue
+            part_ty = self._check_expr(part)
+            if not is_int_type(part_ty):
+                self._err(
+                    "TYPE003",
+                    f"byte literal segment has type {part_ty}, expected an integer",
+                    part.span,
+                )
+                continue
+            if isinstance(part, ast.IntLit) and not (0 <= part.value <= 255):
+                self._err(
+                    "TYPE011",
+                    f"integer literal {part.value} is out of range for a byte (0..255)",
+                    part.span,
+                )
+        return BYTES
 
     def _infer_index(self, expr: ast.IndexExpr) -> Type:
         obj = self._check_expr(expr.obj)
@@ -1506,7 +1556,7 @@ class Checker:
                 help=f"call it directly: {expr.name}(...)",
             )
             return ERROR
-        if expr.name in _BUILTINS or expr.name in ("to_str", "to_f64", "to_i64"):
+        if expr.name in _BUILTINS or expr.name in _CONVERSIONS:
             self._err(
                 "NAME003",
                 f"{expr.name!r} is a builtin and cannot be passed as a value",
@@ -1544,22 +1594,22 @@ class Checker:
         self._err("NAME001", f"unknown name {expr.name!r}", expr.span)
         return ERROR
 
-    def _infer_unary(self, expr: ast.UnaryExpr) -> Type:
-        if (
-            expr.op == "-"
-            and isinstance(expr.operand, ast.IntLit)
-            and expr.operand.value == 1 << 63
-        ):
-            # INT64_MIN: the magnitude alone overflows I64, but the negated
-            # literal is representable (and legal in pattern position).
-            self.expr_types[id(expr.operand)] = I64
-            return I64
+    def _infer_unary(self, expr: ast.UnaryExpr, expected: Type | None) -> Type:
+        if expr.op == "-" and isinstance(expr.operand, ast.IntLit):
+            target = expected if is_int_type(expected) else I64
+            # INT64_MIN and the smaller signed widths: the positive magnitude
+            # alone may overflow, but the negated literal can still fit.
+            self._check_int_literal(-expr.operand.value, target, expr.span)
+            self.expr_types[id(expr.operand)] = target
+            return target
         operand = self._check_expr(expr.operand)
         if expr.op == "-":
             if operand is F64:
                 return F64
-            self._expect(I64, operand, expr.operand.span, "operand of unary `-`")
-            return I64
+            if not is_int_type(operand):
+                self._expect(I64, operand, expr.operand.span, "operand of unary `-`")
+                return ERROR
+            return operand
         self._expect(BOOL, operand, expr.operand.span, "operand of `!`")
         return BOOL
 
@@ -1628,6 +1678,35 @@ class Checker:
             help=help_text,
         )
 
+    def _literal_int_value(self, expr: ast.Expr) -> int | None:
+        if isinstance(expr, ast.IntLit):
+            return expr.value
+        if isinstance(expr, ast.UnaryExpr) and expr.op == "-" and isinstance(expr.operand, ast.IntLit):
+            return -expr.operand.value
+        return None
+
+    def _infer_int_conversion(self, name: str, target: Type, expr: ast.CallExpr) -> Type:
+        if len(expr.args) == 1:
+            arg = expr.args[0]
+            if self._literal_int_value(arg) is not None:
+                # The target type is inference context for integer literals, so
+                # to_u64(18446744073709551615) is valid while to_u8(256) is a
+                # compile-time range error.
+                self._expect(target, self._check_expr(arg, target), arg.span, "argument")
+            else:
+                actual = self._check_expr(arg)
+                if actual is not F64 and not is_int_type(actual) and actual is not ERROR:
+                    self._err(
+                        "TYPE003",
+                        f"{name} takes an integer or F64, found {actual}",
+                        arg.span,
+                    )
+        else:
+            self._err("TYPE006", f"{name} expects 1 argument", expr.span)
+            for extra in expr.args:
+                self._check_expr(extra)
+        return target
+
     def _infer_call(self, expr: ast.CallExpr, expected: Type | None) -> Type:
         callee = expr.callee
         # A local binding shadows every name-based dispatch (builtins, ctors,
@@ -1636,31 +1715,32 @@ class Checker:
         if isinstance(callee, ast.NameExpr) and self.scope.lookup(callee.name) is None:
             if callee.name in _BUILTINS:
                 return self._check_builtin(callee.name, expr)
-            if callee.name == "to_str":  # prelude: I64 | F64 -> String
+            if callee.name in _INT_CONVERSIONS:
+                return self._infer_int_conversion(callee.name, _INT_CONVERSIONS[callee.name], expr)
+            if callee.name == "to_str":  # prelude: integer | F64 -> String
                 if len(expr.args) == 1:
                     arg_ty = self._check_expr(expr.args[0])
-                    if arg_ty not in (I64, F64, ERROR):
+                    if arg_ty not in (F64, ERROR) and not is_int_type(arg_ty):
                         self._err(
                             "TYPE003",
-                            f"to_str takes an I64 or F64, found {arg_ty}",
+                            f"to_str takes an integer or F64, found {arg_ty}",
                             expr.args[0].span,
                         )
                 else:
                     self._err("TYPE006", "to_str expects 1 argument", expr.span)
                 return STRING
-            if callee.name == "to_f64":  # prelude: I64 -> F64
+            if callee.name == "to_f64":  # prelude: integer -> F64
                 if len(expr.args) == 1:
-                    self._expect(I64, self._check_expr(expr.args[0]), expr.args[0].span, "argument")
+                    actual = self._check_expr(expr.args[0])
+                    if not is_int_type(actual) and actual is not ERROR:
+                        self._err(
+                            "TYPE003",
+                            f"argument has type {actual}, expected an integer",
+                            expr.args[0].span,
+                        )
                 else:
                     self._err("TYPE006", "to_f64 expects 1 argument", expr.span)
                 return F64
-            if callee.name == "to_i64":  # prelude: F64 -> I64 (truncates; panics
-                # on NaN/infinity/out-of-range — there is no honest answer)
-                if len(expr.args) == 1:
-                    self._expect(F64, self._check_expr(expr.args[0]), expr.args[0].span, "argument")
-                else:
-                    self._err("TYPE006", "to_i64 expects 1 argument", expr.span)
-                return I64
             if callee.name == "sh" and self.in_target:
                 # Build intrinsic: run a shell command; Ok on exit 0, Err otherwise.
                 if len(expr.args) == 1:
@@ -1722,7 +1802,7 @@ class Checker:
                 return self._infer_list_op(callee.name, expr)
             if head == "Map" and not shadowed:
                 return self._infer_map_op(callee.name, expr, expected)
-            if (head in _EFFECT_MODULES or head in ("Str", "Env")) and not shadowed:
+            if (head in _EFFECT_MODULES or head in ("Str", "Env", "Bytes")) and not shadowed:
                 # A user type or binding named Str/Env/Log/... wins over the
                 # intrinsic module (qualified ctors and locals stay reachable).
                 return self._infer_intrinsic(head, callee.name, expr)
@@ -2177,21 +2257,15 @@ class Checker:
                 self._check_subpattern(sub, pty, bound)
 
     def _check_literal_pattern(self, pattern: ast.LiteralPattern, ty: Type) -> None:
-        lit_ty = BOOL if isinstance(pattern.value, bool) else I64
+        lit_ty = BOOL if isinstance(pattern.value, bool) else (ty if is_int_type(ty) else I64)
         if not _same(ty, lit_ty):
             self._err(
                 "TYPE003",
                 f"pattern has type {lit_ty}, but matches a value of type {ty}",
                 pattern.span,
             )
-        if not isinstance(pattern.value, bool) and not (-(1 << 63) <= pattern.value <= _I64_MAX):
-            # Same range rule as expression literals (TYPE011): unchecked, the
-            # interpreter compares bignums while native wraps or fails to build.
-            self._err(
-                "TYPE011",
-                f"integer literal {pattern.value} is out of range for I64",
-                pattern.span,
-            )
+        if not isinstance(pattern.value, bool):
+            self._check_int_literal(pattern.value, lit_ty, pattern.span)
 
     def _check_args(self, name: str, fn_ty: FnType, call: ast.CallExpr) -> None:
         if len(call.args) != len(fn_ty.params):
@@ -2470,7 +2544,7 @@ def _slot_inline(ty: Type) -> bool:
     variants as FLOATS (so Some(0.0) == Some(-0.0) and Some(nan) != Some(nan),
     matching the interpreter)."""
     return (
-        ty is I64
+        is_int_type(ty)
         or ty is BOOL
         or ty is UNIT
         or ty is F64
@@ -2482,7 +2556,7 @@ def _is_comparable(ty: Type) -> bool:
     """Whether `==`/`!=`/assert_eq can be lowered for this type (no strings yet).
     ADTs qualify only when every payload is slot-inline: a boxed payload would
     compare as a pointer natively, which is not structural equality."""
-    if ty is STRING or isinstance(ty, FnType):
+    if ty in (STRING, BYTES) or isinstance(ty, FnType):
         return False
     if isinstance(ty, ListType):
         return _is_comparable(ty.elem)
@@ -2503,7 +2577,7 @@ def _is_comparable(ty: Type) -> bool:
 
 
 def _is_showable(ty: Type) -> bool:
-    if ty in (I64, F64, BOOL, UNIT, STRING):
+    if is_int_type(ty) or ty in (F64, BOOL, UNIT, STRING):
         return True
     if isinstance(ty, ListType):
         return _is_showable(ty.elem)
