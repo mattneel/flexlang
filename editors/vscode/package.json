@@ -1,0 +1,48 @@
+{
+  "name": "flexlang-vscode",
+  "displayName": "Flex Language",
+  "description": "VS Code language support for Flex.",
+  "version": "0.0.1",
+  "publisher": "flexlang",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:flex"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "flex",
+        "aliases": [
+          "Flex",
+          "flex"
+        ],
+        "extensions": [
+          ".flx"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "configuration": {
+      "title": "Flex",
+      "properties": {
+        "flex.serverPath": {
+          "type": "string",
+          "default": "flx",
+          "description": "Path to the flx executable."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0"
+  }
+}

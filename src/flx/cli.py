@@ -104,6 +104,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("doctor", help="Check the optional native backend toolchain (LLVM/MLIR)")
+    sub.add_parser("lsp", help="Run the Flex language server over stdio")
 
     fmt_cmd = sub.add_parser("fmt", help="Format Flex source files")
     fmt_cmd.add_argument("paths", nargs="+", help="source file or directory paths")
@@ -265,6 +266,10 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "doctor":
         return driver.cmd_doctor()
+    if args.command == "lsp":
+        from flx import lsp
+
+        return lsp.run()
     if args.command == "fmt":
         return driver.cmd_fmt(args.paths, check=args.check, stdout=args.stdout)
     if args.command == "new":

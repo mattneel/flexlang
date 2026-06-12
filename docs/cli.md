@@ -19,6 +19,7 @@ LLVM/MLIR backend.
 | `flx expand <file>` | Show comptime/macro/derive expansion | ✅ |
 | `flx fmt <path...>` | Format Flex source files | ✅ |
 | `flx highlight <file>` | Syntax-highlight `.flx` | ✅ |
+| `flx lsp` | Run the stdio language server for editors | ✅ |
 | `flx build <file> -o <bin>` | Build a native executable | working |
 | `flx release preflight` | Check release readiness before publish | ✅ |
 | `flx emit-hir <file>` | Emit typed HIR | stub |
@@ -37,6 +38,16 @@ flx highlight examples/add.flx --format html > add.html
 `--format` accepts `auto`, `ansi`, `ansi256`, `truecolor`, and `html`;
 `--style` accepts any Pygments style name. See
 [Syntax Highlighting](highlighting.md) for details.
+
+## `flx lsp`
+
+```sh
+flx lsp
+```
+
+Runs the Language Server Protocol server over stdio. It provides compiler
+diagnostics and whole-document formatting. The VS Code extension scaffold in
+`editors/vscode/` launches this command for `.flx` files.
 
 ## `flx run`
 

@@ -235,6 +235,10 @@ pygmentize examples/add.flx            # picks Flex by the .flx extension
 > sets a higher priority so extension-based lookup resolves to Flex. Use the
 > `flex` alias (not `flx`) for unambiguous explicit selection.
 
+`flx lsp` runs a stdio language server with compiler diagnostics and
+whole-document formatting. The VS Code extension scaffold lives in
+[`editors/vscode`](editors/vscode) and launches that server for `.flx` files.
+
 ## Documentation
 
 The docs are an [mdBook](https://rust-lang.github.io/mdBook/) under `docs/`,
