@@ -124,8 +124,14 @@ def test_derive_eq_show_generates_impls() -> None:
     assert "Impl Show for P" in dump
 
 
-def test_derive_generic_rejected() -> None:
+def test_derive_generic_record_rejected() -> None:
     assert "DER004" in _codes("derive(Eq) type Box<T> = { value: T }")
+
+
+def test_derive_generic_adt_generates_impls() -> None:
+    dump = _expand("derive(Eq, Show) type Box<T> = | Box(T)")
+    assert "Impl Eq for Box" in dump
+    assert "Impl Show for Box" in dump
 
 
 @native

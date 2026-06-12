@@ -631,10 +631,19 @@ class Checker:
             if impl.trait not in self.traits:
                 self._err("IMPL001", f"unknown trait {impl.trait!r}", impl.span)
                 continue
-            impl_ty = self._resolve_type(ast.TypeExpr(impl.type_name, [], impl.span))
-            if impl_ty is ERROR:
-                continue
-            key = _type_key(impl_ty)
+            impl_params = (
+                self.adt_templates[impl.type_name][0]
+                if impl.type_name in self.adt_templates
+                else []
+            )
+            impl_ty: Type | None = None
+            if impl_params:
+                key = impl.type_name
+            else:
+                impl_ty = self._resolve_type(ast.TypeExpr(impl.type_name, [], impl.span))
+                if impl_ty is ERROR:
+                    continue
+                key = _type_key(impl_ty)
             if (impl.trait, key) in self.impls:
                 first = self._impl_spans.get((impl.trait, key))
                 where = f" (first at {first.file}:{first.start.line})" if first else ""
@@ -660,21 +669,32 @@ class Checker:
                         method.span,
                     )
                     continue
-                self._check_impl_conformance(method, sig, impl_ty)
                 symbol = _mangle(impl.trait, key, method.name)
-                self._self_type = impl_ty
-                params = tuple(self._resolve_type(p.type) for p in method.params)
-                ret = self._resolve_type(method.return_type) if method.return_type else UNIT
-                self._self_type = None
-                self.functions[symbol] = FnType(params, ret)
-                self.fn_effects[symbol] = set(method.effects)
                 table[method.name] = symbol
-                self._impl_fns.append(replace(method, name=symbol))
+                if impl_params:
+                    self._check_generic_impl_conformance(method, sig, impl.type_name, impl_params)
+                    self._register_generic_fn(replace(method, name=symbol))
+                elif impl_ty is not None:
+                    self._check_impl_conformance(method, sig, impl_ty)
+                    self._self_type = impl_ty
+                    params = tuple(self._resolve_type(p.type) for p in method.params)
+                    ret = self._resolve_type(method.return_type) if method.return_type else UNIT
+                    self._self_type = None
+                    self.functions[symbol] = FnType(params, ret)
+                    self.fn_effects[symbol] = set(method.effects)
+                    self._impl_fns.append(replace(method, name=symbol))
         self.current_module = None
 
     def _check_impl_conformance(
         self, method: ast.FnDecl, sig: ast.TraitMethod, impl_ty: Type
     ) -> None:
+        if method.type_params:
+            self._err(
+                "IMPL005",
+                f"method {method.name!r} does not match the trait signature",
+                method.span,
+            )
+            return
         self._self_type = impl_ty
         want_params = tuple(self._resolve_type(p.type) for p in sig.params)
         want_ret = self._resolve_type(sig.return_type) if sig.return_type else UNIT
@@ -682,6 +702,53 @@ class Checker:
         got_params = tuple(self._resolve_type(p.type) for p in method.params)
         got_ret = self._resolve_type(method.return_type) if method.return_type else UNIT
         if want_params != got_params or not _same(want_ret, got_ret):
+            self._err(
+                "IMPL005",
+                f"method {method.name!r} does not match the trait signature",
+                method.span,
+            )
+
+    def _check_generic_impl_conformance(
+        self,
+        method: ast.FnDecl,
+        sig: ast.TraitMethod,
+        impl_name: str,
+        impl_params: list[str],
+    ) -> None:
+        method_params = [tp.name for tp in method.type_params]
+        if method_params != impl_params:
+            self._err(
+                "IMPL005",
+                f"method {method.name!r} does not match the trait signature",
+                method.span,
+                help=(
+                    f"generic impl methods for {impl_name} must declare "
+                    f"<{', '.join(impl_params)}>"
+                ),
+            )
+            return
+        allowed = set(impl_params)
+        for param in method.params:
+            self._validate_type_expr(param.type, allowed, allow_self=True)
+        if method.return_type is not None:
+            self._validate_type_expr(method.return_type, allowed, allow_self=True)
+        self_te = ast.TypeExpr(impl_name, [ast.TypeExpr(p, [], method.span) for p in impl_params])
+        want_params = tuple(_subst_self_typeexpr(p.type, self_te) for p in sig.params)
+        want_ret = _subst_self_typeexpr(sig.return_type, self_te) if sig.return_type else None
+        got_params = tuple(_subst_self_typeexpr(p.type, self_te) for p in method.params)
+        got_ret = _subst_self_typeexpr(method.return_type, self_te) if method.return_type else None
+        if len(want_params) != len(got_params) or any(
+            not _same_typeexpr(want, got) for want, got in zip(want_params, got_params, strict=True)
+        ):
+            self._err(
+                "IMPL005",
+                f"method {method.name!r} does not match the trait signature",
+                method.span,
+            )
+            return
+        if (want_ret is None) != (got_ret is None) or (
+            want_ret is not None and got_ret is not None and not _same_typeexpr(want_ret, got_ret)
+        ):
             self._err(
                 "IMPL005",
                 f"method {method.name!r} does not match the trait signature",
@@ -710,6 +777,8 @@ class Checker:
         if len(candidates) > 1:
             self._err("DISP003", f"ambiguous method {callee.name!r} for {recv_ty}", call.span)
         symbol = self.impls[(candidates[0], key)][callee.name]
+        if symbol in self.generic_fns:
+            return self._infer_generic_method_call(callee, symbol, recv_ty, call)
         fn_ty = self.functions[symbol]
         self._expect(fn_ty.params[0], recv_ty, callee.obj.span, "receiver")
         rest = fn_ty.params[1:]
@@ -789,6 +858,69 @@ class Checker:
         self.instantiations.add(inst)
         self.inst_subst[inst] = subst
         self.method_targets[id(call)] = spec_symbol(name, key_tuple)
+        return ret
+
+    def _infer_generic_method_call(
+        self, callee: ast.MemberExpr, symbol: str, recv_ty: Type, call: ast.CallExpr
+    ) -> Type:
+        template = self.generic_fns[symbol]
+        tp_names = {tp.name for tp in template.type_params}
+        arg_types = [recv_ty, *[self._check_expr(a) for a in call.args]]
+        expected_args = max(0, len(template.params) - 1)
+        if len(call.args) != expected_args:
+            self._err(
+                "TYPE005",
+                f"method {callee.name!r} expects {expected_args} argument(s), "
+                f"got {len(call.args)}",
+                call.span,
+            )
+            return ERROR
+        subst: dict[str, Type] = {}
+        for param, actual in zip(template.params, arg_types, strict=True):
+            if actual is not ERROR:
+                self._unify_typeexpr(param.type, actual, tp_names, subst)
+        for tp in template.type_params:
+            if tp.name not in subst:
+                self._err(
+                    "BOUND003",
+                    f"cannot infer type parameter {tp.name!r} of method {callee.name!r} "
+                    "from its receiver and arguments",
+                    call.span,
+                )
+                return ERROR
+        for tp in template.type_params:
+            concrete = subst[tp.name]
+            for bound in tp.bounds:
+                if (bound, _type_key(concrete)) not in self.impls:
+                    self._err(
+                        "BOUND001",
+                        f"{concrete} does not satisfy bound {bound!r} required by "
+                        f"method {callee.name!r}",
+                        call.span,
+                    )
+        saved = self._subst
+        self._subst = {**saved, **subst}
+        try:
+            if template.params:
+                self._expect(
+                    self._resolve_type(template.params[0].type),
+                    recv_ty,
+                    callee.obj.span,
+                    "receiver",
+                )
+            for param, actual, arg in zip(
+                template.params[1:], arg_types[1:], call.args, strict=True
+            ):
+                self._expect(self._resolve_type(param.type), actual, arg.span, "argument")
+            ret = self._resolve_type(template.return_type) if template.return_type else UNIT
+        finally:
+            self._subst = saved
+        self._require_effects(set(template.effects), call.span)
+        key_tuple = tuple(_mono_key(subst[tp.name]) for tp in template.type_params)
+        inst = (symbol, key_tuple)
+        self.instantiations.add(inst)
+        self.inst_subst[inst] = subst
+        self.method_targets[id(call)] = spec_symbol(symbol, key_tuple)
         return ret
 
     # --- declarations ---------------------------------------------------------
@@ -2661,6 +2793,22 @@ class Checker:
 
 def _same(a: Type, b: Type) -> bool:
     return a is ERROR or b is ERROR or a == b
+
+
+def _subst_self_typeexpr(te: ast.TypeExpr, self_te: ast.TypeExpr) -> ast.TypeExpr:
+    if te.name == "Self" and not te.args:
+        return self_te
+    if te.args:
+        return replace(te, args=[_subst_self_typeexpr(arg, self_te) for arg in te.args])
+    return te
+
+
+def _same_typeexpr(a: ast.TypeExpr, b: ast.TypeExpr) -> bool:
+    return (
+        a.name == b.name
+        and len(a.args) == len(b.args)
+        and all(_same_typeexpr(x, y) for x, y in zip(a.args, b.args, strict=True))
+    )
 
 
 def _irrefutable_args(pattern: ast.CtorPattern) -> bool:

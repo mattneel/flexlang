@@ -23,7 +23,7 @@ from typing import Any, cast
 from flx.diagnostics import Diagnostic, FlexError, Span
 from flx.sema.check import CheckResult, check, spec_symbol
 from flx.syntax import ast
-from flx.types import AdtType, ListType, MapType, PrimType, RecordType, Type
+from flx.types import AdtType, FnType, ListType, MapType, PrimType, RecordType, Type
 
 # A generous ceiling: real programs need a handful of specializations. A runaway
 # count means polymorphic recursion (a generic calling itself at an ever-growing
@@ -100,6 +100,10 @@ def _specialize(template: ast.FnDecl, subst: dict[str, Type], new_name: str) -> 
 
 
 def _type_to_typeexpr(ty: Type) -> ast.TypeExpr:
+    if isinstance(ty, FnType):
+        return ast.TypeExpr(
+            "->", [*[_type_to_typeexpr(param) for param in ty.params], _type_to_typeexpr(ty.ret)]
+        )
     if isinstance(ty, AdtType):
         return ast.TypeExpr(ty.name, [_type_to_typeexpr(a) for a in ty.type_args])
     if isinstance(ty, ListType):

@@ -32,6 +32,16 @@ def _tools_available() -> bool:
 native = pytest.mark.skipif(not _tools_available(), reason="LLVM/MLIR toolchain not available")
 
 
+def _run_both(tmp_path: Path, name: str, src: str) -> int:
+    flx = tmp_path / name
+    flx.write_text(src, encoding="utf-8")
+    interp = driver.cmd_run(str(flx), interpret=True)
+    if _tools_available():
+        native_result = driver.cmd_run(str(flx))
+        assert native_result == interp
+    return interp
+
+
 def _check(src: str) -> None:
     check(expand(parse(src)))
 
@@ -191,3 +201,58 @@ def test_mono_key_does_not_collide_with_user_type_name(tmp_path: Path) -> None:
     flx = tmp_path / "collide.flx"
     flx.write_text(src, encoding="utf-8")
     assert driver.cmd_run(str(flx)) == 12
+
+
+def test_generic_adt_derive_eq_runs(tmp_path: Path) -> None:
+    src = (
+        "impl Eq for I64 = { fn eq(self: I64, other: I64) -> Bool = { self == other } }\n"
+        "derive(Eq) type Box<T> = | Box(T)\n"
+        "fn main() -> I64 = {\n"
+        "  if Box(41).eq(Box(41)) && !Box(41).eq(Box(1)) { 42 } else { 0 }\n"
+        "}"
+    )
+    assert _run_both(tmp_path, "generic_eq.flx", src) == 42
+
+
+def test_generic_adt_derive_show_runs(tmp_path: Path) -> None:
+    src = (
+        "import Std.Str\n"
+        "impl Show for I64 = { fn show(self: I64) -> String = { to_str(self) } }\n"
+        "derive(Show) type Box<T> = | Box(T)\n"
+        "fn main() -> I64 = {\n"
+        '  if Box(41).show().eq("Box(41)") { 42 } else { 0 }\n'
+        "}"
+    )
+    assert _run_both(tmp_path, "generic_show.flx", src) == 42
+
+
+def test_generic_adt_derive_nested_helpers_run(tmp_path: Path) -> None:
+    src = (
+        "import Std.Str\n"
+        "impl Eq for I64 = { fn eq(self: I64, other: I64) -> Bool = { self == other } }\n"
+        "impl Show for I64 = { fn show(self: I64) -> String = { to_str(self) } }\n"
+        "derive(Eq, Show) type Nest<T> = | Nest(List<T>, Option<T>)\n"
+        "fn main() -> I64 = {\n"
+        "  let a = Nest([1, 2], Some(3))\n"
+        "  let b = Nest([1, 2], Some(3))\n"
+        '  if a.eq(b) && a.show().eq("Nest([1, 2], Some(3))") { 42 } else { 0 }\n'
+        "}"
+    )
+    assert _run_both(tmp_path, "generic_nested.flx", src) == 42
+
+
+def test_handwritten_generic_adt_impl_runs(tmp_path: Path) -> None:
+    src = (
+        "import Std.Str\n"
+        "type Box<T> = | Box(T)\n"
+        "impl Show for I64 = { fn show(self: I64) -> String = { to_str(self) } }\n"
+        "impl Show for Box = {\n"
+        "  fn show<T: Show>(self: Box<T>) -> String = {\n"
+        '    match self { Box(x) => "Box(" ++ x.show() ++ ")" }\n'
+        "  }\n"
+        "}\n"
+        "fn main() -> I64 = {\n"
+        '  if Box(41).show().eq("Box(41)") { 42 } else { 0 }\n'
+        "}"
+    )
+    assert _run_both(tmp_path, "generic_impl.flx", src) == 42

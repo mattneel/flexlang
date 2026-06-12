@@ -14,8 +14,10 @@ field/payload type expressions:
 * Map fields compare through `m.eq(other)` when the value type is comparable;
 * String-carrying ADTs get a match-based equality, arm by arm.
 
-Generic types are reported (DER004), not mis-generated; Map fields are
-compared structurally by key/value content, while assignment still aliases.
+Generic ADTs derive generic impl methods; generic records are still reported
+(DER004) because the checker has no generic record representation yet. Map
+fields are compared structurally by key/value content, while assignment still
+aliases.
 """
 
 from __future__ import annotations
@@ -38,10 +40,28 @@ def run_derives(module: ast.Module, exp: Expander) -> list[ast.Item]:
     gen = _HelperGen(exp)
     for record in module.records:
         out.extend(
-            _derive_type(record.name, record.type_params, record.span, record.derives, exp, gen)
+            _derive_type(
+                record.name,
+                record.type_params,
+                record.span,
+                record.derives,
+                exp,
+                gen,
+                allow_generic=False,
+            )
         )
     for adt in module.adts:
-        out.extend(_derive_type(adt.name, adt.type_params, adt.span, adt.derives, exp, gen))
+        out.extend(
+            _derive_type(
+                adt.name,
+                adt.type_params,
+                adt.span,
+                adt.derives,
+                exp,
+                gen,
+                allow_generic=True,
+            )
+        )
     out.extend(gen.helpers.values())
     return out
 
@@ -53,17 +73,19 @@ def _derive_type(
     derives: list[str],
     exp: Expander,
     gen: _HelperGen,
+    *,
+    allow_generic: bool,
 ) -> list[ast.ImplDecl]:
     out: list[ast.ImplDecl] = []
     for trait in derives:
         if trait not in _SUPPORTED:
             raise _err("DER001", f"cannot derive {trait!r} (only Eq, Show)", span)
-        if type_params:
+        if type_params and not allow_generic:
             raise _err("DER004", f"cannot derive {trait!r} on a generic type yet", span)
         method = (
-            _derive_eq(name, span, exp, gen)
+            _derive_eq(name, type_params, span, exp, gen)
             if trait == "Eq"
-            else _derive_show(name, span, exp, gen)
+            else _derive_show(name, type_params, span, exp, gen)
         )
         out.append(ast.ImplDecl(trait, name, [method], span))
     return out
@@ -125,21 +147,60 @@ def _ty(n: str, sp: Span) -> ast.TypeExpr:
     return ast.TypeExpr(n, [], sp)
 
 
+def _type_ref(name: str, type_params: list[str], sp: Span) -> ast.TypeExpr:
+    return ast.TypeExpr(name, [_ty(p, sp) for p in type_params], sp)
+
+
+def _type_params_in(te: ast.TypeExpr, params: set[str]) -> set[str]:
+    found = {te.name} if te.name in params and not te.args else set()
+    for arg in te.args:
+        found.update(_type_params_in(arg, params))
+    return found
+
+
+def _method_type_params(
+    all_params: list[str], bound_params: set[str], bound: str, sp: Span
+) -> list[ast.TypeParam]:
+    return [
+        ast.TypeParam(name, [bound] if name in bound_params else [], sp)
+        for name in all_params
+    ]
+
+
+def _decl_type_params_for_trait(
+    type_params: list[str],
+    trait: str,
+    field_types: list[ast.TypeExpr],
+    sp: Span,
+) -> list[ast.TypeParam]:
+    params = set(type_params)
+    bound_params: set[str] = set()
+    for te in field_types:
+        bound_params.update(_type_params_in(te, params))
+    return _method_type_params(type_params, bound_params, trait, sp)
+
+
 def _fn(
     name: str,
     params: list[tuple[str, ast.TypeExpr]],
     ret: str,
     body: list[ast.Stmt],
     sp: Span,
+    type_params: list[ast.TypeParam] | None = None,
 ) -> ast.FnDecl:
     ps = [ast.Param(p, t, sp) for p, t in params]
-    return ast.FnDecl(name, ps, _ty(ret, sp), [], ast.Block(body, sp), sp)
+    return ast.FnDecl(name, ps, _ty(ret, sp), [], ast.Block(body, sp), sp, type_params or [])
 
 
 def _expr_fn(
-    name: str, params: list[tuple[str, ast.TypeExpr]], ret: str, body: ast.Expr, sp: Span
+    name: str,
+    params: list[tuple[str, ast.TypeExpr]],
+    ret: str,
+    body: ast.Expr,
+    sp: Span,
+    type_params: list[ast.TypeParam] | None = None,
 ) -> ast.FnDecl:
-    return _fn(name, params, ret, [ast.ExprStmt(body, sp)], sp)
+    return _fn(name, params, ret, [ast.ExprStmt(body, sp)], sp, type_params)
 
 
 def _concat(parts: list[ast.Expr], sp: Span) -> ast.Expr:
@@ -184,7 +245,7 @@ class _HelperGen:
         self.exp = exp
         self.helpers: dict[str, ast.FnDecl] = {}
 
-    def list_eq(self, elem: ast.TypeExpr, sp: Span) -> str:
+    def list_eq(self, elem: ast.TypeExpr, sp: Span, type_params: set[str]) -> str:
         fname = f"__derive_list_eq_{_enc(elem)}"
         if fname in self.helpers:
             return fname
@@ -192,7 +253,13 @@ class _HelperGen:
         list_te = ast.TypeExpr("List", [elem], sp)
         a, b, i = _name("a", sp), _name("b", sp), _name("i", sp)
         elem_cmp = _eq_expr(
-            ast.IndexExpr(a, i, sp), ast.IndexExpr(b, i, sp), elem, sp, self.exp, self
+            ast.IndexExpr(a, i, sp),
+            ast.IndexExpr(b, i, sp),
+            elem,
+            sp,
+            self.exp,
+            self,
+            type_params,
         )
 
         def len_of(v: ast.Expr) -> ast.Expr:
@@ -230,7 +297,11 @@ class _HelperGen:
             ),
             ast.ExprStmt(ast.BoolLit(True, sp), sp),
         ]
-        self.helpers[fname] = _fn(fname, [("a", list_te), ("b", list_te)], "Bool", body, sp)
+        used = _type_params_in(elem, type_params)
+        helper_params = _method_type_params(sorted(used), used, "Eq", sp)
+        self.helpers[fname] = _fn(
+            fname, [("a", list_te), ("b", list_te)], "Bool", body, sp, helper_params
+        )
         return fname
 
     def _variant_eq_fn(
@@ -239,6 +310,7 @@ class _HelperGen:
         te: ast.TypeExpr,
         variants: list[tuple[str, list[ast.TypeExpr]]],
         sp: Span,
+        type_params: set[str],
     ) -> None:
         """fn fname(a: te, b: te) -> Bool comparing builtin-ADT values arm by
         arm (Option/Result fields can't carry impls — generic instantiations
@@ -250,7 +322,15 @@ class _HelperGen:
             x_binds: list[ast.Pattern] = [ast.BindPattern(f"x{i}", sp) for i in range(n)]
             y_binds: list[ast.Pattern] = [ast.BindPattern(f"y{i}", sp) for i in range(n)]
             cmps = [
-                _eq_expr(_name(f"x{i}", sp), _name(f"y{i}", sp), pty, sp, self.exp, self)
+                _eq_expr(
+                    _name(f"x{i}", sp),
+                    _name(f"y{i}", sp),
+                    pty,
+                    sp,
+                    self.exp,
+                    self,
+                    type_params,
+                )
                 for i, pty in enumerate(payload)
             ]
             inner_arms = [ast.MatchArm(ast.CtorPattern(vname, y_binds, sp), _and_all(cmps, sp), sp)]
@@ -259,7 +339,11 @@ class _HelperGen:
             inner = ast.MatchExpr(_name("b", sp), inner_arms, sp)
             outer_arms.append(ast.MatchArm(ast.CtorPattern(vname, x_binds, sp), inner, sp))
         match = ast.MatchExpr(_name("a", sp), outer_arms, sp)
-        self.helpers[fname] = _expr_fn(fname, [("a", te), ("b", te)], "Bool", match, sp)
+        used = _type_params_in(te, type_params)
+        helper_params = _method_type_params(sorted(used), used, "Eq", sp)
+        self.helpers[fname] = _expr_fn(
+            fname, [("a", te), ("b", te)], "Bool", match, sp, helper_params
+        )
 
     def _variant_show_fn(
         self,
@@ -267,6 +351,7 @@ class _HelperGen:
         te: ast.TypeExpr,
         variants: list[tuple[str, list[ast.TypeExpr]]],
         sp: Span,
+        type_params: set[str],
     ) -> None:
         """fn fname(v: te) -> String rendering builtin-ADT values arm by arm."""
         arms: list[ast.MatchArm] = []
@@ -279,7 +364,9 @@ class _HelperGen:
                 for i, pty in enumerate(payload):
                     if i:
                         parts.append(ast.StringLit(", ", sp))
-                    parts.append(_show_expr(_name(f"x{i}", sp), pty, sp, self.exp, self))
+                    parts.append(
+                        _show_expr(_name(f"x{i}", sp), pty, sp, self.exp, self, type_params)
+                    )
                 parts.append(ast.StringLit(")", sp))
                 body: ast.Expr = _concat(parts, sp)
                 pattern: ast.Pattern = ast.CtorPattern(vname, binds, sp)
@@ -288,30 +375,32 @@ class _HelperGen:
                 body = ast.StringLit(vname, sp)
             arms.append(ast.MatchArm(pattern, body, sp))
         match = ast.MatchExpr(_name("v", sp), arms, sp)
-        self.helpers[fname] = _expr_fn(fname, [("v", te)], "String", match, sp)
+        used = _type_params_in(te, type_params)
+        helper_params = _method_type_params(sorted(used), used, "Show", sp)
+        self.helpers[fname] = _expr_fn(fname, [("v", te)], "String", match, sp, helper_params)
 
-    def builtin_adt_eq(self, te: ast.TypeExpr, sp: Span) -> str:
+    def builtin_adt_eq(self, te: ast.TypeExpr, sp: Span, type_params: set[str]) -> str:
         fname = f"__derive_eq_{_enc(te)}"
         if fname not in self.helpers:
             self.helpers[fname] = _fn("", [], "Bool", [], sp)  # placeholder
-            self._variant_eq_fn(fname, te, _builtin_variants(te), sp)
+            self._variant_eq_fn(fname, te, _builtin_variants(te), sp, type_params)
         return fname
 
-    def builtin_adt_show(self, te: ast.TypeExpr, sp: Span) -> str:
+    def builtin_adt_show(self, te: ast.TypeExpr, sp: Span, type_params: set[str]) -> str:
         fname = f"__derive_show_{_enc(te)}"
         if fname not in self.helpers:
             self.helpers[fname] = _fn("", [], "String", [], sp)  # placeholder
-            self._variant_show_fn(fname, te, _builtin_variants(te), sp)
+            self._variant_show_fn(fname, te, _builtin_variants(te), sp, type_params)
         return fname
 
-    def list_show(self, elem: ast.TypeExpr, sp: Span) -> str:
+    def list_show(self, elem: ast.TypeExpr, sp: Span, type_params: set[str]) -> str:
         fname = f"__derive_list_show_{_enc(elem)}"
         if fname in self.helpers:
             return fname
         self.helpers[fname] = _fn("", [], "String", [], sp)  # placeholder breaks recursion
         list_te = ast.TypeExpr("List", [elem], sp)
         xs, i, out = _name("xs", sp), _name("i", sp), _name("out", sp)
-        elem_render = _show_expr(ast.IndexExpr(xs, i, sp), elem, sp, self.exp, self)
+        elem_render = _show_expr(ast.IndexExpr(xs, i, sp), elem, sp, self.exp, self, type_params)
         len_of = ast.CallExpr(ast.MemberExpr(_name("List", sp), "len", sp), [xs], sp)
         body: list[ast.Stmt] = [
             ast.MutStmt("out", ast.StringLit("[", sp), sp),
@@ -347,7 +436,9 @@ class _HelperGen:
             ),
             ast.ExprStmt(ast.BinaryExpr("++", out, ast.StringLit("]", sp), sp), sp),
         ]
-        self.helpers[fname] = _fn(fname, [("xs", list_te)], "String", body, sp)
+        used = _type_params_in(elem, type_params)
+        helper_params = _method_type_params(sorted(used), used, "Show", sp)
+        self.helpers[fname] = _fn(fname, [("xs", list_te)], "String", body, sp, helper_params)
         return fname
 
 
@@ -363,12 +454,18 @@ def _builtin_variants(te: ast.TypeExpr) -> list[tuple[str, list[ast.TypeExpr]]]:
 
 
 def _eq_expr(
-    mine: ast.Expr, theirs: ast.Expr, te: ast.TypeExpr, sp: Span, exp: Expander, gen: _HelperGen
+    mine: ast.Expr,
+    theirs: ast.Expr,
+    te: ast.TypeExpr,
+    sp: Span,
+    exp: Expander,
+    gen: _HelperGen,
+    type_params: set[str],
 ) -> ast.Expr:
     if te.name == "String":
         return _call_method(mine, "eq", [theirs], sp)
     if te.name == "List":
-        helper = gen.list_eq(te.args[0], sp)
+        helper = gen.list_eq(te.args[0], sp, type_params)
         return ast.CallExpr(_name(helper, sp), [mine, theirs], sp)
     if te.name == "Map":
         return _call_method(mine, "eq", [theirs], sp)
@@ -377,7 +474,7 @@ def _eq_expr(
     if te.name in ("Option", "Result") and te.args:
         # Generic builtin instantiations can't carry impls; derive writes the
         # match instead, recursing into the payload comparison.
-        helper = gen.builtin_adt_eq(te, sp)
+        helper = gen.builtin_adt_eq(te, sp, type_params)
         return ast.CallExpr(_name(helper, sp), [mine, theirs], sp)
     # A composite that isn't structurally comparable: go through ITS Eq impl
     # (its own derive, or a hand-written one) — nested derives compose.
@@ -385,7 +482,12 @@ def _eq_expr(
 
 
 def _show_expr(
-    value: ast.Expr, te: ast.TypeExpr, sp: Span, exp: Expander, gen: _HelperGen
+    value: ast.Expr,
+    te: ast.TypeExpr,
+    sp: Span,
+    exp: Expander,
+    gen: _HelperGen,
+    type_params: set[str],
 ) -> ast.Expr:
     if te.name in ("I64", "F64") and not te.args:
         return ast.CallExpr(_name("to_str", sp), [value], sp)
@@ -398,7 +500,7 @@ def _show_expr(
     if te.name == "String":
         return value
     if te.name == "List":
-        helper = gen.list_show(te.args[0], sp)
+        helper = gen.list_show(te.args[0], sp, type_params)
         return ast.CallExpr(_name(helper, sp), [value], sp)
     if te.name == "Map":
         raise _err(
@@ -408,7 +510,7 @@ def _show_expr(
             sp,
         )
     if te.name in ("Option", "Result") and te.args:
-        helper = gen.builtin_adt_show(te, sp)
+        helper = gen.builtin_adt_show(te, sp, type_params)
         return ast.CallExpr(_name(helper, sp), [value], sp)
     # Any other type renders through ITS Show impl — recursive derives work,
     # and a type with no Show in scope reports DISP001 at the derive line.
@@ -418,8 +520,11 @@ def _show_expr(
 # --- Eq -----------------------------------------------------------------------
 
 
-def _derive_eq(type_name: str, sp: Span, exp: Expander, gen: _HelperGen) -> ast.FnDecl:
-    self_te = _ty(type_name, sp)
+def _derive_eq(
+    type_name: str, type_params: list[str], sp: Span, exp: Expander, gen: _HelperGen
+) -> ast.FnDecl:
+    self_te = _type_ref(type_name, type_params, sp)
+    type_param_set = set(type_params)
     record = exp.ctx.records.get(type_name)
     if record is not None:
         comparisons = [
@@ -430,28 +535,50 @@ def _derive_eq(type_name: str, sp: Span, exp: Expander, gen: _HelperGen) -> ast.
                 sp,
                 exp,
                 gen,
+                type_param_set,
             )
             for fld in record.fields
         ]
+        method_params = _decl_type_params_for_trait(
+            type_params, "Eq", [fld.type for fld in record.fields], sp
+        )
         return _expr_fn(
             "eq",
             [("self", self_te), ("other", self_te)],
             "Bool",
             _and_all(comparisons, sp),
             sp,
+            method_params,
         )
     adt = exp.ctx.adts.get(type_name)
     if adt is not None and not _comparable_syntactic(self_te, exp, frozenset()):
-        return _eq_adt(adt, sp, exp, gen)
+        return _eq_adt(adt, self_te, type_params, sp, exp, gen)
     # Structurally comparable (enums, inline payloads): the backends lower
     # whole-value equality directly.
     body = ast.BinaryExpr("==", _name("self", sp), _name("other", sp), sp)
-    return _expr_fn("eq", [("self", self_te), ("other", self_te)], "Bool", body, sp)
+    adt_payloads = exp.ctx.adts.get(type_name)
+    field_types = (
+        [pty for variant in adt_payloads.variants for pty in variant.payload]
+        if adt_payloads is not None
+        else []
+    )
+    method_params = _decl_type_params_for_trait(type_params, "Eq", field_types, sp)
+    return _expr_fn(
+        "eq", [("self", self_te), ("other", self_te)], "Bool", body, sp, method_params
+    )
 
 
-def _eq_adt(adt: ast.AdtDecl, sp: Span, exp: Expander, gen: _HelperGen) -> ast.FnDecl:
+def _eq_adt(
+    adt: ast.AdtDecl,
+    self_te: ast.TypeExpr,
+    type_params: list[str],
+    sp: Span,
+    exp: Expander,
+    gen: _HelperGen,
+) -> ast.FnDecl:
     """Match-based equality: same variant AND equal payloads, arm by arm —
     what the DER001 String-payload ban used to make people write by hand."""
+    type_param_set = set(type_params)
     multi = len(adt.variants) > 1
     outer_arms: list[ast.MatchArm] = []
     for variant in adt.variants:
@@ -459,7 +586,7 @@ def _eq_adt(adt: ast.AdtDecl, sp: Span, exp: Expander, gen: _HelperGen) -> ast.F
         x_binds: list[ast.Pattern] = [ast.BindPattern(f"x{i}", sp) for i in range(n)]
         y_binds: list[ast.Pattern] = [ast.BindPattern(f"y{i}", sp) for i in range(n)]
         cmps = [
-            _eq_expr(_name(f"x{i}", sp), _name(f"y{i}", sp), pty, sp, exp, gen)
+            _eq_expr(_name(f"x{i}", sp), _name(f"y{i}", sp), pty, sp, exp, gen, type_param_set)
             for i, pty in enumerate(variant.payload)
         ]
         inner_arms = [
@@ -470,35 +597,62 @@ def _eq_adt(adt: ast.AdtDecl, sp: Span, exp: Expander, gen: _HelperGen) -> ast.F
         inner = ast.MatchExpr(_name("other", sp), inner_arms, sp)
         outer_arms.append(ast.MatchArm(ast.CtorPattern(variant.name, x_binds, sp), inner, sp))
     match = ast.MatchExpr(_name("self", sp), outer_arms, sp)
-    self_te = _ty(adt.name, sp)
-    return _expr_fn("eq", [("self", self_te), ("other", self_te)], "Bool", match, sp)
+    field_types = [pty for variant in adt.variants for pty in variant.payload]
+    method_params = _decl_type_params_for_trait(type_params, "Eq", field_types, sp)
+    return _expr_fn(
+        "eq", [("self", self_te), ("other", self_te)], "Bool", match, sp, method_params
+    )
 
 
 # --- Show ---------------------------------------------------------------------
 
 
-def _derive_show(type_name: str, sp: Span, exp: Expander, gen: _HelperGen) -> ast.FnDecl:
+def _derive_show(
+    type_name: str, type_params: list[str], sp: Span, exp: Expander, gen: _HelperGen
+) -> ast.FnDecl:
+    self_te = _type_ref(type_name, type_params, sp)
     record = exp.ctx.records.get(type_name)
     if record is not None:
-        return _show_record(record, sp, exp, gen)
+        return _show_record(record, self_te, type_params, sp, exp, gen)
     adt = exp.ctx.adts.get(type_name)
     if adt is not None:
-        return _show_adt(adt, sp, exp, gen)
+        return _show_adt(adt, self_te, type_params, sp, exp, gen)
     raise _err("DER001", f"cannot derive Show for {type_name!r}", sp)
 
 
-def _show_record(record: ast.RecordDecl, sp: Span, exp: Expander, gen: _HelperGen) -> ast.FnDecl:
+def _show_record(
+    record: ast.RecordDecl,
+    self_te: ast.TypeExpr,
+    type_params: list[str],
+    sp: Span,
+    exp: Expander,
+    gen: _HelperGen,
+) -> ast.FnDecl:
+    type_param_set = set(type_params)
     parts: list[ast.Expr] = [ast.StringLit(record.name + " { ", sp)]
     for i, fld in enumerate(record.fields):
         prefix = ("" if i == 0 else ", ") + fld.name + " = "
         access = ast.MemberExpr(_name("self", sp), fld.name, sp)
         parts.append(ast.StringLit(prefix, sp))
-        parts.append(_show_expr(access, fld.type, sp, exp, gen))
+        parts.append(_show_expr(access, fld.type, sp, exp, gen, type_param_set))
     parts.append(ast.StringLit(" }", sp))
-    return _expr_fn("show", [("self", _ty(record.name, sp))], "String", _concat(parts, sp), sp)
+    method_params = _decl_type_params_for_trait(
+        type_params, "Show", [fld.type for fld in record.fields], sp
+    )
+    return _expr_fn(
+        "show", [("self", self_te)], "String", _concat(parts, sp), sp, method_params
+    )
 
 
-def _show_adt(adt: ast.AdtDecl, sp: Span, exp: Expander, gen: _HelperGen) -> ast.FnDecl:
+def _show_adt(
+    adt: ast.AdtDecl,
+    self_te: ast.TypeExpr,
+    type_params: list[str],
+    sp: Span,
+    exp: Expander,
+    gen: _HelperGen,
+) -> ast.FnDecl:
+    type_param_set = set(type_params)
     arms: list[ast.MatchArm] = []
     for variant in adt.variants:
         if variant.payload:
@@ -510,7 +664,7 @@ def _show_adt(adt: ast.AdtDecl, sp: Span, exp: Expander, gen: _HelperGen) -> ast
             for i, pty in enumerate(variant.payload):
                 if i:
                     parts.append(ast.StringLit(", ", sp))
-                parts.append(_show_expr(_name(f"x{i}", sp), pty, sp, exp, gen))
+                parts.append(_show_expr(_name(f"x{i}", sp), pty, sp, exp, gen, type_param_set))
             parts.append(ast.StringLit(")", sp))
             body = _concat(parts, sp)
         else:
@@ -518,7 +672,9 @@ def _show_adt(adt: ast.AdtDecl, sp: Span, exp: Expander, gen: _HelperGen) -> ast
             body = ast.StringLit(variant.name, sp)
         arms.append(ast.MatchArm(bind, body, sp))
     match = ast.MatchExpr(_name("self", sp), arms, sp)
-    return _expr_fn("show", [("self", _ty(adt.name, sp))], "String", match, sp)
+    field_types = [pty for variant in adt.variants for pty in variant.payload]
+    method_params = _decl_type_params_for_trait(type_params, "Show", field_types, sp)
+    return _expr_fn("show", [("self", self_te)], "String", match, sp, method_params)
 
 
 def _err(code: str, message: str, span: Span) -> FlexError:
