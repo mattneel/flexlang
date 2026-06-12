@@ -287,6 +287,53 @@ def test_adt_float_equality_parity(tmp_path: Path) -> None:
     assert _test_cmd(path, "interp") == _test_cmd(path, "native")
 
 
+# --- review findings pinned --------------------------------------------------------------------
+
+
+def test_strtod_fallback_keeps_prefix_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The no-libc fallback must honor strtod's longest-valid-prefix contract:
+    # Python's float() alone accepts "1_000" (wrong value) and rejects valid
+    # prefixes like "1.5abc" (wrong 0.0).
+    from flx import interp
+
+    monkeypatch.setattr(interp, "_strtod_fn", False)
+    assert interp._strtod("1_000") == 1.0
+    assert interp._strtod("1.5abc") == 1.5
+    assert interp._strtod("0x1A") == 26.0
+    assert interp._strtod("xyz") == 0.0
+    assert interp._strtod("  2.5") == 2.5
+    assert interp._strtod("1e") == 1.0
+    assert interp._strtod(".5") == 0.5
+    assert interp._strtod("-inf") == float("-inf")
+    assert interp._strtod("nan") != interp._strtod("nan")  # NaN
+    assert interp._strtod("") == 0.0
+
+
+@native
+def test_native_heap_exhaustion_says_oom_not_stack_overflow(tmp_path: Path) -> None:
+    # Quadratic ++ concat under a hard address-space cap must die as
+    # "out of memory" (checked allocator), never as a NULL-write SIGSEGV that
+    # the stack guard misreports as runaway recursion.
+    src = (
+        "module Main\nimport Std.Str\n"
+        'fn main() -> I64 = { length(repeat("xxxxxxxxxxxxxxxx", 1000000)) }\n'
+    )
+    path = _write(tmp_path, src)
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"ulimit -v 2097152; exec {sys.executable} -m flx run --native {path}",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert proc.returncode == 1
+    assert "out of memory" in proc.stderr
+    assert "stack overflow" not in proc.stderr
+
+
 # --- hints updated -----------------------------------------------------------------------------
 
 

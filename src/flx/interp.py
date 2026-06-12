@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ctypes
 import math
+import re
 import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -255,6 +256,19 @@ def _print_raw(message: str, end: str = "\n") -> None:
 
 _strtod_fn: object = None  # lazily configured ctypes strtod, or False if unavailable
 
+# The fallback's strtod prefix grammar: optional whitespace and sign, then a
+# hex float, a decimal float, or inf/infinity/nan (case-insensitive). NO
+# underscores — Python's float() accepts "1_000" but strtod stops at the '_'.
+_STRTOD_PREFIX = re.compile(
+    r"[ \t\n\r\f\v]*[+-]?("
+    r"0[xX][0-9a-fA-F]+(\.[0-9a-fA-F]*)?([pP][+-]?[0-9]+)?"
+    r"|[0-9]+(\.[0-9]*)?([eE][+-]?[0-9]+)?"
+    r"|\.[0-9]+([eE][+-]?[0-9]+)?"
+    r"|[iI][nN][fF]([iI][nN][iI][tT][yY])?"
+    r"|[nN][aA][nN]"
+    r")"
+)
+
 
 def _strtod(s: str) -> float:
     """C strtod of the longest valid prefix (0.0 if none) — the SAME libc call
@@ -271,10 +285,17 @@ def _strtod(s: str) -> float:
         except OSError, AttributeError:
             _strtod_fn = False
     if _strtod_fn is False:
-        # No libc to share (non-POSIX stand-in): Python's parser is also
-        # correctly rounded for the validated grammar parse_float feeds us.
+        # No libc to share (non-POSIX stand-in): emulate strtod's
+        # longest-valid-prefix contract, then convert with Python's parser
+        # (correctly rounded for the same grammar).
+        m = _STRTOD_PREFIX.match(s)
+        if m is None:
+            return 0.0
+        text = m.group(0).strip()
         try:
-            return float(s)
+            if text.lstrip("+-").lower().startswith("0x"):
+                return float.fromhex(text)
+            return float(text)
         except ValueError:
             return 0.0
     raw = s.encode("utf-8", "surrogateescape")

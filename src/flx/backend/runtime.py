@@ -17,6 +17,7 @@ BASE_RUNTIME_C = """#include <stdio.h>
 #include <setjmp.h>
 
 typedef struct { const char *ptr; long long len; } FlxStr;
+void *__flx_box(long long size); /* checked allocator, defined below */
 
 // Runtime panics (division by zero, index out of bounds) are fatal in a
 // program run, but inside `flx test` they fail just the ONE test: the harness
@@ -86,7 +87,7 @@ void __flx_log(const char *p, long long n) {
     fflush(stdout);
 }
 void __flx_int_to_str(long long n, FlxStr *out) {
-    char *buf = (char *)malloc(24);
+    char *buf = (char *)__flx_box(24);
     out->len = (long long)sprintf(buf, "%lld", n);
     out->ptr = buf;
 }
@@ -129,7 +130,10 @@ void __flx_cstr_wrap(const char *p, FlxStr *out) {
     out->len = p ? (long long)strlen(p) : 0;
 }
 void __flx_str_concat(const char *p1, long long n1, const char *p2, long long n2, FlxStr *out) {
-    char *buf = (char *)malloc((size_t)(n1 + n2) + 1);
+    // __flx_box, not raw malloc: heap exhaustion (quadratic ++ chains) must
+    // die as "out of memory", not as a NULL-write SIGSEGV that the stack
+    // guard would misreport as runaway recursion.
+    char *buf = (char *)__flx_box(n1 + n2 + 1);
     memcpy(buf, p1, (size_t)n1);
     memcpy(buf + n1, p2, (size_t)n2);
     buf[n1 + n2] = 0;

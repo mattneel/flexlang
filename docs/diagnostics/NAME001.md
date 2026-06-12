@@ -5,9 +5,11 @@
 An unknown name — or a feature Flex does not have yet.
 
 Most NAME001s are typos. For names that LOOK like missing features
-(`break`, `chr`, `parse_float`, `sort`, ...), the error says "Flex does not
+(`break`, `chr`, `sort`, `format`, ...), the error says "Flex does not
 have X yet" and names the working alternative instead of pretending it was
-a typo.
+a typo. For stdlib names used without their import (`split`, `parse_float`,
+`println`, ...), the help names the module instead: "`import Std.Str`
+provides parse_float".
 
 **Example: break is not in the language** — expected to fail with `NAME001` (proven by `flx docs check`):
 
