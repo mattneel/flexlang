@@ -39,7 +39,14 @@ def _check_codes(tmp_path: Path, files: dict[str, str]) -> list[str]:
     entry = _project(tmp_path, files)
     with pytest.raises(FlexError) as exc:
         info = load_program(entry)
-        check_and_monomorphize(expand(info.module), info.decl_module, info.public, info.file_module)
+        check_and_monomorphize(
+            expand(info.module),
+            info.decl_module,
+            info.public,
+            info.file_module,
+            info.module_spans,
+            info.module_imports,
+        )
     return [d.code for d in exc.value.diagnostics]
 
 

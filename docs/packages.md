@@ -57,6 +57,9 @@ module) rejected (MOD004). See
 [`examples/package-demo/`](https://github.com/mattneel/flexlang/tree/main/examples/package-demo)
 for a complete two-package project.
 
+Import bindings are per module: importing a dependency module does not make its
+own transitive imports visible to your code unless you import those modules too.
+
 Lock and vendor commands make path dependencies reproducible:
 
 ```sh

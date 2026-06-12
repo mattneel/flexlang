@@ -138,6 +138,7 @@ def _frontend(
             loaded.public,
             loaded.file_module,
             loaded.module_spans,
+            loaded.module_imports,
         )
         return result, loaded.sources
     except FlexError as err:

@@ -7,11 +7,23 @@ from flx.syntax import ast
 
 def dump_module(module: ast.Module) -> str:
     lines: list[str] = [f"Module {module.name}"]
-    for imp in module.imports:
-        lines.append(f"  import {imp}")
+    if module.import_decls:
+        for decl in module.import_decls:
+            lines.append(f"  import {_import_decl(decl)}")
+    else:
+        for imp in module.imports:
+            lines.append(f"  import {imp}")
     for item in module.items:
         _dump_item(item, 1, lines)
     return "\n".join(lines)
+
+
+def _import_decl(decl: ast.ImportDecl) -> str:
+    if decl.names is not None:
+        return f"{decl.module}.{{{', '.join(decl.names)}}}"
+    if decl.alias is not None:
+        return f"{decl.module} as {decl.alias}"
+    return decl.module
 
 
 def _indent(depth: int) -> str:

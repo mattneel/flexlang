@@ -174,6 +174,7 @@ def run_build(target_name: str | None = None, explain: bool = False) -> int:
             loaded.public,
             loaded.file_module,
             loaded.module_spans,
+            loaded.module_imports,
         )
     except FlexError as err:
         driver._report(err, {})

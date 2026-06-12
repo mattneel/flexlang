@@ -146,7 +146,8 @@ ok Main / add works
   hygienic `quote`/`unquote` **macros**, `reflect.fields` + comptime `for` +
   `unquote_splice`, and `derive(Eq, Show)` — viewable with `flx expand`;
 - **block-scoped modules** — `module A.B { ... }`, multiple modules per file,
-  `import A.B`, module-qualified calls, and `pub`/private visibility;
+  `import A.B`, `import A.B as B`, selective imports, module-qualified calls,
+  per-module import scope, and `pub`/private visibility;
 - **packages** — `package.flx`, a *typed, provably pure* Flex manifest (no TOML)
   with path dependencies; `flx run`/`test`/`check` need no arguments inside a
   package ([Packages and Builds](https://mattneel.github.io/flexlang/packages.html));

@@ -44,6 +44,21 @@ def test_pipe_desugars_to_call() -> None:
     assert dump_module(module).endswith("Expr add(x, 1)")
 
 
+def test_import_alias_and_selective_import_parse() -> None:
+    module = parse(
+        "module Main\n"
+        "import Lib.Math as Math\n"
+        "import Lib.Text.{trim, split}\n"
+        "fn main() -> I64 = { 0 }"
+    )
+    assert module.imports == ["Lib.Math", "Lib.Text"]
+    assert module.import_decls[0].alias == "Math"
+    assert module.import_decls[1].names == ("trim", "split")
+    dumped = dump_module(module)
+    assert "import Lib.Math as Math" in dumped
+    assert "import Lib.Text.{trim, split}" in dumped
+
+
 def test_mut_while_assignment() -> None:
     parse(Path("examples/hello.flx").read_text(encoding="utf-8"))  # smoke
     src = """

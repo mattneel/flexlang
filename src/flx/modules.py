@@ -33,6 +33,7 @@ class ProgramInfo:
     public: set[str] = field(default_factory=set)  # names declared `pub`
     file_module: dict[str, str] = field(default_factory=dict)  # file path -> module name
     module_spans: list[tuple[str, Span]] = field(default_factory=list)
+    module_imports: dict[str, list[ast.ImportDecl]] = field(default_factory=dict)
 
 
 def _decl_name(item: ast.Item) -> str | None:
@@ -79,6 +80,7 @@ def load_program(entry_path: str, extra_roots: tuple[Path, ...] = ()) -> Program
     file_module: dict[str, str] = {}
     module_file: dict[str, str] = {}  # declared module name -> file (MOD003)
     module_spans: list[tuple[str, Span]] = []
+    module_imports: dict[str, list[ast.ImportDecl]] = {}
 
     def defines_module(path: Path, module_name: str) -> bool:
         try:
@@ -145,9 +147,18 @@ def load_program(entry_path: str, extra_roots: tuple[Path, ...] = ()) -> Program
         file_module[key] = mod.name
         in_std = std_root() in resolved.parents
         for block in mod.blocks:
-            spans = list(block.import_spans) + [block.span] * len(block.imports)
-            imports = zip(block.imports, spans, strict=False)
-            for imp, span in imports:
+            decls = block.import_decls or [
+                ast.ImportDecl(imp, span)
+                for imp, span in zip(
+                    block.imports,
+                    list(block.import_spans) + [block.span] * len(block.imports),
+                    strict=False,
+                )
+            ]
+            module_imports.setdefault(block.name, []).extend(decls)
+            for decl in decls:
+                imp = decl.module
+                span = decl.span
                 if imp in module_file:
                     continue
                 rel = Path(*imp.split(".")).with_suffix(".flx")
@@ -194,5 +205,13 @@ def load_program(entry_path: str, extra_roots: tuple[Path, ...] = ()) -> Program
                 if getattr(item, "pub", False):
                     public.add(name)
 
-    merged = replace(order[0], imports=[], items=merged_items, import_spans=[])
-    return ProgramInfo(merged, sources, decl_module, public, file_module, module_spans)
+    merged = replace(order[0], imports=[], items=merged_items, import_spans=[], import_decls=[])
+    return ProgramInfo(
+        merged,
+        sources,
+        decl_module,
+        public,
+        file_module,
+        module_spans,
+        module_imports,
+    )

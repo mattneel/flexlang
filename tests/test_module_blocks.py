@@ -44,6 +44,7 @@ def _check_codes(tmp_path: Path, files: dict[str, str]) -> list[str]:
             info.public,
             info.file_module,
             info.module_spans,
+            info.module_imports,
         )
     return [d.code for d in exc.value.diagnostics]
 

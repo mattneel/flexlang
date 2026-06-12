@@ -283,12 +283,20 @@ inside its own block only.
 ```flx
 import Core.Result
 import Std.Fs
+import Very.Long.Module as Mod
+import Math.Stats.{mean, median}
 ```
 
 Imports load modules by name. The conventional path `Core/Result.flx` is tried
 first; if no such file exists, the loader can find a `module Core.Result { ... }`
 block in another loaded root file. Public functions can also be called with the
 full module prefix, e.g. `Core.Result.unwrap(x)`.
+
+Plain imports make a module's public declarations available unqualified in the
+current module. Aliased imports bind the alias for qualified calls
+(`Mod.run()`), without importing public names unqualified. Selective imports
+bind only the listed public names unqualified. Import scope is per module, so a
+transitive dependency's public declarations do not leak into the importer.
 
 ### 4.3 Functions
 

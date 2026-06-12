@@ -171,23 +171,27 @@ class Parser:
                     start.to(end),
                     [],
                     blocks,
+                    [],
                 )
         name = "Main"
         imports: list[str] = []
+        import_decls: list[ast.ImportDecl] = []
         if self._at(TokenKind.KW_MODULE):
             self._advance()
             name = self._dotted_name()
         import_spans: list[Span] = []
         while self._at(TokenKind.KW_IMPORT):
             kw = self._advance()
-            imports.append(self._dotted_name())
+            decl = self._import_decl(kw.span)
+            imports.append(decl.module)
+            import_decls.append(decl)
             import_spans.append(kw.span)
 
         items = self._items_until(TokenKind.EOF)
         end = self._peek().span
         items = [*items, *self._lambda_items]
-        block = ast.ModuleBlock(name, imports, items, start.to(end), import_spans)
-        return ast.Module(name, imports, items, start.to(end), import_spans, [block])
+        block = ast.ModuleBlock(name, imports, items, start.to(end), import_spans, import_decls)
+        return ast.Module(name, imports, items, start.to(end), import_spans, [block], import_decls)
 
     def _module_block(self) -> ast.ModuleBlock:
         start = self._expect(TokenKind.KW_MODULE, "'module'").span
@@ -195,13 +199,16 @@ class Parser:
         self._expect(TokenKind.LBRACE, "'{'")
         imports: list[str] = []
         import_spans: list[Span] = []
+        import_decls: list[ast.ImportDecl] = []
         while self._at(TokenKind.KW_IMPORT):
             kw = self._advance()
-            imports.append(self._dotted_name())
+            decl = self._import_decl(kw.span)
+            imports.append(decl.module)
+            import_decls.append(decl)
             import_spans.append(kw.span)
         items = self._items_until(TokenKind.RBRACE)
         end = self._expect(TokenKind.RBRACE, "'}'").span
-        return ast.ModuleBlock(name, imports, items, start.to(end), import_spans)
+        return ast.ModuleBlock(name, imports, items, start.to(end), import_spans, import_decls)
 
     def _items_until(self, end_kind: TokenKind) -> list[ast.Item]:
         items: list[ast.Item] = []
@@ -255,6 +262,32 @@ class Parser:
         while self._eat(TokenKind.DOT):
             parts.append(self._expect(TokenKind.IDENT, "a name").text)
         return ".".join(parts)
+
+    def _import_decl(self, start: Span) -> ast.ImportDecl:
+        first = self._expect(TokenKind.IDENT, "a module name")
+        parts = [first.text]
+        end = first.span
+        names: tuple[str, ...] | None = None
+        while self._eat(TokenKind.DOT):
+            if self._eat(TokenKind.LBRACE):
+                selected = [self._expect(TokenKind.IDENT, "an imported name").text]
+                while self._eat(TokenKind.COMMA):
+                    selected.append(self._expect(TokenKind.IDENT, "an imported name").text)
+                end = self._expect(TokenKind.RBRACE, "'}'").span
+                names = tuple(selected)
+                break
+            tok = self._expect(TokenKind.IDENT, "a module name")
+            parts.append(tok.text)
+            end = tok.span
+        alias: str | None = None
+        if self._at(TokenKind.IDENT) and self._peek().text == "as":
+            if names is not None:
+                raise self._error("selective imports cannot also use an alias", self._peek().span)
+            self._advance()
+            alias_tok = self._expect(TokenKind.IDENT, "an import alias")
+            alias = alias_tok.text
+            end = alias_tok.span
+        return ast.ImportDecl(".".join(parts), start.to(end), alias, names)
 
     def _fn(self) -> ast.FnDecl:
         start = self._advance().span  # `fn`

@@ -37,17 +37,34 @@ def check_and_monomorphize(
     public: set[str] | None = None,
     file_module: dict[str, str] | None = None,
     module_spans: list[tuple[str, Span]] | None = None,
+    module_imports: dict[str, list[ast.ImportDecl]] | None = None,
     builtin_records: dict[str, RecordType] | None = None,
 ) -> CheckResult:
     """Type-check `module`, then specialize every generic instantiation it
     demands, re-checking until the set of instantiations is closed."""
-    result = check(module, decl_module, public, file_module, module_spans, builtin_records)
+    result = check(
+        module,
+        decl_module,
+        public,
+        file_module,
+        module_spans,
+        module_imports,
+        builtin_records,
+    )
     if not result.generic_fns:
         return result  # nothing generic: the first check is already complete
 
     current = module
     for _ in range(_MONO_LIMIT):
-        result = check(current, decl_module, public, file_module, module_spans, builtin_records)
+        result = check(
+            current,
+            decl_module,
+            public,
+            file_module,
+            module_spans,
+            module_imports,
+            builtin_records,
+        )
         pending = [
             (name, key)
             for (name, key) in result.instantiations

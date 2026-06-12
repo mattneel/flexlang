@@ -335,6 +335,7 @@ class CheckResult:
     inst_subst: dict[tuple[str, tuple[str, ...]], dict[str, Type]] = field(default_factory=dict)
     file_module: dict[str, str] = field(default_factory=dict)  # file path -> module name
     module_spans: list[tuple[str, Span]] = field(default_factory=list)
+    module_imports: dict[str, list[ast.ImportDecl]] = field(default_factory=dict)
 
 
 @dataclass
@@ -365,6 +366,7 @@ class Checker:
         public: set[str] | None = None,
         file_module: dict[str, str] | None = None,
         module_spans: list[tuple[str, Span]] | None = None,
+        module_imports: dict[str, list[ast.ImportDecl]] | None = None,
         builtin_records: dict[str, RecordType] | None = None,
     ) -> None:
         # Pre-registered record types (e.g. Manifest/Dependency when checking a
@@ -379,6 +381,7 @@ class Checker:
         self.public = public or set()
         self.file_module = file_module or {}
         self.module_spans = module_spans or []
+        self.module_imports = module_imports or {}
         self.current_module: str | None = None
         self.diags: list[Diagnostic] = []
         self.expr_types: dict[int, Type] = {}
@@ -609,6 +612,7 @@ class Checker:
             inst_subst=self.inst_subst,
             file_module=self.file_module,
             module_spans=self.module_spans,
+            module_imports=self.module_imports,
         )
 
     # --- traits / impls -------------------------------------------------------
@@ -840,13 +844,55 @@ class Checker:
             return [*prefix, expr.name]
         return None
 
+    def _current_imports(self) -> list[ast.ImportDecl]:
+        if self.current_module is None:
+            return []
+        return self.module_imports.get(self.current_module, [])
+
+    def _module_imported(self, module_name: str) -> bool:
+        if self.current_module is None or module_name == self.current_module:
+            return True
+        return any(decl.module == module_name for decl in self._current_imports())
+
+    def _imports_name(self, owner: str, name: str) -> bool:
+        for decl in self._current_imports():
+            if decl.module != owner:
+                continue
+            if decl.names is not None:
+                if name in decl.names:
+                    return True
+                continue
+            if decl.alias is None:
+                return True
+        return False
+
+    def _resolve_imported_module_path(self, path: list[str]) -> str:
+        if not path:
+            return ""
+        head, *tail = path
+        for decl in self._current_imports():
+            if decl.alias == head:
+                return ".".join([decl.module, *tail])
+        return ".".join(path)
+
+    def _public_unimported(self, name: str) -> bool:
+        owner = self.decl_module.get(name)
+        return (
+            owner is not None
+            and owner != self.current_module
+            and name in self.public
+            and not self._imports_name(owner, name)
+        )
+
     def _name_visible(self, name: str) -> bool:
-        if self.current_module is None or name in self.public:
+        if self.current_module is None:
             return True
         if self.current_module in self.extern_decl_modules.get(name, ()):
             return True  # this module declared the extern itself
         owner = self.decl_module.get(name)
-        return owner is None or owner == self.current_module
+        if owner is None or owner == self.current_module:
+            return True
+        return name in self.public and self._imports_name(owner, name)
 
     def _check_visible(self, name: str, span: Span | None) -> None:
         """Flag a reference from `current_module` to another module's private name.
@@ -861,11 +907,34 @@ class Checker:
             # it must not also make stdlib signatures "private to" the user.
             return
         if not self._name_visible(name):
+            if self._public_unimported(name):
+                owner = self.decl_module.get(name)
+                self._err(
+                    "NAME001",
+                    f"{name!r} is not imported by module {self.current_module!r}",
+                    span,
+                    help=f"import {owner} or import {owner}.{{{name}}}" if owner else None,
+                )
+                return
             self._err(
                 "VIS001",
                 f"{name!r} is private to module {self.decl_module.get(name)!r}",
                 span,
             )
+
+    def _check_qualified_visible(self, name: str, span: Span | None) -> None:
+        if span is None or name in _BUILTIN_ADTS:
+            return
+        if self.current_module in self.extern_decl_modules.get(name, ()):
+            return
+        owner = self.decl_module.get(name)
+        if owner is None or owner == self.current_module or name in self.public:
+            return
+        self._err(
+            "VIS001",
+            f"{name!r} is private to module {owner!r}",
+            span,
+        )
 
     def _check_fn(self, fn: ast.FnDecl) -> None:
         self.scope = _Scope()
@@ -1876,10 +1945,20 @@ class Checker:
             return None
         if self.scope.lookup(path[0]) is not None:
             return None
-        module_name = ".".join(path[:-1])
+        module_name = self._resolve_imported_module_path(path[:-1])
         function_name = path[-1]
         if module_name not in self._loaded_modules():
             return None
+        if not self._module_imported(module_name):
+            for arg in expr.args:
+                self._check_expr(arg)
+            self._err(
+                "NAME001",
+                f"module {module_name!r} is not imported by module {self.current_module!r}",
+                expr.span,
+                help=f"import {module_name}",
+            )
+            return ERROR
         if self.decl_module.get(function_name) != module_name:
             for arg in expr.args:
                 self._check_expr(arg)
@@ -1889,7 +1968,7 @@ class Checker:
                 expr.span,
             )
             return ERROR
-        self._check_visible(function_name, callee.span)
+        self._check_qualified_visible(function_name, callee.span)
         if function_name in self.generic_fns:
             ret = self._infer_generic_call(function_name, expr, expected)
             symbol = self.method_targets.pop(id(expr), None)
@@ -2743,6 +2822,15 @@ def check(
     public: set[str] | None = None,
     file_module: dict[str, str] | None = None,
     module_spans: list[tuple[str, Span]] | None = None,
+    module_imports: dict[str, list[ast.ImportDecl]] | None = None,
     builtin_records: dict[str, RecordType] | None = None,
 ) -> CheckResult:
-    return Checker(module, decl_module, public, file_module, module_spans, builtin_records).check()
+    return Checker(
+        module,
+        decl_module,
+        public,
+        file_module,
+        module_spans,
+        module_imports,
+        builtin_records,
+    ).check()

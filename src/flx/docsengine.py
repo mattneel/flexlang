@@ -168,12 +168,20 @@ def _copy_module_closure(file: Path, module_name: str, tmp: Path) -> set[str]:
         dest = tmp.joinpath(*name.split(".")).with_suffix(".flx")
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(text, encoding="utf-8")
-        for imp in parse(text, str(src)).imports:
+        for imp in _parsed_import_modules(text, src):
             if not imp.startswith("Std."):
                 visit(imp, root.joinpath(*imp.split(".")).with_suffix(".flx"))
 
     visit(module_name, file)
     return copied
+
+
+def _parsed_import_modules(text: str, src: Path) -> list[str]:
+    module = parse(text, str(src))
+    imports = list(module.imports)
+    for block in module.blocks:
+        imports.extend(block.imports)
+    return imports
 
 
 def _run_module_doc_tests(
