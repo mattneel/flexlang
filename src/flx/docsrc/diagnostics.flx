@@ -101,21 +101,6 @@ doc "TYPE008" {
   }
 }
 
-doc "TYPE025" {
-  slug "diagnostics/TYPE025"
-  summary "A function value in a position that cannot store one."
-  text """
-  Function values flow through parameters, arguments, and `let` bindings.
-  Storing one — in a `mut`, a record field, an ADT payload, a list, or a
-  return type — is not supported yet.
-  """
-  test "function values cannot live in lists" expect_error TYPE025 {
-    fn d(x: I64) -> I64 = { x }
-    fn main() -> I64 = { let fs = [d]
-      0 }
-  }
-}
-
 doc "DOC001" {
   slug "diagnostics/DOC001"
   summary "A doc declaration references a symbol that does not exist."

@@ -289,15 +289,38 @@ def test_generic_fn_value_rejected() -> None:
     assert any(d.code == "NAME003" and "generic" in d.message for d in diags)
 
 
-def test_fn_storage_rejected() -> None:
-    diags = _diag("fn d(x: I64) -> I64 = { x }\nfn main() -> I64 = { mut f = d\n 0 }\n")
-    assert any(d.code == "TYPE025" for d in diags)
-    diags = _diag("type R = { f: (I64) -> I64 }\nfn main() -> I64 = { 0 }\n")
-    assert any(d.code == "TYPE025" for d in diags)
-    diags = _diag(
-        "fn d(x: I64) -> I64 = { x }\nfn main() -> I64 = { let xs: List<(I64) -> I64> = []\n 0 }\n"
+def test_fn_return_and_call_result(tmp_path: Path) -> None:
+    _both(
+        tmp_path,
+        "fn inc(x: I64) -> I64 = { x + 1 }\n"
+        "fn dec(x: I64) -> I64 = { x - 1 }\n"
+        "fn pick(flag: Bool) -> (I64) -> I64 = { if flag { inc } else { dec } }\n"
+        "fn main() -> I64 = { pick(true)(41) + pick(false)(43) }\n",
+        84,
     )
-    assert any(d.code == "TYPE025" for d in diags)
+
+
+def test_fn_values_can_be_stored_and_carried(tmp_path: Path) -> None:
+    _both(
+        tmp_path,
+        "module Main\nimport Std.Map\n"
+        "fn inc(x: I64) -> I64 = { x + 1 }\n"
+        "fn dec(x: I64) -> I64 = { x - 1 }\n"
+        "type Op = { f: (I64) -> I64 }\n"
+        "type Holder = | Holder((I64) -> I64)\n"
+        "fn main() -> I64 = {\n"
+        "  mut f = inc\n"
+        "  f = dec\n"
+        "  let op: Op = { f = inc, }\n"
+        "  let fs: List<(I64) -> I64> = [inc, dec]\n"
+        "  let m: Map<String, (I64) -> I64> = Map.new()\n"
+        '  Map.set(m, "inc", inc)\n'
+        "  let from_adt = match Holder(dec) { Holder(g) => g(10) }\n"
+        '  let from_map = match Map.get(m, "inc") { Some(g) => g(30)  None => 0 }\n'
+        "  f(10) + op.f(10) + fs[0](10) + fs[1](10) + from_adt + from_map\n"
+        "}\n",
+        80,
+    )
 
 
 def test_effectful_fn_type_syntax_rejected() -> None:
@@ -368,18 +391,12 @@ def test_record_eq_with_nan_field(tmp_path: Path) -> None:
     )
 
 
-def test_fn_values_in_inferred_list_literal_rejected() -> None:
-    # TYPE025 fired only on annotated List<fn> — the inferred literal [d]
-    # slipped through to an MLIR verifier error.
-    diags = _diag("fn d(x: I64) -> I64 = { x }\nfn main() -> I64 = { let fs = [d]\n 0 }\n")
-    assert any(d.code == "TYPE025" for d in diags)
-
-
-def test_fn_return_type_rejected() -> None:
-    diags = _diag(
-        "fn d(x: I64) -> I64 = { x }\nfn pick() -> (I64) -> I64 = { d }\nfn main() -> I64 = { 0 }\n"
+def test_fn_values_in_inferred_list_literal(tmp_path: Path) -> None:
+    _both(
+        tmp_path,
+        "fn d(x: I64) -> I64 = { x + 1 }\nfn main() -> I64 = { let fs = [d]\n fs[0](41) }\n",
+        42,
     )
-    assert any(d.code == "TYPE025" and "return" in d.message for d in diags)
 
 
 def test_builtin_as_value_gets_name003() -> None:

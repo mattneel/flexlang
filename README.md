@@ -165,8 +165,8 @@ ok Main / add works
 - **numerics + function values** — `F64` (IEEE-754, shortest-round-trip
   `to_str`, doubles across the FFI so `Std.Math` wraps libm), hex/binary
   literals, bitwise ops (`& | ^ << >>`, Rust-style precedence, masked shifts),
-  and pure functions as values (`(I64) -> I64` parameter types) powering
-  `Std.List.map`/`filter`/`fold`
+  and pure functions as values (`(I64) -> I64`) that can be passed, returned,
+  and stored in records, ADTs, lists, maps, and `mut` bindings
   ([Numbers, Bits, and Function Values](https://mattneel.github.io/flexlang/numerics.html));
 - **lists** — `List<T>` on both backends: `[1, 2, 3]` literals, `xs[i]`
   indexing (bounds-checked), `List.push`/`len`/`set`, `for x in xs { … }`,

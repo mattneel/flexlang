@@ -106,9 +106,7 @@ def mlir_type(ty: Type) -> str:
     if isinstance(ty, MapType):
         return "!llvm.ptr"  # a heap header: FlxMap (insertion-ordered entries)
     if isinstance(ty, FnType):
-        params = ", ".join(mlir_type(t) for t in ty.params)
-        ret = "()" if ty.ret is UNIT else mlir_type(ty.ret)
-        return f"({params}) -> {ret}"
+        return "i64"  # stable function ID; indirect calls dispatch on it
     raise BackendError(f"type {ty} has no MLIR representation yet")
 
 
@@ -140,7 +138,7 @@ def _payload_inline(ty: Type) -> bool:
         or ty is BOOL
         or ty is UNIT
         or ty is BYTES
-        or isinstance(ty, (ListType, MapType))
+        or isinstance(ty, (FnType, ListType, MapType))
         or (isinstance(ty, AdtType) and _is_enum(ty))
     )
 
@@ -179,6 +177,7 @@ class FunctionLowerer:
         self.checked = checked
         self.types = checked.expr_types
         self.functions = checked.functions
+        self.function_ids = {name: i + 1 for i, name in enumerate(sorted(self.functions))}
         self.constructors = checked.constructors
         self.method_targets = checked.method_targets
         self.qualified_calls = checked.qualified_calls
@@ -230,6 +229,9 @@ class FunctionLowerer:
             return None
         symbol = f"t$Show$0${ty.name}$show"
         return symbol if symbol in self.functions else None
+
+    def _function_id(self, name: str) -> str:
+        return self._const(str(self.function_ids[name]), "i64")
 
     def _materialize(self, value: str | None, expr: ast.Expr) -> str:
         """A value for `expr` where one is demanded (stored, passed, compared).
@@ -629,9 +631,7 @@ class FunctionLowerer:
         if isinstance(ty, FnType) and expr.name in self.functions:
             local = next((f for f in self.scopes if expr.name in f), None)
             if local is None:  # a bare (pure) top-level function reference
-                out = self._fresh()
-                self._emit(f"{out} = func.constant @{_flex_symbol(expr.name)} : {mlir_type(ty)}")
-                return out
+                return self._function_id(expr.name)
         binding = self._lookup(expr.name)
         if binding.kind == "val":
             return binding.ref
@@ -1199,6 +1199,46 @@ class FunctionLowerer:
         self._emit(f"{out} = memref.load {slot}[] : memref<i1>")
         return out
 
+    def _lower_fn_value_call(self, expr: ast.CallExpr, fn_ty: FnType) -> str | None:
+        fn_id = self._materialize(self.lower_expr(expr.callee), expr.callee)
+        args = [self._materialize(self.lower_expr(arg), arg) for arg in expr.args]
+        candidates = [
+            name
+            for name, candidate_ty in sorted(self.functions.items())
+            if candidate_ty == fn_ty and name not in self.extern_fns
+        ]
+        if not candidates:
+            raise BackendError(f"no callable target has function type {fn_ty}")
+
+        exit_lbl = self._label()
+        result_slot: str | None = None
+        result_mty = ""
+        if fn_ty.ret is not UNIT:
+            result_mty = mlir_type(fn_ty.ret)
+            result_slot = self._alloc_slot(result_mty)
+
+        for name in candidates:
+            call_lbl = self._label()
+            next_lbl = self._label()
+            expected = self._function_id(name)
+            is_match = self._fresh()
+            self._emit(f"{is_match} = arith.cmpi eq, {fn_id}, {expected} : i64")
+            self._terminator(f"cf.cond_br {is_match}, {call_lbl}, {next_lbl}")
+
+            self._start_block(call_lbl)
+            result = self._emit_call(_flex_symbol(name), args, fn_ty)
+            if result_slot is not None and result is not None:
+                self._store_slot(result_slot, result_mty, result)
+            self._terminator(f"cf.br {exit_lbl}")
+
+            self._start_block(next_lbl)
+
+        self._terminator(f"cf.br {exit_lbl}")
+        self._start_block(exit_lbl)
+        if result_slot is None:
+            return None
+        return self._load_slot(result_slot, result_mty)
+
     def _lower_call(self, expr: ast.CallExpr) -> str | None:
         qualified_symbol = self.qualified_calls.get(id(expr))
         if qualified_symbol is not None:
@@ -1220,6 +1260,9 @@ class FunctionLowerer:
                     other = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
                     return self._emit_equal(recv, other, recv_ty)
                 return self._emit_show(recv, recv_ty)
+        callee_ty = self.types.get(id(expr.callee))
+        if isinstance(callee_ty, FnType):
+            return self._lower_fn_value_call(expr, callee_ty)
         # Effectful intrinsics (validated by the checker). Log.* prints its
         # message; other intrinsics are MVP no-ops at runtime.
         if isinstance(expr.callee, ast.MemberExpr):
@@ -1325,21 +1368,6 @@ class FunctionLowerer:
         if not isinstance(expr.callee, ast.NameExpr):
             raise BackendError("only direct function calls are supported")
         name = expr.callee.name
-        # A function VALUE in scope (a parameter or let-bound reference)
-        # shadows the global namespaces — call through it indirectly.
-        local_fn = next((f[name] for f in reversed(self.scopes) if name in f), None)
-        callee_ty = self.types.get(id(expr.callee))
-        if local_fn is not None and isinstance(callee_ty, FnType):
-            args = [self._materialize(self.lower_expr(a), a) for a in expr.args]
-            assert local_fn.kind == "val", "fn values are SSA-only (no slots)"
-            arg_list = ", ".join(args)
-            fty = mlir_type(callee_ty)
-            if callee_ty.ret is UNIT:
-                self._emit(f"func.call_indirect {local_fn.ref}({arg_list}) : {fty}")
-                return None
-            out = self._fresh()
-            self._emit(f"{out} = func.call_indirect {local_fn.ref}({arg_list}) : {fty}")
-            return out
         # Bounded-generic call -> direct call to the monomorphized specialization.
         symbol = self.method_targets.get(id(expr))
         if symbol is not None:

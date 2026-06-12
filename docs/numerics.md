@@ -97,8 +97,8 @@ The rules that keep the effect system sound:
   Effect-carrying function types are the roadmap.
 - Externs stay call-only (their C ABI marshalling happens at direct calls).
 - Generic functions can't be passed (pass a monomorphic one).
-- Function values flow through parameters, arguments, and `let` bindings;
-  storing them (records, lists, ADT payloads, `mut`) is not supported yet.
+- Function values flow through parameters, arguments, return values, records,
+  ADT payloads, lists, maps, `let`, and `mut` bindings.
 - Explicit typed lambdas are non-capturing and pure; they are lifted like
   generated top-level functions. Capturing closures are not supported yet.
 

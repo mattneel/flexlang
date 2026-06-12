@@ -485,14 +485,6 @@ class Checker:
             user_records.append(record)
         for record in user_records:
             fields = tuple((f.name, self._resolve_type(f.type)) for f in record.fields)
-            for fname, fty in fields:
-                if isinstance(fty, FnType):
-                    self._err(
-                        "TYPE025",
-                        f"field {fname!r} has a function type; function values "
-                        "cannot be stored in records yet",
-                        record.span,
-                    )
             object.__setattr__(self.record_types[record.name], "fields", fields)
         # A record that reaches itself through record fields alone is infinite
         # in size — only an ADT payload (which boxes) can break the cycle.
@@ -555,15 +547,6 @@ class Checker:
                 continue
             params = tuple(self._resolve_type(p.type) for p in fn.params)
             ret = self._resolve_type(fn.return_type) if fn.return_type else UNIT
-            if isinstance(ret, FnType):
-                self._err(
-                    "TYPE025",
-                    f"{fn.name!r} returns a function type; functions cannot "
-                    "return function values yet",
-                    fn.span,
-                    help="take the would-be result's arguments directly instead",
-                )
-                ret = ERROR
             self.functions[fn.name] = FnType(params, ret)
             self.fn_effects[fn.name] = set(fn.effects)
 
@@ -1289,13 +1272,6 @@ class Checker:
             if annotated is not None:
                 self._expect(annotated, value_ty, stmt.value.span, "bound value")
                 value_ty = annotated  # the annotation wins (e.g. `[]` stays typed)
-            if isinstance(stmt, ast.MutStmt) and isinstance(value_ty, FnType):
-                self._err(
-                    "TYPE025",
-                    "function values cannot be stored in `mut` bindings yet",
-                    stmt.value.span,
-                    help="bind with `let`, or pass the function as an argument",
-                )
             self.scope.define(stmt.name, _Binding(value_ty, mutable=isinstance(stmt, ast.MutStmt)))
             return UNIT
         if isinstance(stmt, ast.AssignStmt):
@@ -1498,14 +1474,6 @@ class Checker:
         first = self._check_expr(expr.items[0], elem_expected)
         for item in expr.items[1:]:
             self._expect(first, self._check_expr(item, first), item.span, "list element")
-        if isinstance(first, FnType):
-            self._err(
-                "TYPE025",
-                "function values cannot be stored in lists yet",
-                expr.span,
-                help="pass functions as arguments; storing them is the roadmap",
-            )
-            return ERROR
         return ListType(first) if first is not ERROR else ERROR
 
     def _infer_record(self, expr: ast.RecordExpr) -> Type:
@@ -2298,13 +2266,6 @@ class Checker:
             self.scope.pop()
             if not value_used:
                 continue  # statement position: arm types need not agree
-            if isinstance(body_ty, FnType):
-                self._err(
-                    "TYPE025",
-                    "a `match` cannot yield a function value yet",
-                    arm.span,
-                )
-                body_ty = ERROR
             if result is None:
                 result = body_ty
             elif not _same(result, body_ty):
@@ -2516,14 +2477,6 @@ class Checker:
                 self._check_block(expr.else_block, None, False)
             return UNIT
         then_ty = self._check_block(expr.then_block, expected)
-        if isinstance(then_ty, FnType):
-            self._err(
-                "TYPE025",
-                "an `if` cannot yield a function value yet",
-                expr.span,
-                help="select with a direct call in each branch instead",
-            )
-            return ERROR
         if expr.else_block is None:
             # Value position with no else: there is no value on the false path.
             if then_ty is not UNIT and then_ty is not ERROR and not _diverges(expr.then_block):
@@ -2601,14 +2554,6 @@ class Checker:
                 self._err("TYPE013", "List expects exactly 1 type argument", type_expr.span)
                 return ERROR
             elem = self._resolve_type(type_expr.args[0])
-            if isinstance(elem, FnType):
-                self._err(
-                    "TYPE025",
-                    "function values cannot be stored in lists yet",
-                    type_expr.span,
-                    help="pass functions as arguments; storing them is the roadmap",
-                )
-                return ERROR
             return ListType(elem)
         if type_expr.name == "Map":
             if len(type_expr.args) != 2:
@@ -2628,14 +2573,6 @@ class Checker:
                 )
                 return ERROR
             value = self._resolve_type(type_expr.args[1])
-            if isinstance(value, FnType):
-                self._err(
-                    "TYPE025",
-                    "function values cannot be stored in maps yet",
-                    type_expr.span,
-                    help="pass functions as arguments; storing them is the roadmap",
-                )
-                return ERROR
             return MapType(value)
         if type_expr.name in self.record_types and not type_expr.args:
             self._check_visible(type_expr.name, type_expr.span)
@@ -2689,14 +2626,6 @@ class Checker:
                 VariantDef(vname, tuple(self._resolve_type(pe) for pe in payload))
                 for vname, payload in variants
             )
-            for vdef in defs:
-                if any(isinstance(t, FnType) for t in vdef.payload):
-                    self._err(
-                        "TYPE025",
-                        f"variant {vdef.name!r} carries a function type; function "
-                        "values cannot be stored in ADT payloads yet",
-                        span,
-                    )
         finally:
             self._inst_depth -= 1
             self._subst = saved

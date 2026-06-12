@@ -38,5 +38,4 @@
   - [NAME003](diagnostics/NAME003.md)
   - [TYPE008](diagnostics/TYPE008.md)
   - [TYPE019](diagnostics/TYPE019.md)
-  - [TYPE025](diagnostics/TYPE025.md)
 <!-- flx-api:end -->

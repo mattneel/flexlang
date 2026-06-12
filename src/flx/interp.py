@@ -38,6 +38,7 @@ from flx.types import (
     STRING,
     UNIT,
     AdtType,
+    FnType,
     ListType,
     MapType,
     PrimType,
@@ -892,6 +893,12 @@ class Interpreter:
             else:
                 args = [self.eval(a, env) for a in expr.args]
             return self.call(fn, args)
+
+        if isinstance(self.types.get(id(callee)), FnType):
+            bound = self.eval(callee, env)
+            if isinstance(bound, ast.FnDecl):
+                return self.call(bound, [self.eval(a, env) for a in expr.args])
+            raise FlexRuntimeError("function-typed expression did not evaluate to a function")
 
         if isinstance(callee, ast.MemberExpr):
             if callee.name == "eq":
