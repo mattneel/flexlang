@@ -142,6 +142,7 @@ class FunctionLowerer:
     """Lowers a single function or test body into MLIR text lines."""
 
     def __init__(self, checked: CheckResult) -> None:
+        self.checked = checked
         self.types = checked.expr_types
         self.functions = checked.functions
         self.constructors = checked.constructors
@@ -1245,7 +1246,7 @@ class FunctionLowerer:
                     self._emit(f"{ok} = arith.xori {equal}, {one} : i1")
                     self._assert_branch(ok, "@__flx_assert_fne_fail", f"{left}", "f64")
                 return None
-            impl_symbol = self.method_targets.get(id(call))
+            impl_symbol = self.checked.assert_impls.get(id(call))
             if impl_symbol is not None:
                 # An Eq impl carries the comparison (the checker routed it);
                 # failures report generically, like any aggregate.

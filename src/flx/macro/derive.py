@@ -165,8 +165,12 @@ def _call_method(recv: ast.Expr, method: str, args: list[ast.Expr], sp: Span) ->
 
 
 def _enc(te: ast.TypeExpr) -> str:
-    """An identifier-safe encoding of a type expression for helper names."""
-    parts = [te.name.lower().replace("->", "fn")]
+    """An identifier-safe, INJECTIVE encoding of a type expression for helper
+    names: arity-prefixed like the checker's _type_enc, case preserved — so
+    `Foo` and `FOO` (or `List<I64>` and a record named List_I64) never share
+    a generated helper."""
+    name = te.name.replace("->", "fn")
+    parts = [f"{len(te.args)}_{name}"]
     parts.extend(_enc(a) for a in te.args)
     return "_".join(parts)
 
@@ -228,6 +232,77 @@ class _HelperGen:
         self.helpers[fname] = _fn(fname, [("a", list_te), ("b", list_te)], "Bool", body, sp)
         return fname
 
+    def _variant_eq_fn(
+        self,
+        fname: str,
+        te: ast.TypeExpr,
+        variants: list[tuple[str, list[ast.TypeExpr]]],
+        sp: Span,
+    ) -> None:
+        """fn fname(a: te, b: te) -> Bool comparing builtin-ADT values arm by
+        arm (Option/Result fields can't carry impls — generic instantiations
+        aren't impl targets — so derive writes the match instead)."""
+        multi = len(variants) > 1
+        outer_arms: list[ast.MatchArm] = []
+        for vname, payload in variants:
+            n = len(payload)
+            x_binds: list[ast.Pattern] = [ast.BindPattern(f"x{i}", sp) for i in range(n)]
+            y_binds: list[ast.Pattern] = [ast.BindPattern(f"y{i}", sp) for i in range(n)]
+            cmps = [
+                _eq_expr(_name(f"x{i}", sp), _name(f"y{i}", sp), pty, sp, self.exp, self)
+                for i, pty in enumerate(payload)
+            ]
+            inner_arms = [ast.MatchArm(ast.CtorPattern(vname, y_binds, sp), _and_all(cmps, sp), sp)]
+            if multi:
+                inner_arms.append(ast.MatchArm(ast.WildcardPattern(sp), ast.BoolLit(False, sp), sp))
+            inner = ast.MatchExpr(_name("b", sp), inner_arms, sp)
+            outer_arms.append(ast.MatchArm(ast.CtorPattern(vname, x_binds, sp), inner, sp))
+        match = ast.MatchExpr(_name("a", sp), outer_arms, sp)
+        self.helpers[fname] = _expr_fn(fname, [("a", te), ("b", te)], "Bool", match, sp)
+
+    def _variant_show_fn(
+        self,
+        fname: str,
+        te: ast.TypeExpr,
+        variants: list[tuple[str, list[ast.TypeExpr]]],
+        sp: Span,
+    ) -> None:
+        """fn fname(v: te) -> String rendering builtin-ADT values arm by arm."""
+        arms: list[ast.MatchArm] = []
+        for vname, payload in variants:
+            if payload:
+                binds: list[ast.Pattern] = [
+                    ast.BindPattern(f"x{i}", sp) for i in range(len(payload))
+                ]
+                parts: list[ast.Expr] = [ast.StringLit(vname + "(", sp)]
+                for i, pty in enumerate(payload):
+                    if i:
+                        parts.append(ast.StringLit(", ", sp))
+                    parts.append(_show_expr(_name(f"x{i}", sp), pty, sp, self.exp, self))
+                parts.append(ast.StringLit(")", sp))
+                body: ast.Expr = _concat(parts, sp)
+                pattern: ast.Pattern = ast.CtorPattern(vname, binds, sp)
+            else:
+                pattern = ast.CtorPattern(vname, [], sp)
+                body = ast.StringLit(vname, sp)
+            arms.append(ast.MatchArm(pattern, body, sp))
+        match = ast.MatchExpr(_name("v", sp), arms, sp)
+        self.helpers[fname] = _expr_fn(fname, [("v", te)], "String", match, sp)
+
+    def builtin_adt_eq(self, te: ast.TypeExpr, sp: Span) -> str:
+        fname = f"__derive_eq_{_enc(te)}"
+        if fname not in self.helpers:
+            self.helpers[fname] = _fn("", [], "Bool", [], sp)  # placeholder
+            self._variant_eq_fn(fname, te, _builtin_variants(te), sp)
+        return fname
+
+    def builtin_adt_show(self, te: ast.TypeExpr, sp: Span) -> str:
+        fname = f"__derive_show_{_enc(te)}"
+        if fname not in self.helpers:
+            self.helpers[fname] = _fn("", [], "String", [], sp)  # placeholder
+            self._variant_show_fn(fname, te, _builtin_variants(te), sp)
+        return fname
+
     def list_show(self, elem: ast.TypeExpr, sp: Span) -> str:
         fname = f"__derive_list_show_{_enc(elem)}"
         if fname in self.helpers:
@@ -278,6 +353,14 @@ class _HelperGen:
 # --- per-type comparison / rendering expressions ----------------------------------
 
 
+def _builtin_variants(te: ast.TypeExpr) -> list[tuple[str, list[ast.TypeExpr]]]:
+    """Variant shapes of the builtin generic ADTs, instantiated at te's args."""
+    if te.name == "Option":
+        return [("None", []), ("Some", [te.args[0]])]
+    assert te.name == "Result"
+    return [("Ok", [te.args[0]]), ("Err", [te.args[1]])]
+
+
 def _eq_expr(
     mine: ast.Expr, theirs: ast.Expr, te: ast.TypeExpr, sp: Span, exp: Expander, gen: _HelperGen
 ) -> ast.Expr:
@@ -294,6 +377,11 @@ def _eq_expr(
         )
     if _comparable_syntactic(te, exp, frozenset()):
         return ast.BinaryExpr("==", mine, theirs, sp)
+    if te.name in ("Option", "Result") and te.args:
+        # Generic builtin instantiations can't carry impls; derive writes the
+        # match instead, recursing into the payload comparison.
+        helper = gen.builtin_adt_eq(te, sp)
+        return ast.CallExpr(_name(helper, sp), [mine, theirs], sp)
     # A composite that isn't structurally comparable: go through ITS Eq impl
     # (its own derive, or a hand-written one) — nested derives compose.
     return _call_method(mine, "eq", [theirs], sp)
@@ -308,6 +396,8 @@ def _show_expr(
         then = ast.Block([ast.ExprStmt(ast.StringLit("true", sp), sp)], sp)
         els = ast.Block([ast.ExprStmt(ast.StringLit("false", sp), sp)], sp)
         return ast.IfExpr(value, then, els, sp)
+    if te.name == "Unit" and not te.args:
+        return ast.StringLit("()", sp)
     if te.name == "String":
         return value
     if te.name == "List":
@@ -320,6 +410,9 @@ def _show_expr(
             "(Map.keys + Map.get)",
             sp,
         )
+    if te.name in ("Option", "Result") and te.args:
+        helper = gen.builtin_adt_show(te, sp)
+        return ast.CallExpr(_name(helper, sp), [value], sp)
     # Any other type renders through ITS Show impl — recursive derives work,
     # and a type with no Show in scope reports DISP001 at the derive line.
     return _call_method(value, "show", [], sp)

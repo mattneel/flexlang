@@ -159,6 +159,15 @@ _EFFECT_MODULES = {"Fs", "Http", "Db", "Log", "Time", "Alloc", "Random", "Proces
 _KNOWN_ABSENT: dict[str, str] = {
     "break": "loops have no break; use a flag in the `while` condition, or an early `return`",
     "continue": "loops have no continue; guard the rest of the body with an `if`",
+    "format": "there are no format strings yet; build output with `++`, to_str, and "
+    "Std.Str's to_str_fixed/pad_left/pad_right",
+    "printf": "there is no printf; use println (import Std.IO) with `++`, to_str, "
+    "and Std.Str's to_str_fixed/pad_left/pad_right",
+}
+
+# Features that EXIST under another spelling. These must not say "Flex does
+# not have X yet" — that headline would deny a shipped feature.
+_SPELLED_DIFFERENTLY: dict[str, str] = {
     "chr": 'Flex calls it from_byte: import Std.Str, then from_byte(65) is "A" '
     "(from_bytes builds a string from a whole List<I64>)",
     "to_float": "Flex calls it parse_float (import Std.Str) for strings, and to_f64 for I64 values",
@@ -169,10 +178,6 @@ _KNOWN_ABSENT: dict[str, str] = {
     "hashmap": "Flex calls it Map (see `dict`)",
     "HashMap": "Flex calls it Map (see `dict`)",
     "pop": "pop is a built-in list operation: List.pop(xs) returns Some(last) or None when empty",
-    "format": "there are no format strings yet; build output with `++`, to_str, and "
-    "Std.Str's to_str_fixed/pad_left/pad_right",
-    "printf": "there is no printf; use println (import Std.IO) with `++`, to_str, "
-    "and Std.Str's to_str_fixed/pad_left/pad_right",
     "input": "use read_line() (import Std.IO, uses { Fs })",
 }
 
@@ -266,6 +271,11 @@ class CheckResult:
     functions: dict[str, FnType]
     constructors: set[str]
     method_targets: dict[int, str]  # id(CallExpr) -> resolved impl/spec symbol
+    # id(assert_eq/assert_ne CallExpr) -> the Eq impl symbol carrying the
+    # comparison. A SEPARATE channel from method_targets: the generic
+    # method-dispatch interceptors fire before builtin handling on both
+    # backends and would swallow the assertion into a plain (discarded) call.
+    assert_impls: dict[int, str] = field(default_factory=dict)
     # C-ABI foreign functions: called by their unmangled symbol name; the native
     # backend declares them, the interpreter dispatches them through ctypes.
     extern_fns: set[str] = field(default_factory=set)
@@ -365,6 +375,8 @@ class Checker:
         self.extern_decl_modules: dict[str, set[str]] = {}
         # Duplicate fn declarations (by id): TYPE002 reported, bodies skipped.
         self._dup_fn_decls: set[int] = set()
+        # assert_eq/assert_ne calls routed through an Eq impl (see CheckResult).
+        self.assert_impls: dict[int, str] = {}
 
     # --- entry ----------------------------------------------------------------
 
@@ -540,6 +552,7 @@ class Checker:
             self.functions,
             set(self.ctors),
             self.method_targets,
+            assert_impls=self.assert_impls,
             extern_fns=self.extern_fns,
             extern_abi=self.extern_abi,
             generic_fns=self.generic_fns,
@@ -1261,6 +1274,16 @@ class Checker:
     def _infer_index(self, expr: ast.IndexExpr) -> Type:
         obj = self._check_expr(expr.obj)
         index = self._check_expr(expr.index)
+        if isinstance(obj, MapType):
+            # m["k"] is the natural dict-syntax mistake; the I64-index error
+            # would steer exactly the wrong way (the key type IS String).
+            self._err(
+                "TYPE017",
+                f"cannot index a value of type {obj}",
+                expr.span,
+                help="use Map.get(m, key) — it returns Option<V>",
+            )
+            return ERROR
         self._expect(I64, index, expr.index.span, "index")
         if isinstance(obj, ListType):
             return obj.elem
@@ -1270,6 +1293,8 @@ class Checker:
         return ERROR
 
     def _infer_list(self, expr: ast.ListExpr, expected: Type | None) -> Type:
+        if expected is ERROR and not expr.items:
+            return ERROR  # the annotation was already diagnosed; no cascade
         elem_expected = expected.elem if isinstance(expected, ListType) else None
         if not expr.items:
             if elem_expected is not None:
@@ -1463,6 +1488,15 @@ class Checker:
                 f"Flex does not have {expr.name!r} yet",
                 expr.span,
                 help=absent,
+            )
+            return ERROR
+        spelled = _SPELLED_DIFFERENTLY.get(expr.name)
+        if spelled is not None:
+            self._err(
+                "NAME001",
+                f"unknown name {expr.name!r} — Flex spells it differently",
+                expr.span,
+                help=spelled,
             )
             return ERROR
         needs = _NEEDS_IMPORT.get(expr.name)
@@ -1764,6 +1798,8 @@ class Checker:
             # context: an annotation or the parameter it's passed to.
             if isinstance(expected, MapType):
                 return expected
+            if expected is ERROR:
+                return ERROR  # the annotation was already diagnosed; no cascade
             self._err(
                 "TYPE023",
                 "cannot infer the value type of an empty map here",
@@ -1993,9 +2029,17 @@ class Checker:
         if isinstance(pattern, ast.CtorPattern):
             variant = variants.get(pattern.name)
             if variant is None:
-                self._err(
-                    "MATCH003", f"{pattern.name!r} is not a variant of {scrut_ty}", pattern.span
-                )
+                if scrut_ty is not ERROR:
+                    # An ERROR scrutinee was already diagnosed; binding the
+                    # pattern's names as ERROR keeps the arm body quiet too.
+                    self._err(
+                        "MATCH003",
+                        f"{pattern.name!r} is not a variant of {scrut_ty}",
+                        pattern.span,
+                    )
+                for arg in pattern.args:
+                    if isinstance(arg, ast.BindPattern):
+                        self.scope.define(arg.name, _Binding(ERROR, mutable=False))
                 return False
             # Naming a constructor in a pattern is a reference to its ADT: a
             # variant is as visible as its type, in patterns as in expressions.
@@ -2125,7 +2169,7 @@ class Checker:
                         # Not structurally comparable, but the type carries an
                         # Eq impl (derive(Eq) or hand-written): both backends
                         # dispatch the assertion through it.
-                        self.method_targets[id(call)] = self.impls[("Eq", key)]["eq"]
+                        self.assert_impls[id(call)] = self.impls[("Eq", key)]["eq"]
                     else:
                         help_text = None
                         if a is STRING:

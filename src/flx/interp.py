@@ -441,8 +441,12 @@ class Interpreter:
             # The length is snapshotted at loop entry (matching the native
             # lowering): elements pushed during the loop are not visited, and
             # an unconditional push can't turn the loop infinite. Element
-            # reads stay live, so List.set during the loop is visible.
+            # reads stay live, so List.set during the loop is visible — and a
+            # List.pop that SHRINKS the list mid-loop panics like the native
+            # bounds check, never a raw Python IndexError.
             for i in range(len(xs)):
+                if i >= len(xs):
+                    raise FlexRuntimeError(f"index {i} out of bounds (len {len(xs)})")
                 child = _Env(env)
                 child.define(stmt.name, xs[i])
                 self.exec_block(stmt.body, child)
@@ -902,7 +906,7 @@ class Interpreter:
         if name in ("assert_eq", "assert_ne"):
             a = self.eval(expr.args[0], env)
             b = self.eval(expr.args[1], env)
-            symbol = self.method_targets.get(id(expr))
+            symbol = self.checked.assert_impls.get(id(expr))
             if symbol is not None:
                 # The checker routed this assertion through an Eq impl (a type
                 # that isn't structurally comparable); both backends dispatch it.

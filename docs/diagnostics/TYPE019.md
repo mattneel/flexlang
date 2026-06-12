@@ -5,9 +5,12 @@
 Equality is not defined for this type.
 
 `==` and `assert_eq` work on scalars, records of comparables, and ADTs
-whose payloads fit a machine word. Strings compare via `import Std.Str`
-(the Eq trait); lists and String-carrying ADTs need a `match` or an
-explicit comparison — pointer identity would be a lie.
+whose variants carry at most one machine-word or String payload (String
+payloads compare by CONTENT, so `Some("a") == Some("a")` holds). Strings
+themselves compare via `import Std.Str` (the Eq trait). Lists and Maps
+have reference semantics and never compare with `==` — pointer identity
+would be a lie. For records and ADTs beyond those shapes, `derive(Eq)`
+generates the comparison and enables `assert_eq`.
 
 **Example: lists do not compare with ==** — expected to fail with `TYPE019` (proven by `flx docs check`):
 
