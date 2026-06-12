@@ -8,12 +8,13 @@ Equality is not defined for this type.
 whose variants carry at most one machine-word or String payload (String
 payloads compare by CONTENT, so `Some("a") == Some("a")` holds). Strings
 themselves compare via `import Std.Str` (the Eq trait). Lists and Maps
-have reference semantics and never compare with `==` — pointer identity
-would be a lie. For records and ADTs beyond those shapes, `derive(Eq)`
-generates the comparison and enables `assert_eq`.
+compare structurally when their element/value type is structurally
+comparable; they still have reference semantics for mutation. For records
+and ADTs beyond those shapes, `derive(Eq)` generates the comparison and
+enables `assert_eq`.
 
-**Example: lists do not compare with ==** — expected to fail with `TYPE019` (proven by `flx docs check`):
+**Example: lists of non-comparable elements do not compare with ==** — expected to fail with `TYPE019` (proven by `flx docs check`):
 
 ```flx
-fn main() -> I64 = { if [1] == [1] { 0 } else { 1 } }
+fn main() -> I64 = { if ["a"] == ["a"] { 0 } else { 1 } }
 ```

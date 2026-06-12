@@ -125,9 +125,16 @@ def test_list_reference_semantics(tmp_path: Path) -> None:
     )
 
 
-def test_eq_on_lists_rejected() -> None:
-    diags = _diag("fn main() -> I64 = { if [1] == [1] { 0 } else { 1 } }\n")
-    assert any(d.code == "TYPE019" for d in diags)
+def test_eq_on_lists_is_structural(tmp_path: Path) -> None:
+    _both(
+        tmp_path,
+        "fn main() -> I64 = {\n"
+        "  if [1, 2] == [1, 2] {\n"
+        "    if [1, 2] != [2, 1] { 0 } else { 1 }\n"
+        "  } else { 2 }\n"
+        "}\n",
+        0,
+    )
 
 
 # --- lists in structures -----------------------------------------------------------

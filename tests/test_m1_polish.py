@@ -208,9 +208,9 @@ def test_reserved_keyword_described() -> None:
 
 
 def test_missing_std_module_message(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
-    path = _write(tmp_path, "module Main\nimport Std.Fs\nfn main() -> I64 = { 0 }\n")
+    path = _write(tmp_path, "module Main\nimport Std.Net\nfn main() -> I64 = { 0 }\n")
     assert driver.cmd_check(path) == 1
-    assert "standard library has no module 'Std.Fs'" in capfd.readouterr().err
+    assert "standard library has no module 'Std.Net'" in capfd.readouterr().err
 
 
 def test_recursive_types_check(tmp_path: Path) -> None:

@@ -58,6 +58,11 @@ Bitwise operators bind tighter than comparisons (Rust-style), so
 `x & 1 == 1` means `(x & 1) == 1`. Shift counts are masked to `0..63` —
 `1 << 100` is `1 << 36`, never undefined behavior.
 
+For output, `import Std.Str` and use `to_hex(n)` for lowercase unsigned
+hexadecimal or `to_unsigned(n)` for unsigned 64-bit decimal. Both format the
+two's-complement bits of the `I64`, so `to_hex(-1)` is
+`"ffffffffffffffff"`.
+
 ## Function values
 
 A **pure** top-level function can be passed as a value. Function types are
@@ -65,6 +70,7 @@ written `(T1, T2) -> R`:
 
 ```flex
 import Std.List
+import Std.Str
 
 fn double(x: I64) -> I64 = { x * 2 }
 fn is_even(x: I64) -> Bool = { x % 2 == 0 }
@@ -73,6 +79,8 @@ fn add(a: I64, b: I64) -> I64 = { a + b }
 let doubled = map(range(1, 5), double)      // [2, 4, 6, 8]
 let evens = filter(range(1, 10), is_even)   // [2, 4, 6, 8]
 let total = fold(range(1, 11), 0, add)      // 55
+mut words = ["pear", "apple"]
+sort_with(words, fn(a: String, b: String) -> Bool => str_lt(a, b))
 ```
 
 `Std.List` provides `map`, `filter`, and `fold`; writing your own
@@ -91,7 +99,8 @@ The rules that keep the effect system sound:
 - Generic functions can't be passed (pass a monomorphic one).
 - Function values flow through parameters, arguments, and `let` bindings;
   storing them (records, lists, ADT payloads, `mut`) is not supported yet.
-- No closures yet — a function value is a name, not a capture.
+- Explicit typed lambdas are non-capturing and pure; they are lifted like
+  generated top-level functions. Capturing closures are not supported yet.
 
 ## Float ↔ text
 
@@ -104,4 +113,4 @@ columns.
 ## Not yet
 
 - `~` bitwise not — write `x ^ -1`.
-- Closures, lambdas, and functions returning functions.
+- Capturing closures and functions returning functions.

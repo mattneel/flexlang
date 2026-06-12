@@ -277,6 +277,16 @@ class AssignStmt(Stmt):
 
 
 @dataclass(frozen=True)
+class IndexAssignStmt(Stmt):
+    """`xs[i] = v` — sugar for `List.set(xs, i, v)`."""
+
+    obj: Expr
+    index: Expr
+    value: Expr
+    span: Span
+
+
+@dataclass(frozen=True)
 class WhileStmt(Stmt):
     cond: Expr
     body: Block

@@ -1,0 +1,56 @@
+module Std.Fs
+
+// Small text-file helpers. Strings cannot carry NUL bytes; read_text returns
+// Err for binary files that contain them. Use List<I64> as the byte-buffer
+// representation when byte 0 matters.
+
+pub fn read_text(path: String) -> Result<String, String> uses { Fs } = {
+  Fs.read_text(path)
+}
+
+pub fn write_text(path: String, contents: String) -> Result<Unit, String> uses { Fs } = {
+  Fs.write_text(path, contents)
+}
+
+// --- documentation ---------------------------------------------------------------
+
+doc module {
+  summary "Narrow text-file helpers for CLI tools."
+  text """
+  These are intentionally text APIs. Flex strings are NUL-terminated, so
+  `read_text` rejects files containing byte 0 instead of silently truncating
+  them. Use a `List<I64>` byte buffer for binary data.
+  """
+  since "0.0.1"
+  status implemented
+}
+
+doc read_text {
+  summary "Read a whole text file, or return Err(reason)."
+  text """
+  The returned string preserves non-UTF-8 bytes losslessly with the same byte
+  representation used by string literals and argv. Files containing NUL bytes
+  return `Err`, because String cannot carry byte 0.
+  """
+  snippet "read a config file" {
+    match read_text("config.txt") {
+      Ok(text) => { text }
+      Err(reason) => { reason }
+    }
+  }
+  since "0.0.1"
+  status implemented
+  see Std.Str
+}
+
+doc write_text {
+  summary "Write a whole string to a file, replacing existing contents."
+  snippet "write a todo file" {
+    match write_text("todo.txt", "buy milk\n") {
+      Ok(_) => {}
+      Err(reason) => { reason }
+    }
+  }
+  since "0.0.1"
+  status implemented
+}

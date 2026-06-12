@@ -175,16 +175,15 @@ def test_tuple_hint() -> None:
     assert any("no tuples yet" in d.message for d in exc.value.diagnostics)
 
 
-def test_lambda_hint() -> None:
-    with pytest.raises(FlexError) as exc:
-        parse("fn main() -> I64 = { let f = fn(x) => x\n 0 }")
-    assert any("no lambdas" in d.message for d in exc.value.diagnostics)
+def test_typed_lambda_parses_as_generated_function_value() -> None:
+    module = parse("fn main() -> I64 = { let f = fn(x: I64) -> I64 => x + 1\n f(41) }")
+    assert any(fn.name.startswith("__flx_lambda_") for fn in module.functions)
 
 
-def test_index_assign_hint() -> None:
-    with pytest.raises(FlexError) as exc:
-        parse("fn main() -> I64 = { let xs = [1]\n xs[0] = 5\n 0 }")
-    assert any("indexed assignment" in d.message for d in exc.value.diagnostics)
+def test_index_assign_parses() -> None:
+    module = parse("fn main() -> I64 = { let xs = [1]\n xs[0] = 5\n 0 }")
+    stmt = module.functions[0].body.stmts[1]
+    assert type(stmt).__name__ == "IndexAssignStmt"
 
 
 def test_unknown_escape_is_an_error() -> None:

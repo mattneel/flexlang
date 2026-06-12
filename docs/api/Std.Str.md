@@ -189,7 +189,7 @@ See also: `from_bytes`, `byte_at`
 fn from_bytes(bs: List<I64>) -> String
 ```
 
-A string from a whole List<I64> of bytes (panics on any byte outside 1..255).
+A string from a whole `List<I64>` of bytes (panics on any byte outside 1..255).
 
 `from_bytes([])` is `""`. Round-trips with `byte_at`: collecting a string's
 bytes and rebuilding yields an equal string.
@@ -210,6 +210,92 @@ assert_eq(from_bytes(bs), "flex")
 ```
 
 See also: `from_byte`
+
+## to_bytes
+
+```flx
+fn to_bytes(s: String) -> List<I64>
+```
+
+The bytes of a string as a `List<I64>`.
+
+This is the explicit byte-buffer story for now: strings cannot carry byte 0,
+but byte buffers can. Convert text to bytes with `to_bytes`; convert a
+non-NUL byte list back with `from_bytes`.
+
+**Example: extracts bytes** — ✓ checked by `flx docs check`:
+
+```flx
+let bs = to_bytes("A\xff")
+assert_eq(List.len(bs), 2)
+assert_eq(bs[0], 65)
+assert_eq(bs[1], 255)
+```
+
+*since 0.0.1 · status: implemented*
+
+See also: `from_bytes`
+
+## trim
+
+```flx
+fn trim(s: String) -> String
+```
+
+Remove leading and trailing ASCII whitespace.
+
+Trims space, tab, line feed, and carriage return. It is byte-oriented, like
+the rest of `Std.Str`.
+
+**Example: trims common CLI input** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(trim("  hello\n"), "hello")
+assert_eq(trim("\t\r"), "")
+assert_eq(trim("x"), "x")
+```
+
+*since 0.0.1 · status: implemented*
+
+## to_hex
+
+```flx
+fn to_hex(n: I64) -> String
+```
+
+Format an I64 as unsigned lowercase hexadecimal.
+
+**Example: formats two's-complement bits** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(to_hex(0), "0")
+assert_eq(to_hex(255), "ff")
+assert_eq(to_hex(-1), "ffffffffffffffff")
+```
+
+*since 0.0.1 · status: implemented*
+
+See also: `to_unsigned`
+
+## to_unsigned
+
+```flx
+fn to_unsigned(n: I64) -> String
+```
+
+Format an I64 as an unsigned 64-bit decimal integer.
+
+**Example: formats two's-complement bits as unsigned decimal** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(to_unsigned(0), "0")
+assert_eq(to_unsigned(255), "255")
+assert_eq(to_unsigned(-1), "18446744073709551615")
+```
+
+*since 0.0.1 · status: implemented*
+
+See also: `to_hex`
 
 ## split
 

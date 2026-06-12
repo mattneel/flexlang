@@ -49,5 +49,8 @@ def test_list_arity_enforced() -> None:
     assert "TYPE013" in _codes("fn f(x: List<I64, Bool>) -> I64 = { 0 }")
 
 
-def test_lists_not_comparable() -> None:
-    assert "TYPE019" in _codes("fn f() -> Bool = { [1] == [1] }")
+def test_lists_compare_structurally(tmp_path: Path) -> None:
+    src = "fn main() -> I64 = { if [1, 2] == [1, 2] { 0 } else { 1 } }\n"
+    flx = tmp_path / "eq.flx"
+    flx.write_text(src, encoding="utf-8")
+    assert driver.cmd_run(str(flx), interpret=True) == 0

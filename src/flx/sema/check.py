@@ -37,6 +37,7 @@ _TE = ast.TypeExpr
 _BUILTIN_ADTS: dict[str, tuple[list[str], list[tuple[str, list[ast.TypeExpr]]]]] = {
     "Result": (["T", "E"], [("Ok", [_TE("T")]), ("Err", [_TE("E")])]),
     "Option": (["T"], [("None", []), ("Some", [_TE("T")])]),
+    "MapEntry": (["V"], [("MapEntry", [_TE("String"), _TE("V")])]),
 }
 
 # Builtin traits: name -> [(method, [param TypeExprs incl self], return)].
@@ -189,6 +190,7 @@ _NEEDS_IMPORT: dict[str, str] = (
         (
             "length",
             "is_empty",
+            "trim",
             "split",
             "parse_int",
             "parse_float",
@@ -197,6 +199,9 @@ _NEEDS_IMPORT: dict[str, str] = (
             "char_at",
             "from_byte",
             "from_bytes",
+            "to_bytes",
+            "to_hex",
+            "to_unsigned",
             "to_str_fixed",
             "repeat",
             "pad_left",
@@ -205,6 +210,8 @@ _NEEDS_IMPORT: dict[str, str] = (
         "Std.Str",
     )
     | dict.fromkeys(("map", "filter", "fold", "range", "sort", "sort_by", "sort_with"), "Std.List")
+    | dict.fromkeys(("read_text", "write_text"), "Std.Fs")
+    | dict.fromkeys(("all", "count", "at", "has_flag", "value_after"), "Std.Arg")
     | dict.fromkeys(("sqrt", "abs", "min", "max", "floor", "ceil"), "Std.Math")
 )
 
@@ -232,6 +239,8 @@ class _InstantiateRet:
 
 
 _OPTION_OF_STRING = _InstantiateRet("Option", (STRING,))
+_RESULT_STRING_STRING = _InstantiateRet("Result", (STRING, STRING))
+_RESULT_UNIT_STRING = _InstantiateRet("Result", (UNIT, STRING))
 
 # (module, method) -> (effect, param types, return type).
 _INTRINSICS: dict[tuple[str, str], tuple[str, tuple[Type, ...], Type | _InstantiateRet]] = {
@@ -242,6 +251,8 @@ _INTRINSICS: dict[tuple[str, str], tuple[str, tuple[Type, ...], Type | _Instanti
     # One stdin line, trailing newline stripped: Some(line) — Some("") for a
     # blank line — and None at end of input, distinguishably.
     ("Fs", "read_line"): ("Fs", (), _OPTION_OF_STRING),
+    ("Fs", "read_text"): ("Fs", (STRING,), _RESULT_STRING_STRING),
+    ("Fs", "write_text"): ("Fs", (STRING, STRING), _RESULT_UNIT_STRING),
     ("Time", "monotonic_ms"): ("Time", (), I64),
     # Strings are byte strings: byte_at/substr index BYTES (UTF-8 sequences can
     # split; surrogateescape keeps the bytes lossless). Pure ("" = no effect).
@@ -249,6 +260,8 @@ _INTRINSICS: dict[tuple[str, str], tuple[str, tuple[Type, ...], Type | _Instanti
     ("Str", "substr"): ("", (STRING, I64, I64), STRING),  # clamps to the string
     ("Str", "from_byte"): ("", (I64,), STRING),  # panics outside 1..255
     ("Str", "from_bytes"): ("", (ListType(I64),), STRING),  # panics per element
+    ("Str", "to_hex"): ("", (I64,), STRING),  # unsigned lowercase hexadecimal
+    ("Str", "to_unsigned"): ("", (I64,), STRING),  # unsigned decimal
     # C strtod of the longest valid prefix (0.0 if none) — the SAME libc call
     # on both backends, so the bits match by construction. Std.Str.parse_float
     # validates the strict whole-string grammar before calling this.
@@ -1164,6 +1177,9 @@ class Checker:
         if isinstance(stmt, ast.AssignStmt):
             self._check_assign(stmt)
             return UNIT
+        if isinstance(stmt, ast.IndexAssignStmt):
+            self._check_index_assign(stmt)
+            return UNIT
         if isinstance(stmt, ast.WhileStmt):
             self._expect(BOOL, self._check_expr(stmt.cond), stmt.cond.span, "while condition")
             self._check_block(stmt.body, None, False)
@@ -1214,6 +1230,23 @@ class Checker:
             )
             return
         self._expect(binding.type, value_ty, stmt.value.span, "assigned value")
+
+    def _check_index_assign(self, stmt: ast.IndexAssignStmt) -> None:
+        obj = self._check_expr(stmt.obj)
+        index = self._check_expr(stmt.index)
+        self._expect(I64, index, stmt.index.span, "index")
+        if not isinstance(obj, ListType):
+            if obj is not ERROR:
+                self._err(
+                    "TYPE017",
+                    f"indexed assignment requires a List, found {obj}",
+                    stmt.obj.span,
+                    help="use Map.set(m, key, value) for maps",
+                )
+            self._check_expr(stmt.value)
+            return
+        value = self._check_expr(stmt.value, obj.elem)
+        self._expect(obj.elem, value, stmt.value.span, "assigned element")
 
     # --- expressions ----------------------------------------------------------
 
@@ -1685,6 +1718,8 @@ class Checker:
                 return self._infer_ctor(callee.name, expr.args, expected, expr.span)
         if isinstance(callee, ast.MemberExpr):
             recv_ty = self._check_expr(callee.obj)
+            if isinstance(recv_ty, (ListType, MapType)) and callee.name in ("eq", "show"):
+                return self._infer_container_method(callee, recv_ty, expr)
             if self._is_method_call(recv_ty, callee.name):
                 return self._infer_method_call(callee, recv_ty, expr)
         callee_ty = self._check_expr(callee)
@@ -1694,6 +1729,28 @@ class Checker:
         if callee_ty is not ERROR:
             self._err("TYPE004", "expression is not callable", callee.span)
         return ERROR
+
+    def _infer_container_method(
+        self, callee: ast.MemberExpr, recv_ty: ListType | MapType, call: ast.CallExpr
+    ) -> Type:
+        if callee.name == "eq":
+            if len(call.args) != 1:
+                for arg in call.args:
+                    self._check_expr(arg)
+                self._err("TYPE005", "container eq expects 1 argument", call.span)
+                return BOOL
+            other = self._check_expr(call.args[0], recv_ty)
+            self._expect(recv_ty, other, call.args[0].span, "argument")
+            if not _is_comparable(recv_ty):
+                self._err("TYPE019", f"eq is not supported for {recv_ty}", call.span)
+            return BOOL
+        if len(call.args) != 0:
+            for arg in call.args:
+                self._check_expr(arg)
+            self._err("TYPE005", "container show expects 0 arguments", call.span)
+        if not _is_showable(recv_ty):
+            self._err("TYPE019", f"show is not supported for {recv_ty}", call.span)
+        return STRING
 
     def _infer_intrinsic(self, module: str, method: str, call: ast.CallExpr) -> Type:
         sig = _INTRINSICS.get((module, method))
@@ -2412,8 +2469,12 @@ def _is_comparable(ty: Type) -> bool:
     """Whether `==`/`!=`/assert_eq can be lowered for this type (no strings yet).
     ADTs qualify only when every payload is slot-inline: a boxed payload would
     compare as a pointer natively, which is not structural equality."""
-    if ty is STRING or isinstance(ty, (ListType, MapType, FnType)):
+    if ty is STRING or isinstance(ty, FnType):
         return False
+    if isinstance(ty, ListType):
+        return _is_comparable(ty.elem)
+    if isinstance(ty, MapType):
+        return _is_comparable(ty.value)
     if isinstance(ty, RecordType):
         return all(_is_comparable(t) for _, t in ty.fields)
     if isinstance(ty, AdtType):
@@ -2426,6 +2487,16 @@ def _is_comparable(ty: Type) -> bool:
             for v in ty.variants
         )
     return True
+
+
+def _is_showable(ty: Type) -> bool:
+    if ty in (I64, F64, BOOL, UNIT, STRING):
+        return True
+    if isinstance(ty, ListType):
+        return _is_showable(ty.elem)
+    if isinstance(ty, MapType):
+        return _is_showable(ty.value)
+    return False
 
 
 def _diverges(block: ast.Block) -> bool:

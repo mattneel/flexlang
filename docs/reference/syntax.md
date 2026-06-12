@@ -100,8 +100,8 @@ assert_eq(p.x, 5)
 
 - `break` / `continue` — use a flag in the `while` condition or early `return`.
 - Tuples — use a record or a multi-field ADT variant.
-- Lambdas/closures — define a top-level `fn`; pure functions are values.
-- `xs[i] = v` — use `List.set(xs, i, v)`.
+- Capturing closures — use an explicit typed lambda for non-capturing helpers,
+  or define a top-level `fn`.
 - String literal patterns — bind, then compare with `.eq()`.
 
 Each of these errors with a message that says so.

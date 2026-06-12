@@ -108,6 +108,8 @@ def _dump_stmt(stmt: ast.Stmt, depth: int, out: list[str]) -> None:
         out.append(f"{pad}Mut {stmt.name} = {_expr(stmt.value)}")
     elif isinstance(stmt, ast.AssignStmt):
         out.append(f"{pad}Assign {stmt.name} = {_expr(stmt.value)}")
+    elif isinstance(stmt, ast.IndexAssignStmt):
+        out.append(f"{pad}IndexAssign {_expr(stmt.obj)}[{_expr(stmt.index)}] = {_expr(stmt.value)}")
     elif isinstance(stmt, ast.WhileStmt):
         out.append(f"{pad}While {_expr(stmt.cond)}")
         _dump_block(stmt.body, depth + 1, out)

@@ -2,7 +2,19 @@ module Std.Map
 
 // Maps are built into the language — this module exists to DOCUMENT them
 // (its examples are executed by `flx docs check` on both backends). No
-// import is needed to use Map.
+// import is needed to use Map's built-in operations; import Std.Map for the
+// derived helpers below.
+
+pub fn entries<V>(m: Map<String, V>) -> List<MapEntry<V>> = {
+  mut out: List<MapEntry<V>> = []
+  for key in Map.keys(m) {
+    match Map.get(m, key) {
+      Some(value) => { List.push(out, MapEntry(key, value)) }
+      None => ()
+    }
+  }
+  out
+}
 
 doc module {
   summary "The built-in insertion-ordered map, `Map<String, V>`."
@@ -11,6 +23,7 @@ doc module {
   for now — render other key types with `to_str`. No import is needed:
   `Map.new`, `Map.set`, `Map.get`, `Map.has`, `Map.len`, `Map.remove`,
   `Map.keys`, and `Map.values` are built in, like the `List` operations.
+  Import `Std.Map` for the `entries(m)` helper.
 
   Maps have REFERENCE semantics (`let n = m` aliases, like lists) and
   mutation needs no effect, like `mut`. Iteration order is INSERTION order,
@@ -60,4 +73,27 @@ doc module {
   since "0.0.1"
   status implemented
   see Std.List
+}
+
+doc entries {
+  summary "A `List<MapEntry<V>>` in insertion order."
+  text """
+  `MapEntry<V>` is a built-in ADT with constructor `MapEntry(key, value)`.
+  Entries follow the same insertion-order contract as `Map.keys` and
+  `Map.values`.
+  """
+  test "entries keep keys and values together" {
+    let m: Map<String, I64> = Map.new()
+    Map.set(m, "a", 1)
+    Map.set(m, "b", 2)
+    let es = entries(m)
+    match es[0] {
+      MapEntry(k, v) => {
+        assert_eq(k, "a")
+        assert_eq(v, 1)
+      }
+    }
+  }
+  since "0.0.1"
+  status implemented
 }

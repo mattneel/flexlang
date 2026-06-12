@@ -41,6 +41,56 @@ pub fn from_byte(b: I64) -> String = { Str.from_byte(b) }
 
 pub fn from_bytes(bs: List<I64>) -> String = { Str.from_bytes(bs) }
 
+pub fn to_bytes(s: String) -> List<I64> = {
+  mut out: List<I64> = []
+  mut i = 0
+  while i < length(s) {
+    List.push(out, byte_at(s, i))
+    i = i + 1
+  }
+  out
+}
+
+fn is_space_byte(b: I64) -> Bool = {
+  b == 32 || b == 9 || b == 10 || b == 13
+}
+
+// Trim ASCII whitespace: space, tab, LF, CR.
+pub fn trim(s: String) -> String = {
+  let n = length(s)
+  mut start = 0
+  mut scanning_start = true
+  while scanning_start {
+    if start < n {
+      if is_space_byte(byte_at(s, start)) {
+        start = start + 1
+      } else {
+        scanning_start = false
+      }
+    } else {
+      scanning_start = false
+    }
+  }
+  mut end = n
+  mut going = true
+  while going {
+    if end > 0 {
+      if is_space_byte(byte_at(s, end - 1)) {
+        end = end - 1
+      } else {
+        going = false
+      }
+    } else {
+      going = false
+    }
+  }
+  if end < start { "" } else { substr(s, start, end - start) }
+}
+
+pub fn to_hex(n: I64) -> String = { Str.to_hex(n) }
+
+pub fn to_unsigned(n: I64) -> String = { Str.to_unsigned(n) }
+
 // Split on a separator. Adjacent separators yield empty pieces; an empty
 // separator yields the whole string as one piece.
 pub fn split(s: String, sep: String) -> List<String> = {
@@ -327,7 +377,7 @@ doc from_byte {
 }
 
 doc from_bytes {
-  summary "A string from a whole List<I64> of bytes (panics on any byte outside 1..255)."
+  summary "A string from a whole `List<I64>` of bytes (panics on any byte outside 1..255)."
   text """
   `from_bytes([])` is `""`. Round-trips with `byte_at`: collecting a string's
   bytes and rebuilding yields an equal string.
@@ -345,6 +395,63 @@ doc from_bytes {
     assert_eq(from_bytes(bs), "flex")
   }
   see from_byte
+}
+
+doc to_bytes {
+  summary "The bytes of a string as a `List<I64>`."
+  text """
+  This is the explicit byte-buffer story for now: strings cannot carry byte 0,
+  but byte buffers can. Convert text to bytes with `to_bytes`; convert a
+  non-NUL byte list back with `from_bytes`.
+  """
+  test "extracts bytes" {
+    let bs = to_bytes("A\xff")
+    assert_eq(List.len(bs), 2)
+    assert_eq(bs[0], 65)
+    assert_eq(bs[1], 255)
+  }
+  since "0.0.1"
+  status implemented
+  see from_bytes
+}
+
+doc trim {
+  summary "Remove leading and trailing ASCII whitespace."
+  text """
+  Trims space, tab, line feed, and carriage return. It is byte-oriented, like
+  the rest of `Std.Str`.
+  """
+  test "trims common CLI input" {
+    assert_eq(trim("  hello\n"), "hello")
+    assert_eq(trim("\t\r"), "")
+    assert_eq(trim("x"), "x")
+  }
+  since "0.0.1"
+  status implemented
+}
+
+doc to_hex {
+  summary "Format an I64 as unsigned lowercase hexadecimal."
+  test "formats two's-complement bits" {
+    assert_eq(to_hex(0), "0")
+    assert_eq(to_hex(255), "ff")
+    assert_eq(to_hex(-1), "ffffffffffffffff")
+  }
+  since "0.0.1"
+  status implemented
+  see to_unsigned
+}
+
+doc to_unsigned {
+  summary "Format an I64 as an unsigned 64-bit decimal integer."
+  test "formats two's-complement bits as unsigned decimal" {
+    assert_eq(to_unsigned(0), "0")
+    assert_eq(to_unsigned(255), "255")
+    assert_eq(to_unsigned(-1), "18446744073709551615")
+  }
+  since "0.0.1"
+  status implemented
+  see to_hex
 }
 
 doc split {

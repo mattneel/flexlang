@@ -179,14 +179,19 @@ def test_map_passes_through_generic_fn(tmp_path: Path) -> None:
     assert _run(path)[0] == 7
 
 
-def test_map_equality_is_rejected() -> None:
-    diags = _diag(
+def test_map_equality_is_structural(tmp_path: Path) -> None:
+    src = (
         "fn main() -> I64 = {\n"
         "  let a: Map<String, I64> = Map.new()\n"
         "  let b: Map<String, I64> = Map.new()\n"
-        "  if a == b { 1 } else { 0 }\n}\n"
+        '  Map.set(a, "x", 1)\n'
+        '  Map.set(a, "y", 2)\n'
+        '  Map.set(b, "y", 2)\n'
+        '  Map.set(b, "x", 1)\n'
+        "  if a == b { 0 } else { 1 }\n}\n"
     )
-    assert any(d.code == "TYPE019" for d in diags)
+    path = _write(tmp_path, src)
+    assert _run(path)[0] == 0
 
 
 def test_type_named_map_is_rejected() -> None:

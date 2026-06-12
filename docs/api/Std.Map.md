@@ -10,6 +10,7 @@ The built-in insertion-ordered map, `Map<String, V>`.
 for now — render other key types with `to_str`. No import is needed:
 `Map.new`, `Map.set`, `Map.get`, `Map.has`, `Map.len`, `Map.remove`,
 `Map.keys`, and `Map.values` are built in, like the `List` operations.
+Import `Std.Map` for the `entries(m)` helper.
 
 Maps have REFERENCE semantics (`let n = m` aliases, like lists) and
 mutation needs no effect, like `mut`. Iteration order is INSERTION order,
@@ -68,3 +69,32 @@ assert_eq(Map.len(m), 0)
 *since 0.0.1 · status: implemented*
 
 See also: `Std.List`
+
+## entries
+
+```flx
+fn entries<V>(m: Map<String, V>) -> List<MapEntry<V>>
+```
+
+A `List<MapEntry<V>>` in insertion order.
+
+`MapEntry<V>` is a built-in ADT with constructor `MapEntry(key, value)`.
+Entries follow the same insertion-order contract as `Map.keys` and
+`Map.values`.
+
+**Example: entries keep keys and values together** — ✓ checked by `flx docs check`:
+
+```flx
+let m: Map<String, I64> = Map.new()
+Map.set(m, "a", 1)
+Map.set(m, "b", 2)
+let es = entries(m)
+match es[0] {
+  MapEntry(k, v) => {
+    assert_eq(k, "a")
+    assert_eq(v, 1)
+  }
+}
+```
+
+*since 0.0.1 · status: implemented*

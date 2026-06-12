@@ -15,6 +15,7 @@ BASE_RUNTIME_C = """#include <stdio.h>
 #include <signal.h>
 #include <unistd.h>
 #include <setjmp.h>
+#include <errno.h>
 
 typedef struct { const char *ptr; long long len; } FlxStr;
 void *__flx_box(long long size); /* checked allocator, defined below */
@@ -86,6 +87,11 @@ void __flx_log(const char *p, long long n) {
     // (the interpreter flushes before every extern call; this matches it).
     fflush(stdout);
 }
+void __flx_error(const char *p, long long n) {
+    fwrite(p, 1, (size_t)n, stderr);
+    fputc('\\n', stderr);
+    fflush(stderr);
+}
 void __flx_int_to_str(long long n, FlxStr *out) {
     char *buf = (char *)__flx_box(24);
     out->len = (long long)sprintf(buf, "%lld", n);
@@ -116,6 +122,76 @@ long long __flx_read_line_opt(FlxStr *out) {
     // truncated at the first NUL on BOTH backends.
     out->ptr = line;
     out->len = (long long)strlen(line);
+    return 1;
+}
+static void __flx_copy_cstr(const char *msg, FlxStr *out) {
+    long long n = (long long)strlen(msg);
+    char *buf = (char *)__flx_box(n + 1);
+    memcpy(buf, msg, (size_t)n + 1);
+    out->ptr = buf;
+    out->len = n;
+}
+static char *__flx_path_copy(const char *p, long long n) {
+    char *path = (char *)__flx_box(n + 1);
+    memcpy(path, p, (size_t)n);
+    path[n] = 0;
+    return path;
+}
+long long __flx_read_text(const char *p, long long n, FlxStr *out) {
+    char *path = __flx_path_copy(p, n);
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        __flx_copy_cstr(strerror(errno), out);
+        return 0;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        __flx_copy_cstr(strerror(errno), out);
+        fclose(f);
+        return 0;
+    }
+    long size = ftell(f);
+    if (size < 0) {
+        __flx_copy_cstr(strerror(errno), out);
+        fclose(f);
+        return 0;
+    }
+    rewind(f);
+    char *buf = (char *)__flx_box((long long)size + 1);
+    size_t got = fread(buf, 1, (size_t)size, f);
+    if (got != (size_t)size || ferror(f)) {
+        __flx_copy_cstr(strerror(errno), out);
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    if (memchr(buf, 0, got) != NULL) {
+        __flx_copy_cstr("file contains NUL byte; use a List<I64> byte buffer", out);
+        return 0;
+    }
+    buf[got] = 0;
+    out->ptr = buf;
+    out->len = (long long)got;
+    return 1;
+}
+long long __flx_write_text(const char *p, long long n, const char *q, long long m, FlxStr *err) {
+    char *path = __flx_path_copy(p, n);
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        __flx_copy_cstr(strerror(errno), err);
+        return 0;
+    }
+    size_t wrote = fwrite(q, 1, (size_t)m, f);
+    if (wrote != (size_t)m || ferror(f)) {
+        __flx_copy_cstr(strerror(errno), err);
+        fclose(f);
+        return 0;
+    }
+    if (fclose(f) != 0) {
+        __flx_copy_cstr(strerror(errno), err);
+        return 0;
+    }
+    err->ptr = "";
+    err->len = 0;
     return 1;
 }
 // Monotonic wall clock in milliseconds (Time.monotonic_ms).
@@ -414,6 +490,16 @@ void __flx_f64_fixed(double x, long long d, FlxStr *out) {
     out->ptr = buf;
     out->len = need;
 }
+void __flx_i64_to_hex(long long n, FlxStr *out) {
+    char *buf = (char *)__flx_box(17);
+    out->len = (long long)sprintf(buf, "%llx", (unsigned long long)n);
+    out->ptr = buf;
+}
+void __flx_i64_to_unsigned(long long n, FlxStr *out) {
+    char *buf = (char *)__flx_box(32);
+    out->len = (long long)sprintf(buf, "%llu", (unsigned long long)n);
+    out->ptr = buf;
+}
 // Program arguments, captured by the run shim's main(). Env.argv() yields the
 // USER arguments only (argv[0] is the executable path, which differs across
 // backends, so it is deliberately excluded).
@@ -441,8 +527,11 @@ BASE_RUNTIME_DECLS = (
     "func.func private @__flx_idiv(i64, i64) -> i64\n"
     "func.func private @__flx_imod(i64, i64) -> i64\n"
     "func.func private @__flx_log(!llvm.ptr, i64)\n"
+    "func.func private @__flx_error(!llvm.ptr, i64)\n"
     "func.func private @__flx_print(!llvm.ptr, i64)\n"
     "func.func private @__flx_read_line_opt(!llvm.ptr) -> i64\n"
+    "func.func private @__flx_read_text(!llvm.ptr, i64, !llvm.ptr) -> i64\n"
+    "func.func private @__flx_write_text(!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr) -> i64\n"
     "func.func private @__flx_monotonic_ms() -> i64\n"
     "func.func private @__flx_int_to_str(i64, !llvm.ptr)\n"
     "func.func private @__flx_str_concat(!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr)\n"
@@ -469,6 +558,8 @@ BASE_RUNTIME_DECLS = (
     "func.func private @__flx_from_bytes(!llvm.ptr, !llvm.ptr)\n"
     "func.func private @__flx_parse_f64(!llvm.ptr) -> f64\n"
     "func.func private @__flx_f64_fixed(f64, i64, !llvm.ptr)\n"
+    "func.func private @__flx_i64_to_hex(i64, !llvm.ptr)\n"
+    "func.func private @__flx_i64_to_unsigned(i64, !llvm.ptr)\n"
     "func.func private @__flx_argv() -> !llvm.ptr\n"
     "func.func private @__flx_f64_to_str(f64, !llvm.ptr)\n"
     "func.func private @__flx_f64_to_i64(f64) -> i64\n"

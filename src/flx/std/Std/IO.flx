@@ -8,6 +8,8 @@ pub fn print(s: String) -> Unit uses { Log } = { Log.print(s) }
 
 pub fn println(s: String) -> Unit uses { Log } = { Log.info(s) }
 
+pub fn eprintln(s: String) -> Unit uses { Log } = { Log.error(s) }
+
 pub fn read_line() -> Option<String> uses { Fs } = { Fs.read_line() }
 
 // --- documentation ---------------------------------------------------------------
@@ -37,6 +39,17 @@ doc println {
   test "prints a line" uses { Log } {
     println("hello from a doc example")
   }
+}
+
+doc eprintln {
+  summary "Write a string to stderr followed by a newline."
+  text """
+  Use this for diagnostics, progress messages, and errors in CLI tools. It is
+  flushed immediately and does not mix with stdout.
+  """
+  since "0.0.1"
+  status implemented
+  see println
 }
 
 doc read_line {

@@ -1,0 +1,102 @@
+module Std.Arg
+
+import Std.Str
+
+// Tiny argv helpers. Env.argv() remains the primitive; this module packages the
+// common CLI lookups study participants kept rewriting by hand.
+
+pub fn all() -> List<String> uses { Process } = {
+  Env.argv()
+}
+
+pub fn count() -> I64 uses { Process } = {
+  List.len(Env.argv())
+}
+
+pub fn at(i: I64) -> Option<String> uses { Process } = {
+  let args = Env.argv()
+  if i < 0 {
+    None
+  } else {
+    if i < List.len(args) { Some(args[i]) } else { None }
+  }
+}
+
+pub fn has_flag(name: String) -> Bool uses { Process } = {
+  mut found = false
+  for arg in Env.argv() {
+    if arg.eq(name) { found = true }
+  }
+  found
+}
+
+pub fn value_after(name: String) -> Option<String> uses { Process } = {
+  let args = Env.argv()
+  mut i = 0
+  while i < List.len(args) {
+    if args[i].eq(name) {
+      let j = i + 1
+      if j < List.len(args) { return Some(args[j]) }
+      return None
+    }
+    i = i + 1
+  }
+  None
+}
+
+// --- documentation ---------------------------------------------------------------
+
+doc module {
+  summary "Small helpers over program arguments."
+  text """
+  Program arguments are the user arguments only, with argv[0] deliberately
+  excluded. Everything here observes process state and therefore uses
+  `{ Process }`.
+  """
+  since "0.0.1"
+  status implemented
+  see Std.Env
+}
+
+doc all {
+  summary "All user arguments as a `List<String>`."
+  since "0.0.1"
+  status implemented
+}
+
+doc count {
+  summary "The number of user arguments."
+  since "0.0.1"
+  status implemented
+}
+
+doc at {
+  summary "The argument at index i, or None when out of range."
+  since "0.0.1"
+  status implemented
+}
+
+doc has_flag {
+  summary "True when an argument exactly equals the flag name."
+  snippet "check a flag" {
+    if has_flag("--verbose") {
+      // enable extra output
+    }
+  }
+  since "0.0.1"
+  status implemented
+  see value_after
+}
+
+doc value_after {
+  summary "The argument immediately after a flag, or None."
+  snippet "read an option value" {
+    match value_after("--name") {
+      Some(name) => { name }
+      None => { "anonymous" }
+    }
+  }
+  since "0.0.1"
+  status implemented
+  see has_flag
+}

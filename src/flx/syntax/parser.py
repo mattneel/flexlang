@@ -77,6 +77,7 @@ _EXPR_START = {
     TokenKind.KW_TRUE,
     TokenKind.KW_FALSE,
     TokenKind.KW_IF,
+    TokenKind.KW_FN,
     TokenKind.LPAREN,
     TokenKind.MINUS,
     TokenKind.BANG,
@@ -90,6 +91,8 @@ class Parser:
         self.source = source  # for verbatim doc example/snippet slices
         self.pos = 0
         self._depth = 0
+        self._lambda_count = 0
+        self._lambda_items: list[ast.FnDecl] = []
 
     # --- token helpers --------------------------------------------------------
 
@@ -198,7 +201,7 @@ class Parser:
                 item = replace(item, pub=True)  # type: ignore[type-var]
             items.append(item)
         end = self._peek().span
-        return ast.Module(name, imports, items, start.to(end), import_spans)
+        return ast.Module(name, imports, [*items, *self._lambda_items], start.to(end), import_spans)
 
     def _dotted_name(self) -> str:
         parts = [self._expect(TokenKind.IDENT, "a name").text]
@@ -636,28 +639,6 @@ class Parser:
 
     def _stmt(self) -> ast.Stmt:
         tok = self._peek()
-        if tok.kind is TokenKind.IDENT and self._peek_at(1).kind is TokenKind.LBRACKET:
-            # Catch `xs[i] = v` before it parses as an expression statement and
-            # trips over the `=` with a generic parse error.
-            depth = 0
-            offset = 1
-            while True:
-                kind = self._peek_at(offset).kind
-                if kind is TokenKind.LBRACKET:
-                    depth += 1
-                elif kind is TokenKind.RBRACKET:
-                    depth -= 1
-                    if depth == 0:
-                        break
-                elif kind is TokenKind.EOF:
-                    break
-                offset += 1
-            after = self._peek_at(offset + 1)
-            if after.kind is TokenKind.EQ:
-                raise self._error(
-                    "indexed assignment (`xs[i] = v`) is not supported yet",
-                    after.span,
-                )
         if tok.kind is TokenKind.KW_LET:
             return self._let(mutable=False)
         if tok.kind is TokenKind.KW_MUT:
@@ -675,6 +656,10 @@ class Parser:
             self._advance()
             value = self._expr()
             return ast.AssignStmt(expr.name, value, expr.span.to(value.span))
+        if isinstance(expr, ast.IndexExpr) and self._at(TokenKind.EQ):
+            self._advance()
+            value = self._expr()
+            return ast.IndexAssignStmt(expr.obj, expr.index, value, expr.span.to(value.span))
         return ast.ExprStmt(expr, expr.span)
 
     def _let(self, *, mutable: bool) -> ast.Stmt:
@@ -864,17 +849,41 @@ class Parser:
         if tok.kind is TokenKind.LBRACKET:
             return self._list_expr()
         if tok.kind is TokenKind.KW_FN:
-            raise self._error(
-                "Flex has no lambdas or closures yet; define a top-level "
-                "`fn` and pass its name (pure functions are values)",
-                tok.span,
-            )
+            return self._lambda_expr()
         if tok.kind is TokenKind.KW_TEST and self._peek_at(1).kind is TokenKind.LPAREN:
             # `test(...)` is a call to a target named `test` (a declaration would
             # have a string after the keyword), so the keyword acts as a name.
             self._advance()
             return ast.NameExpr("test", tok.span)
         raise self._error(f"expected an expression, found {self._describe(tok)}", tok.span)
+
+    def _lambda_expr(self) -> ast.Expr:
+        start = self._advance().span  # `fn`
+        name = f"__flx_lambda_{self._lambda_count}"
+        self._lambda_count += 1
+        self._expect(TokenKind.LPAREN, "'('")
+        params: list[ast.Param] = []
+        if not self._at(TokenKind.RPAREN):
+            params.append(self._param())
+            while self._eat(TokenKind.COMMA):
+                params.append(self._param())
+        self._expect(TokenKind.RPAREN, "')'")
+        self._expect(TokenKind.ARROW, "'->' (lambda return type is required)")
+        ret = self._type()
+        self._expect(TokenKind.FAT_ARROW, "'=>'")
+        body_expr = self._expr()
+        span = start.to(body_expr.span)
+        self._lambda_items.append(
+            ast.FnDecl(
+                name,
+                params,
+                ret,
+                [],
+                ast.Block([ast.ExprStmt(body_expr, body_expr.span)], span),
+                span,
+            )
+        )
+        return ast.NameExpr(name, span)
 
     def _list_expr(self) -> ast.Expr:
         start = self._expect(TokenKind.LBRACKET, "'['").span

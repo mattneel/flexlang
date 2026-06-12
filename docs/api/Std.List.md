@@ -7,9 +7,10 @@
 Helpers over the built-in growable `List<T>`.
 
 Lists themselves are built into the language: `[1, 2, 3]` literals, `xs[i]`
-indexing (panics out of bounds), `List.push(xs, v)`, `List.len(xs)`,
-`List.set(xs, i, v)`, `List.pop(xs)` (`Some(last)`, or `None` when empty),
-and `for x in xs { ... }` need no import. Lists have REFERENCE semantics:
+indexing (panics out of bounds), `xs[i] = v`, `List.push(xs, v)`,
+`List.len(xs)`, `List.set(xs, i, v)`, `List.pop(xs)` (`Some(last)`, or
+`None` when empty), and `for x in xs { ... }` need no import. Lists have
+REFERENCE semantics:
 `let ys = xs` aliases, it does not copy. This module adds the derived
 helpers.
 
@@ -151,7 +152,7 @@ See also: `sort_with`, `Std.Str`
 fn sort(xs: List<I64>) -> Unit
 ```
 
-Sort a List<I64> in place, ascending.
+Sort a `List<I64>` in place, ascending.
 
 **Example: sorts numbers** — ✓ checked by `flx docs check`:
 

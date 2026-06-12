@@ -106,12 +106,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "check", help="Prove the docs: run every example, verify every expected error"
     )
     docs_check.add_argument(
+        "path",
+        nargs="?",
+        help="optional .flx file or directory to check instead of bundled compiler docs",
+    )
+    docs_check.add_argument(
         "--both",
         action="store_true",
         help="run doc examples on the native backend as well as the interpreter",
     )
     docs_build = docs_sub.add_parser(
         "build", help="Render doc declarations into the book (then mdbook build)"
+    )
+    docs_build.add_argument(
+        "path",
+        nargs="?",
+        help="optional .flx file or directory to render instead of bundled compiler docs",
+    )
+    docs_build.add_argument(
+        "--output",
+        help="output docs directory for local docs build (default: docs)",
     )
     docs_build.add_argument(
         "--check",
@@ -194,9 +208,13 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
         from flx import docsengine
 
         if args.docs_command == "check":
-            return docsengine.cmd_docs_check(native=args.both)
+            return docsengine.cmd_docs_check(native=args.both, path=args.path)
         if args.docs_command == "build":
-            return docsengine.cmd_docs_build(check_only=args.check)
+            return docsengine.cmd_docs_build(
+                check_only=args.check,
+                source_path=args.path,
+                docs_dir=Path(args.output) if args.output else None,
+            )
         if args.docs_command == "explain":
             return docsengine.cmd_docs_explain(args.code)
         print("usage: flx docs <check|build|explain>", file=sys.stderr)

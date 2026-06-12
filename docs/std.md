@@ -32,10 +32,12 @@ an effect-free function is EFFECT001, exactly like any other call.
 | Module | What | Effects |
 |---|---|---|
 | `Std.Math` | `abs`, `min`, `max`, `clamp`, `sign`, `pow` (64-bit wrapping integer math) | pure |
-| `Std.Str` | `length` (bytes), `is_empty`, `eq`, `ne`, `cmp`, `str_lt`, `byte_at`, `substr`, `char_at`, `split`, `parse_int`, `parse_float`, `to_str_fixed`, `from_byte`, `from_bytes`, `repeat`, `pad_left`, `pad_right`, plus `impl Eq for String` and `impl Show for String` | pure |
-| `Std.IO` | `print` (no newline), `println`, `read_line` (one stdin line as `Option<String>`; `None` at EOF) | `Log` / `Fs` |
+| `Std.Str` | `length` (bytes), `is_empty`, `eq`, `ne`, `cmp`, `str_lt`, `byte_at`, `substr`, `char_at`, `split`, `parse_int`, `parse_float`, `to_str_fixed`, `from_byte`, `from_bytes`, `to_bytes`, `trim`, `to_hex`, `to_unsigned`, `repeat`, `pad_left`, `pad_right`, plus `impl Eq for String` and `impl Show for String` | pure |
+| `Std.IO` | `print` (no newline), `println`, `eprintln`, `read_line` (one stdin line as `Option<String>`; `None` at EOF) | `Log` / `Fs` |
+| `Std.Fs` | `read_text(path)`, `write_text(path, contents)` for narrow text-file CLIs | `Fs` |
+| `Std.Arg` | `all`, `count`, `at`, `has_flag`, `value_after` over `Env.argv()` | `Process` |
 | `Std.List` | `range(a, b)`, `map`, `filter`, `fold`, `sort`, `sort_by`, `sort_with` — the built-in list ops (`List.push`/`len`/`set`/`pop`, `xs[i]`, `for-in`) need no import | pure |
-| `Std.Map` | docs for the built-in `Map<String, V>` (`Map.new`/`set`/`get`/`has`/`len`/`remove`/`keys`/`values` need no import; insertion-ordered, `get` returns `Option<V>`) | pure |
+| `Std.Map` | `entries(m)` plus docs for the built-in `Map<String, V>` (`Map.new`/`set`/`get`/`has`/`len`/`remove`/`keys`/`values` need no import; insertion-ordered, `get` returns `Option<V>`) | pure |
 | `Std.Env` | `get_or(name, default)`, `has(name)` | `Process` |
 | `Std.Time` | `unix_time()`, `monotonic_ms()` (for measuring durations) | `Time` |
 | `Std.Proc` | `pid()` | `Process` |
@@ -66,5 +68,5 @@ through `Std.Str` is VIS001). If your code needs the same symbol, declare it
 yourself: identical extern redeclarations merge, C-style — only a
 *conflicting* signature is an error (FFI004).
 
-Future modules (`Std.Fs`, collections) wait on the allocation story; the
-mechanism — Flex code over declared-effect externs — is now in place.
+The binary-data line is explicit: `String` is for non-NUL byte strings and
+text-like data; use `List<I64>` as a byte buffer when byte 0 matters.

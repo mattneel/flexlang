@@ -55,6 +55,12 @@ def _docsrc_files() -> list[Path]:
     return sorted(root.glob("*.flx")) if root.is_dir() else []
 
 
+def _source_files(path: Path) -> list[Path]:
+    if path.is_dir():
+        return sorted(path.rglob("*.flx"))
+    return [path]
+
+
 def _std_module_names() -> list[str]:
     return [f"Std.{p.stem}" for p in _std_files()]
 
@@ -226,16 +232,25 @@ def _documented_targets(units: list[DocUnit]) -> set[str]:
     }
 
 
-def cmd_docs_check(native: bool = False) -> int:
+def cmd_docs_check(native: bool = False, path: str | None = None) -> int:
     """Prove the documentation: DOC002 (an example fails), DOC003 (an expected
     diagnostic doesn't happen), DOC005 (an undocumented public stdlib symbol)."""
     failures = 0
-    units = collect()
+    files = _source_files(Path(path)) if path is not None else None
+    try:
+        units = collect(files)
+    except FlexError as err:
+        for diag in err.diagnostics:
+            print(f"error[{diag.code}]: {diag.message}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"flx docs check: {exc}", file=sys.stderr)
+        return 1
 
-    # DOC005: every public stdlib symbol carries a doc declaration.
+    # DOC005: every public symbol in the checked doc set carries a doc declaration.
     documented = _documented_targets(units)
-    for path in _std_files():
-        module = parse(path.read_text(encoding="utf-8"), str(path))
+    for source in files if files is not None else _std_files():
+        module = parse(source.read_text(encoding="utf-8"), str(source))
         for item in module.items:
             if (
                 isinstance(item, (ast.FnDecl, ast.ExternFnDecl))
@@ -397,10 +412,11 @@ def _render_doc_body(decl: ast.DocDecl, out: list[str]) -> None:
         out.append("")
 
 
-def render_api_pages() -> dict[str, str]:
+def render_api_pages(files: list[Path] | None = None) -> dict[str, str]:
     """{relative docs path: content} for every generated page."""
     pages: dict[str, str] = {}
-    for path in _std_files():
+    source_files = _std_files() if files is None else files
+    for path in source_files:
         module = parse(path.read_text(encoding="utf-8"), str(path))
         docs_by_target: dict[str | None, ast.DocDecl] = {}
         for d in module.docs:
@@ -433,7 +449,8 @@ def render_api_pages() -> dict[str, str]:
         pages[f"api/{module.name}.md"] = "\n".join(out).rstrip() + "\n"
 
     # Free-standing docsrc pages render under their slug.
-    for path in _docsrc_files():
+    free_page_files = _docsrc_files() if files is None else source_files
+    for path in free_page_files:
         module = parse(path.read_text(encoding="utf-8"), str(path))
         for d in module.docs:
             if d.target is not None or d.title is None:
@@ -463,9 +480,15 @@ def _summary_section(pages: dict[str, str]) -> list[str]:
     return lines
 
 
-def cmd_docs_build(check_only: bool = False, docs_dir: Path | None = None) -> int:
+def cmd_docs_build(
+    check_only: bool = False,
+    docs_dir: Path | None = None,
+    source_path: str | None = None,
+) -> int:
     """Render doc declarations into the book source. With --check, verify the
     committed pages are current (the CI gate against drift)."""
+    if source_path is not None:
+        return _cmd_docs_build_local(Path(source_path), docs_dir or Path("docs"), check_only)
     docs = docs_dir if docs_dir is not None else Path("docs")
     if not docs.is_dir():
         print(f"flx docs: no {docs}/ directory here", file=sys.stderr)
@@ -558,6 +581,62 @@ def cmd_docs_build(check_only: bool = False, docs_dir: Path | None = None) -> in
         print(f"docs build: {len(pages)} generated page(s) current")
         if _mdbook_available():
             return subprocess.run(["mdbook", "build"]).returncode
+    return 0
+
+
+def _cmd_docs_build_local(source_path: Path, docs: Path, check_only: bool) -> int:
+    files = _source_files(source_path)
+    try:
+        pages = render_api_pages(files)
+    except FlexError as err:
+        for diag in err.diagnostics:
+            print(f"error[{diag.code}]: {diag.message}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"flx docs build: {exc}", file=sys.stderr)
+        return 1
+
+    index = ["# API Reference", "", _GENERATED_MARK, ""]
+    index.append("*Generated from local `doc` declarations by `flx docs build`.*")
+    index.append("")
+    for rel in sorted(p for p in pages if p.startswith("api/")):
+        index.append(f"- [{Path(rel).stem}]({Path(rel).name})")
+    pages["api/index.md"] = "\n".join(index) + "\n"
+    summary = [
+        "# Summary",
+        "",
+        "- [API Reference](api/index.md)",
+        *[
+            f"  - [{Path(rel).stem}](api/{Path(rel).name})"
+            for rel in sorted(p for p in pages if p.startswith("api/") and p != "api/index.md")
+        ],
+        "",
+    ]
+    pages["SUMMARY.md"] = "\n".join(summary)
+
+    stale: list[str] = []
+    for rel, content in pages.items():
+        target = docs / rel
+        current = target.read_text(encoding="utf-8") if target.is_file() else ""
+        if current != content:
+            stale.append(rel)
+            if check_only:
+                diff = difflib.unified_diff(
+                    current.splitlines(), content.splitlines(), rel, rel, lineterm=""
+                )
+                print("\n".join(list(diff)[:40]), file=sys.stderr)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+    if check_only and stale:
+        print(
+            f"error[DOCS001]: generated docs are stale ({', '.join(stale)}); "
+            "run `flx docs build <path>`",
+            file=sys.stderr,
+        )
+        return 1
+    if not check_only:
+        print(f"docs build: {len(pages)} local page(s) current")
     return 0
 
 

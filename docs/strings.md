@@ -17,6 +17,7 @@ fn main() -> I64 uses { Log } = {
 
 - `println(s)` / `print(s)` come from `Std.IO` (or use `Log.info(s)` directly —
   it is the same thing with a newline).
+- `eprintln(s)` writes a line to stderr for CLI diagnostics.
 - **`++` concatenates strings.** `+` is integer addition only — the compiler
   will point you here.
 - **`to_str(n)`** renders an `I64` as a `String`. There are no format strings
@@ -88,21 +89,31 @@ import Std.Str
 
 test "bytes round-trip" {
   assert_eq(byte_at("\xff", 0), 255)
+  let bs = to_bytes("A\xff")
+  assert_eq(bs[0], 65)
+  assert_eq(bs[1], 255)
   assert_eq(from_bytes([195, 169]), "é")
 }
 ```
+
+Strings cannot carry byte 0. For binary data, keep bytes in `List<I64>`;
+convert to/from `String` only when the byte list is known to be non-NUL
+text-like data.
 
 ## Beyond this page
 
 Much of what this page once listed as missing has shipped: floats and
 hex/bitwise live in [Numbers, Bits, and Function Values](numerics.md), and
 byte-level access — `byte_at`, `substr`, `char_at`, `split`, `parse_int`,
-`from_byte`, `from_bytes` — is in [`Std.Str`](api/Std.Str.md) (generated
-from the compiler, examples executed in CI).
+`from_byte`, `from_bytes`, `to_bytes`, and `trim` — is in
+[`Std.Str`](api/Std.Str.md) (generated from the compiler, examples executed in
+CI).
 
 Number formatting and parsing live there too: `parse_float` (strict,
 correctly rounded, `Option<F64>`), `to_str_fixed(x, decimals)`, and
-`repeat`/`pad_left`/`pad_right` for columns.
+`repeat`/`pad_left`/`pad_right` for columns. For bit-oriented output,
+`to_hex(n)` and `to_unsigned(n)` format the two's-complement bits of an `I64`
+as unsigned 64-bit text.
 
 Still missing, and the compiler says so at the exact place you try them:
 format strings and string literal patterns.

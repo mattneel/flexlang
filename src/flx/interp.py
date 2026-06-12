@@ -20,6 +20,7 @@ import math
 import re
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -170,6 +171,30 @@ def _struct_eq(a: object, b: object) -> bool:
     return a == b
 
 
+def _show_value(value: object) -> str:
+    if value is None:
+        return "()"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        return _f64_str(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "[" + ", ".join(_show_value(v) for v in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{k}: {_show_value(v)}" for k, v in value.items()) + "}"
+    if isinstance(value, Variant):
+        if value.payload is None:
+            return value.tag
+        if isinstance(value.payload, tuple):
+            return value.tag + "(" + ", ".join(_show_value(v) for v in value.payload) + ")"
+        return value.tag + "(" + _show_value(value.payload) + ")"
+    return str(value)
+
+
 def _fflush_libc() -> None:
     """Flush every C stdio stream (fflush(NULL)) so extern-call output lands
     immediately rather than at process exit."""
@@ -252,6 +277,17 @@ def _print_raw(message: str, end: str = "\n") -> None:
     raw = (message + end).encode("utf-8", "surrogateescape")
     sys.stdout.buffer.write(raw)
     sys.stdout.buffer.flush()
+
+
+def _print_raw_err(message: str, end: str = "\n") -> None:
+    """stderr twin of _print_raw, preserving byte-for-byte output."""
+    if message.isascii() and end.isascii():
+        print(message, end=end, flush=True, file=sys.stderr)
+        return
+    sys.stderr.flush()
+    raw = (message + end).encode("utf-8", "surrogateescape")
+    sys.stderr.buffer.write(raw)
+    sys.stderr.buffer.flush()
 
 
 _strtod_fn: object = None  # lazily configured ctypes strtod, or False if unavailable
@@ -430,6 +466,14 @@ class Interpreter:
             return None
         if isinstance(stmt, ast.AssignStmt):
             env.assign(stmt.name, self.eval(stmt.value, env))
+            return None
+        if isinstance(stmt, ast.IndexAssignStmt):
+            xs = self.eval(stmt.obj, env)
+            i = self.eval(stmt.index, env)
+            assert isinstance(xs, list) and isinstance(i, int)
+            if not 0 <= i < len(xs):
+                raise FlexRuntimeError(f"index {i} out of bounds (len {len(xs)})")
+            xs[i] = self.eval(stmt.value, env)
             return None
         if isinstance(stmt, ast.WhileStmt):
             while self.eval(stmt.cond, env):
@@ -672,6 +716,14 @@ class Interpreter:
             return self.call(fn, args)
 
         if isinstance(callee, ast.MemberExpr):
+            if callee.name == "eq":
+                obj_value = self.eval(callee.obj, env)
+                if isinstance(obj_value, (list, dict)):
+                    return _struct_eq(obj_value, self.eval(expr.args[0], env))
+            if callee.name == "show":
+                obj_value = self.eval(callee.obj, env)
+                if isinstance(obj_value, (list, dict)):
+                    return _show_value(obj_value)
             obj = callee.obj
             # A user type or binding named Log/Str/Env/... shadows the intrinsic
             # module (the checker routes those to ctor/method paths instead).
@@ -681,17 +733,36 @@ class Interpreter:
             if isinstance(obj, ast.NameExpr) and obj.name == "Log" and not shadowed:
                 message = str(self.eval(expr.args[0], env))
                 end = "" if callee.name == "print" else "\n"  # flx_print vs flx_log
+                if callee.name == "error":
+                    _print_raw_err(message, end)
+                    return None
                 _print_raw(message, end)
                 return None
-            if (
-                isinstance(obj, ast.NameExpr)
-                and obj.name == "Fs"
-                and callee.name == "read_line"
-                and not shadowed
-            ):
-                sys.stdout.flush()
-                line = _read_line()
-                return Variant("None") if line is None else Variant("Some", line)
+            if isinstance(obj, ast.NameExpr) and obj.name == "Fs" and not shadowed:
+                if callee.name == "read_line":
+                    sys.stdout.flush()
+                    line = _read_line()
+                    return Variant("None") if line is None else Variant("Some", line)
+                if callee.name == "read_text":
+                    path = str(self.eval(expr.args[0], env))
+                    try:
+                        raw = Path(path).read_bytes()
+                        if b"\x00" in raw:
+                            return Variant(
+                                "Err",
+                                "file contains NUL byte; use a List<I64> byte buffer",
+                            )
+                        return Variant("Ok", raw.decode("utf-8", "surrogateescape"))
+                    except OSError as exc:
+                        return Variant("Err", str(exc))
+                if callee.name == "write_text":
+                    path = str(self.eval(expr.args[0], env))
+                    text = str(self.eval(expr.args[1], env))
+                    try:
+                        Path(path).write_bytes(text.encode("utf-8", "surrogateescape"))
+                        return Variant("Ok", None)
+                    except OSError as exc:
+                        return Variant("Err", str(exc))
             if (
                 isinstance(obj, ast.NameExpr)
                 and obj.name == "Time"
@@ -822,6 +893,14 @@ class Interpreter:
             if math.isnan(x):
                 return "nan"  # never "-nan"; matches to_str's canonical form
             return f"{x:.{d}f}"
+        if op == "to_hex":
+            n = self.eval(expr.args[0], env)
+            assert isinstance(n, int)
+            return format(n & _I64_MASK, "x")
+        if op == "to_unsigned":
+            n = self.eval(expr.args[0], env)
+            assert isinstance(n, int)
+            return str(n & _I64_MASK)
         # BYTE semantics, matching the native runtime exactly: index the UTF-8
         # bytes (surrogateescape keeps split sequences lossless).
         data = str(self.eval(expr.args[0], env)).encode("utf-8", "surrogateescape")

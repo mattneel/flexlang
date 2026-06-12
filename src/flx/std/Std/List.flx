@@ -1,7 +1,7 @@
 module Std.List
 
 // Growable lists are built into the language: `[1, 2, 3]` literals, `xs[i]`
-// indexing (panics out of bounds), `List.push(xs, v)`, `List.len(xs)`,
+// indexing (panics out of bounds), `xs[i] = v`, `List.push(xs, v)`, `List.len(xs)`,
 // `List.set(xs, i, v)`, and `for x in xs { ... }`. Lists have REFERENCE
 // semantics: `let ys = xs` aliases, it does not copy. This module adds
 // derived helpers.
@@ -95,9 +95,10 @@ doc module {
   summary "Helpers over the built-in growable `List<T>`."
   text """
   Lists themselves are built into the language: `[1, 2, 3]` literals, `xs[i]`
-  indexing (panics out of bounds), `List.push(xs, v)`, `List.len(xs)`,
-  `List.set(xs, i, v)`, `List.pop(xs)` (`Some(last)`, or `None` when empty),
-  and `for x in xs { ... }` need no import. Lists have REFERENCE semantics:
+  indexing (panics out of bounds), `xs[i] = v`, `List.push(xs, v)`,
+  `List.len(xs)`, `List.set(xs, i, v)`, `List.pop(xs)` (`Some(last)`, or
+  `None` when empty), and `for x in xs { ... }` need no import. Lists have
+  REFERENCE semantics:
   `let ys = xs` aliases, it does not copy. This module adds the derived
   helpers.
   """
@@ -159,7 +160,7 @@ doc fold {
 }
 
 doc sort {
-  summary "Sort a List<I64> in place, ascending."
+  summary "Sort a `List<I64>` in place, ascending."
   test "sorts numbers" {
     mut xs = [3, 1, 2, -5]
     sort(xs)

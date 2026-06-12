@@ -43,6 +43,21 @@ Write a string to stdout followed by a newline.
 println("hello from a doc example")
 ```
 
+## eprintln
+
+```flx
+fn eprintln(s: String) -> Unit uses { Log }
+```
+
+Write a string to stderr followed by a newline.
+
+Use this for diagnostics, progress messages, and errors in CLI tools. It is
+flushed immediately and does not mix with stdout.
+
+*since 0.0.1 · status: implemented*
+
+See also: `println`
+
 ## read_line
 
 ```flx

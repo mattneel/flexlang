@@ -309,7 +309,7 @@ def cmd_run(
             if announce:
                 print("flx: exited with code 1", file=sys.stderr)
             return 1
-        if announce:
+        if announce and code != 0:
             print(f"flx: exited with code {code}", file=sys.stderr)
         return code
 
@@ -319,7 +319,7 @@ def cmd_run(
         with tempfile.TemporaryDirectory() as tmp:
             exe = build_executable(mlir_text, shim, Path(tmp) / "program", Path(tmp))
             code = run_executable(exe, args)
-            if announce:
+            if announce and code != 0:
                 print(f"flx: exited with code {code}", file=sys.stderr)
             return code
     except BackendError as exc:

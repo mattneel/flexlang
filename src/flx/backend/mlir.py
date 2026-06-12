@@ -302,6 +302,17 @@ class FunctionLowerer:
             binding = self._lookup(stmt.name)
             self._store_slot(binding.ref, binding.ty, value)
             return None
+        if isinstance(stmt, ast.IndexAssignStmt):
+            obj_ty = self._ty_of(stmt.obj)
+            assert isinstance(obj_ty, ListType)
+            lst = self._materialize(self.lower_expr(stmt.obj), stmt.obj)
+            idx = self._materialize(self.lower_expr(stmt.index), stmt.index)
+            value = self._materialize(self.lower_expr(stmt.value), stmt.value)
+            slot = self._encode_elem(value, obj_ty.elem)
+            self._emit(
+                f"func.call @__flx_list_set({lst}, {idx}, {slot}) : (!llvm.ptr, i64, i64) -> ()"
+            )
+            return None
         if isinstance(stmt, ast.WhileStmt):
             self.lower_while(stmt)
             return None
@@ -467,6 +478,73 @@ class FunctionLowerer:
         out = self._fresh()
         self._emit(f"{out} = llvm.insertvalue {payload}, {with_tag}[1] : {opt_mty}")
         return out
+
+    def _result_from_string_flag(self, ok: str, payload: str, *, ok_has_payload: bool) -> str:
+        """Assemble Result<T, String> from an i64 success flag and a String.
+
+        When ok_has_payload is true the String is Ok's payload
+        (Result<String, String>, used by read_text). Otherwise the String is the
+        Err payload and Ok carries Unit (Result<Unit, String>, used by
+        write_text).
+        """
+        str_mty = "!llvm.struct<(ptr, i64)>"
+        boxed = self._box(payload, str_mty)
+        zero64 = self._const("0", "i64")
+        is_ok = self._fresh()
+        self._emit(f"{is_ok} = arith.cmpi ne, {ok}, {zero64} : i64")
+        ok_tag = self._const("0", "i32")
+        err_tag = self._const("1", "i32")
+        tag = self._fresh()
+        self._emit(f"{tag} = arith.select {is_ok}, {ok_tag}, {err_tag} : i32")
+        if ok_has_payload:
+            payload_slot = boxed
+        else:
+            payload_slot = self._fresh()
+            self._emit(f"{payload_slot} = arith.select {is_ok}, {zero64}, {boxed} : i64")
+        result_mty = "!llvm.struct<(i32, i64)>"
+        undef = self._fresh()
+        self._emit(f"{undef} = llvm.mlir.undef : {result_mty}")
+        with_tag = self._fresh()
+        self._emit(f"{with_tag} = llvm.insertvalue {tag}, {undef}[0] : {result_mty}")
+        out = self._fresh()
+        self._emit(f"{out} = llvm.insertvalue {payload_slot}, {with_tag}[1] : {result_mty}")
+        return out
+
+    def _lower_read_text(self, expr: ast.CallExpr) -> str:
+        path = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
+        pptr, plen = self._string_parts(path)
+        str_mty = "!llvm.struct<(ptr, i64)>"
+        one = self._fresh()
+        self._emit(f"{one} = llvm.mlir.constant(1 : i64) : i64")
+        slot = self._fresh()
+        self._emit(f"{slot} = llvm.alloca {one} x {str_mty} : (i64) -> !llvm.ptr")
+        ok = self._fresh()
+        self._emit(
+            f"{ok} = func.call @__flx_read_text({pptr}, {plen}, {slot}) : "
+            "(!llvm.ptr, i64, !llvm.ptr) -> i64"
+        )
+        payload = self._fresh()
+        self._emit(f"{payload} = llvm.load {slot} : !llvm.ptr -> {str_mty}")
+        return self._result_from_string_flag(ok, payload, ok_has_payload=True)
+
+    def _lower_write_text(self, expr: ast.CallExpr) -> str:
+        path = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
+        text = self._materialize(self.lower_expr(expr.args[1]), expr.args[1])
+        pptr, plen = self._string_parts(path)
+        tptr, tlen = self._string_parts(text)
+        str_mty = "!llvm.struct<(ptr, i64)>"
+        one = self._fresh()
+        self._emit(f"{one} = llvm.mlir.constant(1 : i64) : i64")
+        slot = self._fresh()
+        self._emit(f"{slot} = llvm.alloca {one} x {str_mty} : (i64) -> !llvm.ptr")
+        ok = self._fresh()
+        self._emit(
+            f"{ok} = func.call @__flx_write_text({pptr}, {plen}, {tptr}, {tlen}, {slot}) : "
+            "(!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr) -> i64"
+        )
+        err = self._fresh()
+        self._emit(f"{err} = llvm.load {slot} : !llvm.ptr -> {str_mty}")
+        return self._result_from_string_flag(ok, err, ok_has_payload=False)
 
     # --- slots: memref for scalars, llvm.alloca for aggregates ----------------
 
@@ -1067,6 +1145,13 @@ class FunctionLowerer:
                 recv = self._materialize(self.lower_expr(expr.callee.obj), expr.callee.obj)
                 args = [recv, *(self._materialize(self.lower_expr(a), a) for a in expr.args)]
                 return self._emit_call(f"flx_{symbol}", args, method_ty)
+            recv_ty = self.types.get(id(expr.callee.obj))
+            if isinstance(recv_ty, (ListType, MapType)) and expr.callee.name in ("eq", "show"):
+                recv = self._materialize(self.lower_expr(expr.callee.obj), expr.callee.obj)
+                if expr.callee.name == "eq":
+                    other = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
+                    return self._emit_equal(recv, other, recv_ty)
+                return self._emit_show(recv, recv_ty)
         # Effectful intrinsics (validated by the checker). Log.* prints its
         # message; other intrinsics are MVP no-ops at runtime.
         if isinstance(expr.callee, ast.MemberExpr):
@@ -1082,11 +1167,20 @@ class FunctionLowerer:
                     value = self.lower_expr(expr.args[0])
                     assert value is not None
                     ptr, length = self._string_parts(value)
-                    runtime_fn = "__flx_print" if method == "print" else "__flx_log"
+                    if method == "print":
+                        runtime_fn = "__flx_print"
+                    elif method == "error":
+                        runtime_fn = "__flx_error"
+                    else:
+                        runtime_fn = "__flx_log"
                     self._emit(f"func.call @{runtime_fn}({ptr}, {length}) : (!llvm.ptr, i64) -> ()")
                     return None
                 if obj.name == "Fs" and method == "read_line":
                     return self._lower_read_line()
+                if obj.name == "Fs" and method == "read_text":
+                    return self._lower_read_text(expr)
+                if obj.name == "Fs" and method == "write_text":
+                    return self._lower_write_text(expr)
                 if obj.name == "Time" and method == "monotonic_ms":
                     out = self._fresh()
                     self._emit(f"{out} = func.call @__flx_monotonic_ms() : () -> i64")
@@ -1131,6 +1225,12 @@ class FunctionLowerer:
                     x = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
                     d = self._materialize(self.lower_expr(expr.args[1]), expr.args[1])
                     return self._str_runtime("__flx_f64_fixed", ["f64", "i64"], [x, d])
+                if obj.name == "Str" and method == "to_hex":
+                    n = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
+                    return self._str_runtime("__flx_i64_to_hex", ["i64"], [n])
+                if obj.name == "Str" and method == "to_unsigned":
+                    n = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
+                    return self._str_runtime("__flx_i64_to_unsigned", ["i64"], [n])
                 if obj.name == "Env" and method == "argv":
                     out = self._fresh()
                     self._emit(f"{out} = func.call @__flx_argv() : () -> !llvm.ptr")
@@ -1313,6 +1413,10 @@ class FunctionLowerer:
             out = self._fresh()
             self._emit(f"{out} = arith.cmpf oeq, {left}, {right} : f64")
             return out
+        if isinstance(ty, ListType):
+            return self._emit_list_equal(left, right, ty)
+        if isinstance(ty, MapType):
+            return self._emit_map_equal(left, right, ty)
         if not _is_aggregate(mty):
             out = self._fresh()
             self._emit(f"{out} = arith.cmpi eq, {left}, {right} : {mty}")
@@ -1406,6 +1510,279 @@ class FunctionLowerer:
                     conj = nxt
             return conj if conj is not None else self._const("1", "i1")
         raise BackendError(f"cannot compare values of type {ty}")
+
+    def _emit_list_equal(self, left: str, right: str, ty: ListType) -> str:
+        ln = self._fresh()
+        self._emit(f"{ln} = func.call @__flx_list_len({left}) : (!llvm.ptr) -> i64")
+        rn = self._fresh()
+        self._emit(f"{rn} = func.call @__flx_list_len({right}) : (!llvm.ptr) -> i64")
+        same_len = self._fresh()
+        self._emit(f"{same_len} = arith.cmpi eq, {ln}, {rn} : i64")
+        result_slot = self._alloc_slot("i1")
+        self._store_slot(result_slot, "i1", same_len)
+        index_slot = self._alloc_slot("i64")
+        self._store_slot(index_slot, "i64", self._const("0", "i64"))
+        cond_lbl, body_lbl, exit_lbl = self._label(), self._label(), self._label()
+        self._terminator(f"cf.br {cond_lbl}")
+        self._start_block(cond_lbl)
+        current = self._load_slot(result_slot, "i1")
+        i = self._load_slot(index_slot, "i64")
+        in_bounds = self._fresh()
+        self._emit(f"{in_bounds} = arith.cmpi slt, {i}, {ln} : i64")
+        keep_going = self._fresh()
+        self._emit(f"{keep_going} = arith.andi {current}, {in_bounds} : i1")
+        self._terminator(f"cf.cond_br {keep_going}, {body_lbl}, {exit_lbl}")
+        self._start_block(body_lbl)
+        cur = self._load_slot(index_slot, "i64")
+        lslot = self._fresh()
+        self._emit(f"{lslot} = func.call @__flx_list_get({left}, {cur}) : (!llvm.ptr, i64) -> i64")
+        rslot = self._fresh()
+        self._emit(f"{rslot} = func.call @__flx_list_get({right}, {cur}) : (!llvm.ptr, i64) -> i64")
+        lelem = self._decode_elem(lslot, ty.elem)
+        relem = self._decode_elem(rslot, ty.elem)
+        elem_eq = self._emit_equal(lelem, relem, ty.elem)
+        still = self._load_slot(result_slot, "i1")
+        next_result = self._fresh()
+        self._emit(f"{next_result} = arith.andi {still}, {elem_eq} : i1")
+        self._store_slot(result_slot, "i1", next_result)
+        one = self._const("1", "i64")
+        nxt = self._fresh()
+        self._emit(f"{nxt} = arith.addi {cur}, {one} : i64")
+        self._store_slot(index_slot, "i64", nxt)
+        self._terminator(f"cf.br {cond_lbl}")
+        self._start_block(exit_lbl)
+        return self._load_slot(result_slot, "i1")
+
+    def _concat_strings(self, left: str, right: str) -> str:
+        lp, ll = self._string_parts(left)
+        rp, rl = self._string_parts(right)
+        return self._str_runtime(
+            "__flx_str_concat", ["!llvm.ptr", "i64", "!llvm.ptr", "i64"], [lp, ll, rp, rl]
+        )
+
+    def _const_string_value(self, text: str) -> str:
+        return self._lower_string(ast.StringLit(text, self.checked.module.span))
+
+    def _emit_show(self, value: str, ty: Type) -> str:
+        if ty is I64:
+            return self._str_runtime("__flx_int_to_str", ["i64"], [value])
+        if ty is F64:
+            return self._str_runtime("__flx_f64_to_str", ["f64"], [value])
+        if ty is STRING:
+            return value
+        if ty is BOOL:
+            true_s = self._const_string_value("true")
+            false_s = self._const_string_value("false")
+            out = self._fresh()
+            self._emit(
+                f"{out} = arith.select {value}, {true_s}, {false_s} : !llvm.struct<(ptr, i64)>"
+            )
+            return out
+        if ty is UNIT:
+            return self._const_string_value("()")
+        if isinstance(ty, ListType):
+            return self._emit_list_show(value, ty)
+        if isinstance(ty, MapType):
+            return self._emit_map_show(value, ty)
+        raise BackendError(f"cannot show values of type {ty}")
+
+    def _emit_list_show(self, value: str, ty: ListType) -> str:
+        str_mty = "!llvm.struct<(ptr, i64)>"
+        out_slot = self._alloc_slot(str_mty)
+        self._store_slot(out_slot, str_mty, self._const_string_value("["))
+        n = self._fresh()
+        self._emit(f"{n} = func.call @__flx_list_len({value}) : (!llvm.ptr) -> i64")
+        index_slot = self._alloc_slot("i64")
+        self._store_slot(index_slot, "i64", self._const("0", "i64"))
+        cond_lbl, body_lbl, exit_lbl = self._label(), self._label(), self._label()
+        self._terminator(f"cf.br {cond_lbl}")
+        self._start_block(cond_lbl)
+        i = self._load_slot(index_slot, "i64")
+        in_bounds = self._fresh()
+        self._emit(f"{in_bounds} = arith.cmpi slt, {i}, {n} : i64")
+        self._terminator(f"cf.cond_br {in_bounds}, {body_lbl}, {exit_lbl}")
+        self._start_block(body_lbl)
+        cur = self._load_slot(index_slot, "i64")
+        zero = self._const("0", "i64")
+        is_first = self._fresh()
+        self._emit(f"{is_first} = arith.cmpi eq, {cur}, {zero} : i64")
+        comma_lbl, elem_lbl = self._label(), self._label()
+        self._terminator(f"cf.cond_br {is_first}, {elem_lbl}, {comma_lbl}")
+        self._start_block(comma_lbl)
+        with_comma = self._concat_strings(
+            self._load_slot(out_slot, str_mty), self._const_string_value(", ")
+        )
+        self._store_slot(out_slot, str_mty, with_comma)
+        self._terminator(f"cf.br {elem_lbl}")
+        self._start_block(elem_lbl)
+        elem_slot = self._fresh()
+        self._emit(
+            f"{elem_slot} = func.call @__flx_list_get({value}, {cur}) : (!llvm.ptr, i64) -> i64"
+        )
+        elem = self._decode_elem(elem_slot, ty.elem)
+        shown = self._emit_show(elem, ty.elem)
+        next_out = self._concat_strings(self._load_slot(out_slot, str_mty), shown)
+        self._store_slot(out_slot, str_mty, next_out)
+        one = self._const("1", "i64")
+        nxt = self._fresh()
+        self._emit(f"{nxt} = arith.addi {cur}, {one} : i64")
+        self._store_slot(index_slot, "i64", nxt)
+        self._terminator(f"cf.br {cond_lbl}")
+        self._start_block(exit_lbl)
+        closed = self._concat_strings(
+            self._load_slot(out_slot, str_mty), self._const_string_value("]")
+        )
+        self._store_slot(out_slot, str_mty, closed)
+        return self._load_slot(out_slot, str_mty)
+
+    def _emit_map_show(self, value: str, ty: MapType) -> str:
+        str_mty = "!llvm.struct<(ptr, i64)>"
+        out_slot = self._alloc_slot(str_mty)
+        self._store_slot(out_slot, str_mty, self._const_string_value("{"))
+        keys = self._fresh()
+        self._emit(f"{keys} = func.call @__flx_map_keys({value}) : (!llvm.ptr) -> !llvm.ptr")
+        n = self._fresh()
+        self._emit(f"{n} = func.call @__flx_list_len({keys}) : (!llvm.ptr) -> i64")
+        index_slot = self._alloc_slot("i64")
+        self._store_slot(index_slot, "i64", self._const("0", "i64"))
+        cond_lbl, body_lbl, exit_lbl = self._label(), self._label(), self._label()
+        self._terminator(f"cf.br {cond_lbl}")
+        self._start_block(cond_lbl)
+        i = self._load_slot(index_slot, "i64")
+        in_bounds = self._fresh()
+        self._emit(f"{in_bounds} = arith.cmpi slt, {i}, {n} : i64")
+        self._terminator(f"cf.cond_br {in_bounds}, {body_lbl}, {exit_lbl}")
+        self._start_block(body_lbl)
+        cur = self._load_slot(index_slot, "i64")
+        zero = self._const("0", "i64")
+        is_first = self._fresh()
+        self._emit(f"{is_first} = arith.cmpi eq, {cur}, {zero} : i64")
+        comma_lbl, entry_lbl = self._label(), self._label()
+        self._terminator(f"cf.cond_br {is_first}, {entry_lbl}, {comma_lbl}")
+        self._start_block(comma_lbl)
+        with_comma = self._concat_strings(
+            self._load_slot(out_slot, str_mty), self._const_string_value(", ")
+        )
+        self._store_slot(out_slot, str_mty, with_comma)
+        self._terminator(f"cf.br {entry_lbl}")
+        self._start_block(entry_lbl)
+        key_slot = self._fresh()
+        self._emit(
+            f"{key_slot} = func.call @__flx_list_get({keys}, {cur}) : (!llvm.ptr, i64) -> i64"
+        )
+        key = self._decode_elem(key_slot, STRING)
+        with_key = self._concat_strings(self._load_slot(out_slot, str_mty), key)
+        with_colon = self._concat_strings(with_key, self._const_string_value(": "))
+        kptr, klen = self._string_parts(key)
+        one_i64 = self._fresh()
+        self._emit(f"{one_i64} = llvm.mlir.constant(1 : i64) : i64")
+        value_slot_ptr = self._fresh()
+        self._emit(f"{value_slot_ptr} = llvm.alloca {one_i64} x i64 : (i64) -> !llvm.ptr")
+        found = self._fresh()
+        self._emit(
+            f"{found} = func.call @__flx_map_get({value}, {kptr}, {klen}, {value_slot_ptr}) : "
+            "(!llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> i64"
+        )
+        vslot = self._fresh()
+        self._emit(f"{vslot} = llvm.load {value_slot_ptr} : !llvm.ptr -> i64")
+        item = self._decode_elem(vslot, ty.value)
+        shown = self._emit_show(item, ty.value)
+        with_value = self._concat_strings(with_colon, shown)
+        self._store_slot(out_slot, str_mty, with_value)
+        one = self._const("1", "i64")
+        nxt = self._fresh()
+        self._emit(f"{nxt} = arith.addi {cur}, {one} : i64")
+        self._store_slot(index_slot, "i64", nxt)
+        self._terminator(f"cf.br {cond_lbl}")
+        self._start_block(exit_lbl)
+        closed = self._concat_strings(
+            self._load_slot(out_slot, str_mty), self._const_string_value("}")
+        )
+        self._store_slot(out_slot, str_mty, closed)
+        return self._load_slot(out_slot, str_mty)
+
+    def _emit_map_equal(self, left: str, right: str, ty: MapType) -> str:
+        ln = self._fresh()
+        self._emit(f"{ln} = func.call @__flx_map_len({left}) : (!llvm.ptr) -> i64")
+        rn = self._fresh()
+        self._emit(f"{rn} = func.call @__flx_map_len({right}) : (!llvm.ptr) -> i64")
+        same_len = self._fresh()
+        self._emit(f"{same_len} = arith.cmpi eq, {ln}, {rn} : i64")
+        result_slot = self._alloc_slot("i1")
+        self._store_slot(result_slot, "i1", same_len)
+        keys = self._fresh()
+        self._emit(f"{keys} = func.call @__flx_map_keys({left}) : (!llvm.ptr) -> !llvm.ptr")
+        nkeys = self._fresh()
+        self._emit(f"{nkeys} = func.call @__flx_list_len({keys}) : (!llvm.ptr) -> i64")
+        index_slot = self._alloc_slot("i64")
+        self._store_slot(index_slot, "i64", self._const("0", "i64"))
+        cond_lbl, body_lbl, exit_lbl = self._label(), self._label(), self._label()
+        self._terminator(f"cf.br {cond_lbl}")
+        self._start_block(cond_lbl)
+        current = self._load_slot(result_slot, "i1")
+        i = self._load_slot(index_slot, "i64")
+        in_bounds = self._fresh()
+        self._emit(f"{in_bounds} = arith.cmpi slt, {i}, {nkeys} : i64")
+        keep_going = self._fresh()
+        self._emit(f"{keep_going} = arith.andi {current}, {in_bounds} : i1")
+        self._terminator(f"cf.cond_br {keep_going}, {body_lbl}, {exit_lbl}")
+
+        self._start_block(body_lbl)
+        cur = self._load_slot(index_slot, "i64")
+        key_slot = self._fresh()
+        self._emit(
+            f"{key_slot} = func.call @__flx_list_get({keys}, {cur}) : (!llvm.ptr, i64) -> i64"
+        )
+        key = self._decode_elem(key_slot, STRING)
+        kptr, klen = self._string_parts(key)
+        one_i64 = self._fresh()
+        self._emit(f"{one_i64} = llvm.mlir.constant(1 : i64) : i64")
+        left_slot_ptr = self._fresh()
+        self._emit(f"{left_slot_ptr} = llvm.alloca {one_i64} x i64 : (i64) -> !llvm.ptr")
+        right_slot_ptr = self._fresh()
+        self._emit(f"{right_slot_ptr} = llvm.alloca {one_i64} x i64 : (i64) -> !llvm.ptr")
+        _lfound = self._fresh()
+        self._emit(
+            f"{_lfound} = func.call @__flx_map_get({left}, {kptr}, {klen}, {left_slot_ptr}) : "
+            "(!llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> i64"
+        )
+        rfound = self._fresh()
+        self._emit(
+            f"{rfound} = func.call @__flx_map_get({right}, {kptr}, {klen}, {right_slot_ptr}) : "
+            "(!llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> i64"
+        )
+        zero = self._const("0", "i64")
+        has_right = self._fresh()
+        self._emit(f"{has_right} = arith.cmpi ne, {rfound}, {zero} : i64")
+        found_lbl, missing_lbl, cont_lbl = self._label(), self._label(), self._label()
+        self._terminator(f"cf.cond_br {has_right}, {found_lbl}, {missing_lbl}")
+
+        self._start_block(missing_lbl)
+        self._store_slot(result_slot, "i1", self._const("0", "i1"))
+        self._terminator(f"cf.br {cont_lbl}")
+
+        self._start_block(found_lbl)
+        lslot = self._fresh()
+        self._emit(f"{lslot} = llvm.load {left_slot_ptr} : !llvm.ptr -> i64")
+        rslot = self._fresh()
+        self._emit(f"{rslot} = llvm.load {right_slot_ptr} : !llvm.ptr -> i64")
+        lvalue = self._decode_elem(lslot, ty.value)
+        rvalue = self._decode_elem(rslot, ty.value)
+        value_eq = self._emit_equal(lvalue, rvalue, ty.value)
+        still = self._load_slot(result_slot, "i1")
+        next_result = self._fresh()
+        self._emit(f"{next_result} = arith.andi {still}, {value_eq} : i1")
+        self._store_slot(result_slot, "i1", next_result)
+        self._terminator(f"cf.br {cont_lbl}")
+
+        self._start_block(cont_lbl)
+        one = self._const("1", "i64")
+        nxt = self._fresh()
+        self._emit(f"{nxt} = arith.addi {cur}, {one} : i64")
+        self._store_slot(index_slot, "i64", nxt)
+        self._terminator(f"cf.br {cond_lbl}")
+        self._start_block(exit_lbl)
+        return self._load_slot(result_slot, "i1")
 
     def _cmp_field(self, left: str, right: str, mty: str, index: int, field_ty: str) -> str:
         lf = self._fresh()
