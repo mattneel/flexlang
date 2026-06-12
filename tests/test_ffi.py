@@ -185,7 +185,7 @@ def test_extern_usable_in_build_targets(
         "module Build\n"
         "extern fn llabs(n: I64) -> I64\n"
         "target default = t\n"
-        "target t uses { Process } "
+        "target t uses { Process, Unsafe } "
         '{ if llabs(0 - 1) == 1 { sh("true")? } else { sh("false")? } }\n',
         encoding="utf-8",
     )

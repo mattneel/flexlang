@@ -16,6 +16,7 @@ BASE_RUNTIME_C = """#include <stdio.h>
 #include <unistd.h>
 #include <setjmp.h>
 #include <errno.h>
+#include <limits.h>
 
 typedef struct { const char *ptr; long long len; } FlxStr;
 void *__flx_box(long long size); /* checked allocator, defined below */
@@ -35,6 +36,52 @@ static void __flx_runtime_fail(const char *msg) {
     fflush(stdout);
     fprintf(stderr, "flx: runtime error: %s\\n", msg);
     exit(1);
+}
+static void __flx_oom(void) {
+    fflush(stdout);
+    fputs("flx: runtime error: out of memory\\n", stderr);
+    exit(1);
+}
+static void *__flx_malloc_size(size_t size) {
+    void *p = malloc(size ? size : 1);
+    if (!p) __flx_oom();
+    return p;
+}
+static size_t __flx_alloc_size(long long size) {
+    if (size < 0) __flx_runtime_fail("negative allocation size");
+    return (size_t)size;
+}
+static size_t __flx_byte_len(long long len) {
+    if (len < 0) __flx_runtime_fail("negative byte length");
+    return (size_t)len;
+}
+static size_t __flx_checked_add_size(size_t a, size_t b) {
+    if (SIZE_MAX - a < b) __flx_runtime_fail("allocation size overflow");
+    return a + b;
+}
+static size_t __flx_checked_mul_size(size_t a, size_t b) {
+    if (a != 0 && b > SIZE_MAX / a) __flx_runtime_fail("allocation size overflow");
+    return a * b;
+}
+static long long __flx_checked_add_len(long long a, long long b) {
+    if (a < 0 || b < 0) __flx_runtime_fail("negative byte length");
+    if (a > LLONG_MAX - b) __flx_runtime_fail("allocation size overflow");
+    return a + b;
+}
+static size_t __flx_len_with_nul(long long len) {
+    return __flx_checked_add_size(__flx_byte_len(len), 1);
+}
+static void *__flx_realloc_array(void *ptr, long long count, size_t elem_size) {
+    size_t bytes = __flx_checked_mul_size(__flx_alloc_size(count), elem_size);
+    void *p = realloc(ptr, bytes ? bytes : 1);
+    if (!p) __flx_oom();
+    return p;
+}
+static long long __flx_grow_capacity(long long cap) {
+    if (cap < 0) __flx_runtime_fail("invalid negative container capacity");
+    if (cap == 0) return 8;
+    if (cap > LLONG_MAX / 2) __flx_runtime_fail("container capacity overflow");
+    return cap * 2;
 }
 
 // Deep recursion must not die as a raw SIGSEGV: report it like the
@@ -126,15 +173,16 @@ long long __flx_read_line_opt(FlxStr *out) {
 }
 static void __flx_copy_cstr(const char *msg, FlxStr *out) {
     long long n = (long long)strlen(msg);
-    char *buf = (char *)__flx_box(n + 1);
-    memcpy(buf, msg, (size_t)n + 1);
+    char *buf = (char *)__flx_malloc_size(__flx_len_with_nul(n));
+    memcpy(buf, msg, __flx_len_with_nul(n));
     out->ptr = buf;
     out->len = n;
 }
 static char *__flx_path_copy(const char *p, long long n) {
-    char *path = (char *)__flx_box(n + 1);
-    memcpy(path, p, (size_t)n);
-    path[n] = 0;
+    size_t len = __flx_byte_len(n);
+    char *path = (char *)__flx_malloc_size(__flx_checked_add_size(len, 1));
+    memcpy(path, p, len);
+    path[len] = 0;
     return path;
 }
 long long __flx_read_text(const char *p, long long n, FlxStr *out) {
@@ -156,7 +204,7 @@ long long __flx_read_text(const char *p, long long n, FlxStr *out) {
         return 0;
     }
     rewind(f);
-    char *buf = (char *)__flx_box((long long)size + 1);
+    char *buf = (char *)__flx_malloc_size(__flx_len_with_nul((long long)size));
     size_t got = fread(buf, 1, (size_t)size, f);
     if (got != (size_t)size || ferror(f)) {
         __flx_copy_cstr(strerror(errno), out);
@@ -180,8 +228,9 @@ long long __flx_write_text(const char *p, long long n, const char *q, long long 
         __flx_copy_cstr(strerror(errno), err);
         return 0;
     }
-    size_t wrote = fwrite(q, 1, (size_t)m, f);
-    if (wrote != (size_t)m || ferror(f)) {
+    size_t len = __flx_byte_len(m);
+    size_t wrote = fwrite(q, 1, len, f);
+    if (wrote != len || ferror(f)) {
         __flx_copy_cstr(strerror(errno), err);
         fclose(f);
         return 0;
@@ -209,30 +258,32 @@ void __flx_str_concat(const char *p1, long long n1, const char *p2, long long n2
     // __flx_box, not raw malloc: heap exhaustion (quadratic ++ chains) must
     // die as "out of memory", not as a NULL-write SIGSEGV that the stack
     // guard would misreport as runaway recursion.
-    char *buf = (char *)__flx_box(n1 + n2 + 1);
-    memcpy(buf, p1, (size_t)n1);
-    memcpy(buf + n1, p2, (size_t)n2);
-    buf[n1 + n2] = 0;
+    long long out_len = __flx_checked_add_len(n1, n2);
+    size_t len1 = __flx_byte_len(n1);
+    size_t len2 = __flx_byte_len(n2);
+    char *buf = (char *)__flx_malloc_size(__flx_len_with_nul(out_len));
+    memcpy(buf, p1, len1);
+    memcpy(buf + len1, p2, len2);
+    buf[out_len] = 0;
     out->ptr = buf;
-    out->len = n1 + n2;
+    out->len = out_len;
 }
 // Heap cell for a boxed ADT payload (a payload that doesn't fit the i64 slot
 // by value: strings, records, non-enum ADTs, multi-field payloads). Boxes are
 // immutable once written and reclaimed at process exit; region-based
 // reclamation is the roadmap.
 void *__flx_box(long long size) {
-    void *p = malloc((size_t)size);
-    if (!p) {
-        fflush(stdout);
-        fputs("flx: runtime error: out of memory\\n", stderr);
-        exit(1);
-    }
-    return p;
+    return __flx_malloc_size(__flx_alloc_size(size));
 }
 // The growable list (List<T>): a header with an i64-slot element array.
 // Elements use the SAME slot codec as ADT payloads — inline scalars by value,
 // everything else a __flx_box address. Lists have reference semantics.
 typedef struct { long long len; long long cap; long long *data; } FlxList;
+static void __flx_list_check(FlxList *l) {
+    if (l->len < 0 || l->cap < 0 || l->len > l->cap) {
+        __flx_runtime_fail("invalid list header");
+    }
+}
 void *__flx_list_new(void) {
     FlxList *l = (FlxList *)__flx_box((long long)sizeof(FlxList));
     l->len = 0;
@@ -242,14 +293,11 @@ void *__flx_list_new(void) {
 }
 void __flx_list_push(void *lp, long long v) {
     FlxList *l = (FlxList *)lp;
+    __flx_list_check(l);
     if (l->len == l->cap) {
-        l->cap = l->cap ? l->cap * 2 : 8;
-        l->data = (long long *)realloc(l->data, (size_t)l->cap * sizeof(long long));
-        if (!l->data) {
-            fflush(stdout);
-            fputs("flx: runtime error: out of memory\\n", stderr);
-            exit(1);
-        }
+        long long cap = __flx_grow_capacity(l->cap);
+        l->data = (long long *)__flx_realloc_array(l->data, cap, sizeof(long long));
+        l->cap = cap;
     }
     l->data[l->len++] = v;
 }
@@ -262,21 +310,26 @@ static void __flx_bounds(long long i, long long len) {
 }
 long long __flx_list_get(void *lp, long long i) {
     FlxList *l = (FlxList *)lp;
+    __flx_list_check(l);
     __flx_bounds(i, l->len);
     return l->data[i];
 }
 void __flx_list_set(void *lp, long long i, long long v) {
     FlxList *l = (FlxList *)lp;
+    __flx_list_check(l);
     __flx_bounds(i, l->len);
     l->data[i] = v;
 }
 long long __flx_list_len(void *lp) {
-    return ((FlxList *)lp)->len;
+    FlxList *l = (FlxList *)lp;
+    __flx_list_check(l);
+    return l->len;
 }
 // Remove and return the LAST element's slot: 1 with *out filled, 0 when empty.
 // The lowering assembles Some/None from the flag; the slot IS the payload.
 long long __flx_list_pop(void *lp, long long *out) {
     FlxList *l = (FlxList *)lp;
+    __flx_list_check(l);
     if (l->len == 0) {
         *out = 0;
         return 0;
@@ -303,6 +356,11 @@ long long __flx_slot_str_eq(long long use_str, long long ls, long long rs) {
 // index is the roadmap. Values use the SAME i64 slot codec as list elements.
 typedef struct { const char *key; long long keylen; long long slot; int alive; } FlxMapEntry;
 typedef struct { long long len; long long cap; long long used; FlxMapEntry *entries; } FlxMap;
+static void __flx_map_check(FlxMap *m) {
+    if (m->len < 0 || m->cap < 0 || m->used < 0 || m->len > m->used || m->used > m->cap) {
+        __flx_runtime_fail("invalid map header");
+    }
+}
 void *__flx_map_new(void) {
     FlxMap *m = (FlxMap *)__flx_box((long long)sizeof(FlxMap));
     m->len = 0;
@@ -312,9 +370,11 @@ void *__flx_map_new(void) {
     return m;
 }
 static FlxMapEntry *__flx_map_find(FlxMap *m, const char *k, long long klen) {
+    __flx_map_check(m);
+    size_t keylen = __flx_byte_len(klen);
     for (long long i = 0; i < m->used; i++) {
         FlxMapEntry *e = &m->entries[i];
-        if (e->alive && e->keylen == klen && memcmp(e->key, k, (size_t)klen) == 0) {
+        if (e->alive && e->keylen == klen && memcmp(e->key, k, keylen) == 0) {
             return e;
         }
     }
@@ -328,17 +388,14 @@ void __flx_map_set(void *mp, const char *k, long long klen, long long slot) {
         return;
     }
     if (m->used == m->cap) {
-        m->cap = m->cap ? m->cap * 2 : 8;
-        m->entries = (FlxMapEntry *)realloc(m->entries, (size_t)m->cap * sizeof(FlxMapEntry));
-        if (!m->entries) {
-            fflush(stdout);
-            fputs("flx: runtime error: out of memory\\n", stderr);
-            exit(1);
-        }
+        long long cap = __flx_grow_capacity(m->cap);
+        m->entries = (FlxMapEntry *)__flx_realloc_array(m->entries, cap, sizeof(FlxMapEntry));
+        m->cap = cap;
     }
-    char *kcopy = (char *)__flx_box(klen + 1);
-    memcpy(kcopy, k, (size_t)klen);
-    kcopy[klen] = 0;
+    size_t keylen = __flx_byte_len(klen);
+    char *kcopy = (char *)__flx_malloc_size(__flx_checked_add_size(keylen, 1));
+    memcpy(kcopy, k, keylen);
+    kcopy[keylen] = 0;
     m->entries[m->used].key = kcopy;
     m->entries[m->used].keylen = klen;
     m->entries[m->used].slot = slot;
@@ -371,6 +428,7 @@ void __flx_map_remove(void *mp, const char *k, long long klen) {
 }
 void *__flx_map_keys(void *mp) {
     FlxMap *m = (FlxMap *)mp;
+    __flx_map_check(m);
     FlxList *out = (FlxList *)__flx_list_new();
     for (long long i = 0; i < m->used; i++) {
         if (!m->entries[i].alive) continue;
@@ -383,6 +441,7 @@ void *__flx_map_keys(void *mp) {
 }
 void *__flx_map_values(void *mp) {
     FlxMap *m = (FlxMap *)mp;
+    __flx_map_check(m);
     FlxList *out = (FlxList *)__flx_list_new();
     for (long long i = 0; i < m->used; i++) {
         if (m->entries[i].alive) __flx_list_push(out, m->entries[i].slot);
@@ -432,8 +491,9 @@ void __flx_substr(const char *p, long long n, long long start, long long count, 
     if (start > n) start = n;
     if (count < 0) count = 0;
     if (count > n - start) count = n - start;
-    char *buf = (char *)__flx_box(count + 1);
-    memcpy(buf, p + start, (size_t)count);
+    size_t len = __flx_byte_len(count);
+    char *buf = (char *)__flx_malloc_size(__flx_checked_add_size(len, 1));
+    memcpy(buf, p + start, len);
     buf[count] = 0;
     out->ptr = buf;
     out->len = count;
@@ -457,7 +517,8 @@ void __flx_from_byte(long long b, FlxStr *out) {
 }
 void __flx_from_bytes(void *lp, FlxStr *out) {
     FlxList *l = (FlxList *)lp;
-    char *buf = (char *)__flx_box(l->len + 1);
+    __flx_list_check(l);
+    char *buf = (char *)__flx_malloc_size(__flx_len_with_nul(l->len));
     for (long long i = 0; i < l->len; i++) {
         __flx_byte_check(l->data[i]);
         buf[i] = (char)l->data[i];
@@ -485,7 +546,7 @@ void __flx_f64_fixed(double x, long long d, FlxStr *out) {
         return;
     }
     int need = snprintf(NULL, 0, "%.*f", (int)d, x);
-    char *buf = (char *)__flx_box(need + 1);
+    char *buf = (char *)__flx_malloc_size(__flx_len_with_nul((long long)need));
     snprintf(buf, (size_t)need + 1, "%.*f", (int)d, x);
     out->ptr = buf;
     out->len = need;

@@ -8,8 +8,9 @@ The emission is deliberately simple and structured so the standard
   (alloca + load/store), so we never hand-write SSA phi/block arguments;
 * ``if`` / ``while`` become ``cf`` branches between explicit blocks.
 
-User functions are emitted as ``@flx_<name>`` to avoid clashing with the C
-runtime shim (``main``, ``printf``, …). Tests are emitted by
+User functions are emitted with a ``flx_`` prefix to avoid clashing with the C
+runtime shim (``main``, ``printf``, …). Non-ASCII or otherwise unsafe source
+symbols are UTF-8 hex encoded behind that prefix. Tests are emitted by
 :mod:`flx.backend.harness`.
 """
 
@@ -47,6 +48,7 @@ _FCMP_PRED = {"<": "olt", "<=": "ole", ">": "ogt", ">=": "oge"}
 _DIV_OP = {"/": "@__flx_idiv", "%": "@__flx_imod"}
 _CMP_PRED = {"<": "slt", "<=": "sle", ">": "sgt", ">=": "sge", "==": "eq", "!=": "ne"}
 _BUILTINS = {"assert", "assert_eq", "assert_ne", "fail", "panic"}
+_SAFE_SYMBOL_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")
 
 # External runtime declarations, prepended when tests are emitted.
 _RUNTIME_DECLS = (
@@ -129,6 +131,13 @@ def _payload_box_type(payload: tuple[Type, ...]) -> str:
 
 class BackendError(Exception):
     """Raised when the AST uses a construct the MVP backend can't lower."""
+
+
+def _flex_symbol(name: str) -> str:
+    """Return the MLIR symbol for a Flex-defined function."""
+    if name and all(ch in _SAFE_SYMBOL_CHARS for ch in name):
+        return f"flx_{name}"
+    return f"flx_$u{name.encode('utf-8').hex()}"
 
 
 @dataclass
@@ -216,7 +225,7 @@ class FunctionLowerer:
     def lower_function(self, fn: ast.FnDecl) -> str:
         fn_ty = self.functions[fn.name]
         return self._lower_callable(
-            symbol=f"flx_{fn.name}",
+            symbol=_flex_symbol(fn.name),
             params=[(p.name, t) for p, t in zip(fn.params, fn_ty.params, strict=True)],
             ret=fn_ty.ret,
             body=fn.body,
@@ -582,7 +591,7 @@ class FunctionLowerer:
             local = next((f for f in self.scopes if expr.name in f), None)
             if local is None:  # a bare (pure) top-level function reference
                 out = self._fresh()
-                self._emit(f"{out} = func.constant @flx_{expr.name} : {mlir_type(ty)}")
+                self._emit(f"{out} = func.constant @{_flex_symbol(expr.name)} : {mlir_type(ty)}")
                 return out
         binding = self._lookup(expr.name)
         if binding.kind == "val":
@@ -1144,7 +1153,7 @@ class FunctionLowerer:
                 method_ty = self.functions[symbol]
                 recv = self._materialize(self.lower_expr(expr.callee.obj), expr.callee.obj)
                 args = [recv, *(self._materialize(self.lower_expr(a), a) for a in expr.args)]
-                return self._emit_call(f"flx_{symbol}", args, method_ty)
+                return self._emit_call(_flex_symbol(symbol), args, method_ty)
             recv_ty = self.types.get(id(expr.callee.obj))
             if isinstance(recv_ty, (ListType, MapType)) and expr.callee.name in ("eq", "show"):
                 recv = self._materialize(self.lower_expr(expr.callee.obj), expr.callee.obj)
@@ -1259,7 +1268,7 @@ class FunctionLowerer:
         if symbol is not None:
             spec_ty = self.functions[symbol]
             args = [self._materialize(self.lower_expr(a), a) for a in expr.args]
-            return self._emit_call(f"flx_{symbol}", args, spec_ty)
+            return self._emit_call(_flex_symbol(symbol), args, spec_ty)
         if name in self.extern_fns:
             return self._lower_extern_call(name, expr)
         if name == "to_str":  # prelude: I64 | F64 -> String
@@ -1291,7 +1300,7 @@ class FunctionLowerer:
         if fn_ty is None:
             raise BackendError(f"call to non-function {name!r}")
         args = [self._materialize(self.lower_expr(a), a) for a in expr.args]
-        return self._emit_call(f"flx_{name}", args, fn_ty)
+        return self._emit_call(_flex_symbol(name), args, fn_ty)
 
     def _lower_builtin(self, name: str, call: ast.CallExpr) -> None:
         if not self.test_mode:
@@ -1309,8 +1318,9 @@ class FunctionLowerer:
                 # Strings compare through the Eq impl (the checker required it),
                 # and failures print the actual values.
                 equal = self._fresh()
+                string_eq = _flex_symbol("t$Eq$0$String$eq")
                 self._emit(
-                    f"{equal} = func.call @flx_t$Eq$0$String$eq({left}, {right}) : "
+                    f"{equal} = func.call @{string_eq}({left}, {right}) : "
                     f"({operand_ty}, {operand_ty}) -> i1"
                 )
                 if name == "assert_eq":
@@ -1352,7 +1362,7 @@ class FunctionLowerer:
                 # failures report generically, like any aggregate.
                 equal = self._fresh()
                 self._emit(
-                    f"{equal} = func.call @flx_{impl_symbol}({left}, {right}) : "
+                    f"{equal} = func.call @{_flex_symbol(impl_symbol)}({left}, {right}) : "
                     f"({operand_ty}, {operand_ty}) -> i1"
                 )
                 if name == "assert_eq":

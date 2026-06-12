@@ -579,8 +579,14 @@ def cmd_docs_build(
         return 1
     if not check_only:
         print(f"docs build: {len(pages)} generated page(s) current")
-        if _mdbook_available():
-            return subprocess.run(["mdbook", "build"]).returncode
+        if not _mdbook_available():
+            print(
+                "error[DOCS002]: mdbook is required to build the documentation book "
+                "(install it or run `flx docs build --check` for a generation-only check)",
+                file=sys.stderr,
+            )
+            return 1
+        return subprocess.run(["mdbook", "build"]).returncode
     return 0
 
 

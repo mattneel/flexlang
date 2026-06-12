@@ -151,9 +151,10 @@ ok Main / add works
   with path dependencies; `flx run`/`test`/`check` need no arguments inside a
   package ([Packages and Builds](https://mattneel.github.io/flexlang/packages.html));
 - **`build.flx`** — builds are Flex programs: effect-checked `target`s where
-  shelling out requires `Process`, driving the compiler requires `Fs`, calling a
-  target demands its effects, and `?` propagates failure through the memoized
-  build graph. This repo [builds itself](build.flx) with it: `flx build`;
+  argv process execution requires `Process`, shell strings require
+  `Process, Unsafe`, driving the compiler requires `Fs`, calling a target
+  demands its effects, and `?` propagates failure through the memoized build
+  graph. This repo [builds itself](build.flx) with it: `flx build`;
 - **FFI** — `extern fn` declares a C symbol's signature *and its effects* (a
   trust declaration the effect system holds callers to). I64/String cross the
   ABI; works on both backends — the interpreter calls libc via `ctypes`, so
@@ -192,6 +193,21 @@ ok Main / add works
 
 See `examples/` for `add`, `result`, `records`, `effects`, `regions`, `macros`,
 `traits`, `ffi`, `std`, and the two-package `package-demo/`.
+
+## Security model
+
+Flex is not a sandbox. Effects are type-checked capability declarations for
+review and composition; they do not isolate hostile code from the host machine.
+`flx run`, `flx test`, `flx build`, and `flx docs check` execute trusted code,
+including package dependencies, build targets, doc examples, and any declared C
+FFI calls.
+
+Build targets should prefer `exec(["cmd", "arg"])`, which spawns a process
+without shell expansion. `sh("...")` remains available for shell syntax, but it
+requires `uses { Process, Unsafe }` as an explicit shell escape hatch and should
+not be built from untrusted input.
+For high-security or offline builds, use path dependencies or vendored sources
+that have been reviewed before execution.
 
 ## Syntax highlighting
 
@@ -246,6 +262,10 @@ Run them locally with [`act`](https://github.com/nektos/act):
 act -j check -P ubuntu-latest=catthehacker/ubuntu:act-latest
 act -j docs  -P ubuntu-latest=catthehacker/ubuntu:act-latest
 ```
+
+Before publishing, run `flx release preflight`: it requires a clean git
+worktree, builds the wheel/sdist, and rejects local report/build artifacts in
+the source distribution.
 
 ## Layout
 

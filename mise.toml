@@ -55,7 +55,11 @@ description = "Print the active LLVM/MLIR toolchain"
 run = "bash scripts/toolchain-info.sh"
 
 [tasks.docs]
-description = "Build the documentation book (book/)"
+description = "Regenerate generated docs and build the documentation book (book/)"
+run = "uv run flx docs build"
+
+[tasks.docs-mdbook]
+description = "Run mdBook directly without regenerating Flex API/diagnostic pages"
 run = "mdbook build"
 
 [tasks.docs-serve]

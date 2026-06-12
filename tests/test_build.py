@@ -24,6 +24,17 @@ def _build_dir(tmp_path: Path, src: str, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.chdir(tmp_path)
 
 
+def _flx_string(value: str) -> str:
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+        .replace("\r", "\\r")
+    )
+    return f'"{escaped}"'
+
+
 # --- checking ------------------------------------------------------------------
 
 
@@ -32,14 +43,31 @@ def test_target_must_declare_process_for_sh() -> None:
     assert "EFFECT001" in codes
 
 
+def test_sh_requires_unsafe_as_well_as_process() -> None:
+    codes = _codes('module Build\ntarget oops uses { Process } { sh("true")? }\n')
+    assert "EFFECT001" in codes
+    check_and_monomorphize(
+        expand(parse('module Build\ntarget ok uses { Process, Unsafe } { sh("true")? }\n'))
+    )
+
+
+def test_target_must_declare_process_for_exec() -> None:
+    codes = _codes('module Build\ntarget oops { exec(["true"])? }\n')
+    assert "EFFECT001" in codes
+
+
 def test_target_calls_propagate_effects() -> None:
     # `all` calls `one` (Process) without declaring Process itself.
-    src = 'module Build\ntarget one uses { Process } { sh("true")? }\ntarget all { one()? }\n'
+    src = (
+        'module Build\ntarget one uses { Process, Unsafe } { sh("true")? }\ntarget all { one()? }\n'
+    )
     assert "EFFECT001" in _codes(src)
 
 
 def test_default_must_name_a_target() -> None:
-    src = 'module Build\ntarget default = nope\ntarget one uses { Process } { sh("true")? }\n'
+    src = (
+        'module Build\ntarget default = nope\ntarget one uses { Process, Unsafe } { sh("true")? }\n'
+    )
     assert "BUILD002" in _codes(src)
 
 
@@ -63,11 +91,38 @@ def test_build_runs_default_target(
 ) -> None:
     _build_dir(
         tmp_path,
-        'module Build\ntarget default = hello\ntarget hello uses { Process } { sh("true")? }\n',
+        (
+            "module Build\n"
+            "target default = hello\n"
+            'target hello uses { Process, Unsafe } { sh("true")? }\n'
+        ),
         monkeypatch,
     )
     assert run_build() == 0
     assert "build ok: hello" in capfd.readouterr().out
+
+
+def test_exec_runs_arguments_without_shell_expansion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    import sys
+
+    code = "import pathlib, sys; pathlib.Path('arg.txt').write_text(sys.argv[1], encoding='utf-8')"
+    _build_dir(
+        tmp_path,
+        (
+            "module Build\n"
+            "target default = literal\n"
+            "target literal uses { Process } {\n"
+            f"  exec([{_flx_string(sys.executable)}, {_flx_string('-c')}, "
+            f"{_flx_string(code)}, {_flx_string('$HOME')}])?\n"
+            "}\n"
+        ),
+        monkeypatch,
+    )
+    assert run_build() == 0
+    assert (tmp_path / "arg.txt").read_text(encoding="utf-8") == "$HOME"
+    assert "build ok: literal" in capfd.readouterr().out
 
 
 def test_build_failure_propagates_through_graph(
@@ -78,8 +133,8 @@ def test_build_failure_propagates_through_graph(
         (
             "module Build\n"
             "target default = all\n"
-            'target bad uses { Process } { sh("false")? }\n'
-            "target all uses { Process } { bad()? }\n"
+            'target bad uses { Process, Unsafe } { sh("false")? }\n'
+            "target all uses { Process, Unsafe } { bad()? }\n"
         ),
         monkeypatch,
     )
@@ -97,10 +152,10 @@ def test_targets_are_memoized(
         (
             "module Build\n"
             "target default = all\n"
-            f'target shared uses {{ Process }} {{ sh("echo x >> {marker}")? }}\n'
-            "target a uses { Process } { shared()? }\n"
-            "target b uses { Process } { shared()? }\n"
-            "target all uses { Process } { a()?\n  b()? }\n"
+            f'target shared uses {{ Process, Unsafe }} {{ sh("echo x >> {marker}")? }}\n'
+            "target a uses { Process, Unsafe } { shared()? }\n"
+            "target b uses { Process, Unsafe } { shared()? }\n"
+            "target all uses { Process, Unsafe } { a()?\n  b()? }\n"
         ),
         monkeypatch,
     )
@@ -113,7 +168,11 @@ def test_explain_lists_targets_and_effects(
 ) -> None:
     _build_dir(
         tmp_path,
-        ('module Build\ntarget default = test\ntarget test uses { Fs, Process } { sh("true")? }\n'),
+        (
+            "module Build\n"
+            "target default = test\n"
+            'target test uses { Fs, Process, Unsafe } { sh("true")? }\n'
+        ),
         monkeypatch,
     )
     assert run_build(explain=True) == 0
@@ -127,7 +186,7 @@ def test_unknown_target_is_reported(
 ) -> None:
     _build_dir(
         tmp_path,
-        'module Build\ntarget one uses { Process } { sh("true")? }\n',
+        'module Build\ntarget one uses { Process, Unsafe } { sh("true")? }\n',
         monkeypatch,
     )
     assert run_build("nope") == 2
@@ -169,8 +228,8 @@ def test_keyword_named_target_is_callable(
         (
             "module Build\n"
             "target default = ci\n"
-            'target test uses { Process } { sh("true")? }\n'
-            "target ci uses { Process } { test()? }\n"
+            'target test uses { Process, Unsafe } { sh("true")? }\n'
+            "target ci uses { Process, Unsafe } { test()? }\n"
         ),
         monkeypatch,
     )
@@ -195,7 +254,7 @@ def test_sh_not_available_in_build_helper_fns() -> None:
     src = (
         "module Build\n"
         'fn helper() -> I64 uses { Process } = { let r = sh("true")\n  0 }\n'
-        'target t uses { Process } { sh("true")? }\n'
+        'target t uses { Process, Unsafe } { sh("true")? }\n'
     )
     assert "NAME001" in _codes(src)
 
@@ -210,7 +269,7 @@ def test_targets_rejected_outside_build_flx(
     lib = tmp_path / "Lib"
     lib.mkdir()
     (lib / "B.flx").write_text(
-        'module Lib.B\ntarget x uses { Process } { sh("true")? }\n', encoding="utf-8"
+        'module Lib.B\ntarget x uses { Process, Unsafe } { sh("true")? }\n', encoding="utf-8"
     )
     main = tmp_path / "main.flx"
     main.write_text("module Main\nimport Lib.B\nfn main() -> I64 = { 0 }\n", encoding="utf-8")
@@ -219,14 +278,16 @@ def test_targets_rejected_outside_build_flx(
 
 
 def test_reserved_target_names_rejected() -> None:
-    assert "BUILD006" in _codes('module Build\ntarget sh uses { Process } { sh("true")? }\n')
+    assert "BUILD006" in _codes(
+        'module Build\ntarget sh uses { Process, Unsafe } { sh("true")? }\n'
+    )
 
 
 def test_duplicate_default_rejected() -> None:
     src = (
         "module Build\ntarget default = a\ntarget default = b\n"
-        'target a uses { Process } { sh("true")? }\n'
-        'target b uses { Process } { sh("true")? }\n'
+        'target a uses { Process, Unsafe } { sh("true")? }\n'
+        'target b uses { Process, Unsafe } { sh("true")? }\n'
     )
     assert "BUILD007" in _codes(src)
 
@@ -240,7 +301,7 @@ def test_macros_expand_inside_targets(
             "module Build\n"
             "macro noisy(c) = quote { sh(unquote(c))? }\n"
             "target default = t\n"
-            'target t uses { Process } { noisy("true") }\n'
+            'target t uses { Process, Unsafe } { noisy("true") }\n'
         ),
         monkeypatch,
     )
@@ -254,7 +315,7 @@ def test_file_named_like_target_does_not_hijack(
 
     _build_dir(
         tmp_path,
-        'module Build\ntarget check uses { Process } { sh("true")? }\n',
+        'module Build\ntarget check uses { Process, Unsafe } { sh("true")? }\n',
         monkeypatch,
     )
     (tmp_path / "check").write_text("not a flex file", encoding="utf-8")

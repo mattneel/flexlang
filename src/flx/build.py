@@ -8,7 +8,7 @@ their effects, checked by the same checker as everything else,
     target default = test
 
     target check uses { Process } {
-      sh("uv run ruff check src tests")?
+      exec(["uv", "run", "ruff", "check", "src", "tests"])?
     }
 
     target test uses { Fs, Process } {
@@ -16,22 +16,25 @@ their effects, checked by the same checker as everything else,
       sh("uv run pytest")?
     }
 
-A target that shells out without declaring `Process` fails type-checking
-(EFFECT001); calling another target demands that target's effects, so effects
-propagate up the build graph; `?` propagates a failed step out of the target.
+A target that shells out without declaring `Process` and `Unsafe` fails
+type-checking (EFFECT001); calling another target demands that target's
+effects, so effects propagate up the build graph; `?` propagates a failed step
+out of the target.
 `flx build --explain` reports each target's declared effects.
 
 Targets execute on the tree-walking interpreter (the same engine that runs
 `flx run`/`test` and evaluates `package.flx` manifests), extended with two
-intrinsics: `sh(cmd)` (requires Process) and `flx.check/test/run/expand/build`
-on a file glob (require Fs). Each target runs at most once per invocation, in
-dependency order. The surface language is real, so a future self-hosted build
-runner changes nothing for users.
+intrinsics: `exec(argv)` (requires Process), `sh(cmd)` (requires Process and
+Unsafe), and `flx.check/test/run/expand/build` on a file glob (require Fs). Each
+target runs at most once per invocation, in dependency order. The surface
+language is real, so a future self-hosted build runner changes nothing for
+users.
 """
 
 from __future__ import annotations
 
 import glob as globmod
+import shlex
 import subprocess
 import sys
 from collections.abc import Callable
@@ -95,6 +98,9 @@ class BuildInterpreter(interp.Interpreter):
             if callee.name == "sh":
                 command = self.eval(expr.args[0], env)
                 return self._sh(str(command))
+            if callee.name == "exec":
+                argv = self.eval(expr.args[0], env)
+                return self._exec(argv)
         if (
             isinstance(callee, ast.MemberExpr)
             and isinstance(callee.obj, ast.NameExpr)
@@ -109,6 +115,18 @@ class BuildInterpreter(interp.Interpreter):
         print(f"$ {command}")
         sys.stdout.flush()
         code = subprocess.run(command, shell=True).returncode
+        return _OK if code == 0 else _err(f"command exited with code {code}")
+
+    def _exec(self, argv: object) -> interp.Variant:
+        if not isinstance(argv, list) or not argv:
+            return _err("exec expects a non-empty List<String>")
+        args = [str(arg) for arg in argv]
+        print("$ " + " ".join(shlex.quote(arg) for arg in args))
+        sys.stdout.flush()
+        try:
+            code = subprocess.run(args).returncode
+        except OSError as exc:
+            return _err(str(exc))
         return _OK if code == 0 else _err(f"command exited with code {code}")
 
     def _flx_op(self, op: str, pattern: str) -> interp.Variant:

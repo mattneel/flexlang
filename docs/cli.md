@@ -13,9 +13,11 @@ LLVM/MLIR backend.
 | `flx test [path]` | Discover, compile, and run tests | ✅ |
 | `flx docs check [path]` | Prove doc examples and expected errors | ✅ |
 | `flx docs build [path]` | Render doc declarations into Markdown | ✅ |
+| `flx deps <lock|vendor|verify>` | Lock, vendor, and verify package dependencies | ✅ |
 | `flx expand <file>` | Show comptime/macro/derive expansion | ✅ |
 | `flx highlight <file>` | Syntax-highlight `.flx` | ✅ |
 | `flx build <file> -o <bin>` | Build a native executable | working |
+| `flx release preflight` | Check release readiness before publish | ✅ |
 | `flx emit-hir <file>` | Emit typed HIR | stub |
 | `flx emit-mir <file>` | Emit MIR | stub |
 | `flx explain-effects <file>` | Explain effects | stub |
@@ -45,6 +47,48 @@ Everything after the file is passed to the program as `Env.argv()` user
 arguments; argv[0] is excluded so interpreter and native binaries agree. Put
 `flx` flags before the file. A leading `--` after the file is stripped, so
 `flx run tool.flx -- --flag` passes `--flag`.
+
+## `flx test`
+
+```sh
+flx test examples/add.flx
+flx test examples --interpret
+flx test src --native --filter parser
+flx test examples/add.flx --format json
+flx test examples/add.flx --format junit
+```
+
+When the path is a directory, `flx test` recursively runs every `.flx` source
+file under it, skipping `package.flx` manifests and `build.flx` build files.
+Each discovered source file is still checked as a normal entry, including any
+package dependency roots found beside it.
+
+`--format pretty` is the default. `json` and `junit` are available on the
+interpreter backend for CI consumers that need machine-readable test reports.
+The native test harness currently emits pretty output only.
+
+## `flx deps`
+
+```sh
+flx deps lock
+flx deps verify
+flx deps vendor
+```
+
+`lock` writes `flex.lock` with exact content hashes for path dependencies.
+`verify` checks the current dependency trees against that lock. `vendor` copies
+dependencies into `vendor/` and records those paths in the lockfile, so a
+reviewed package can build offline without changing `package.flx`.
+
+## `flx release`
+
+```sh
+flx release preflight
+```
+
+The release preflight fails on a dirty git worktree, builds the wheel/sdist in
+a temporary directory, and rejects source distributions that contain local
+study/review reports or generated build output.
 
 ## `flx docs`
 

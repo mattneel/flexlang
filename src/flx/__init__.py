@@ -1,3 +1,8 @@
 """Flex — a native functional systems language (prototype compiler)."""
 
-__version__ = "0.0.1"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("flexlang")
+except PackageNotFoundError:
+    __version__ = "0+unknown"

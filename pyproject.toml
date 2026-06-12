@@ -41,11 +41,6 @@ flx-mdbook = "flx.mdbook:main"
 [project.entry-points."pygments.lexers"]
 flex = "flx.highlight.lexer:FlexLexer"
 
-[project.optional-dependencies]
-# Optional direct-LLVM-IR builder backend. Bundles its own LLVM, so it is
-# independent of (and may lag) the system MLIR/LLVM 22 toolchain.
-llvmlite = ["llvmlite>=0.47.0"]
-
 [dependency-groups]
 dev = [
     "pytest>=8.4",
@@ -59,6 +54,33 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/flx"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "LICENSE",
+    "README.md",
+    "pyproject.toml",
+    "uv.lock",
+    "book.toml",
+    "build.flx",
+    "src/flx/**",
+    "docs/**",
+    "examples/**",
+    "scripts/**",
+    "tests/**",
+]
+exclude = [
+    "STUDY-*.md",
+    "ADVERSARIAL_REVIEW.md",
+    "book/**",
+    "dist/**",
+    ".venv/**",
+    ".pytest_cache/**",
+    ".mypy_cache/**",
+    ".ruff_cache/**",
+    "__pycache__/**",
+    "*.pyc",
+]
 
 [tool.uv]
 package = true
@@ -76,7 +98,7 @@ strict = true
 files = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["lark.*", "xdsl.*", "llvmlite.*", "pygments.*"]
+module = ["lark.*", "xdsl.*", "pygments.*"]
 ignore_missing_imports = true
 
 # Pygments ships no py.typed, so RegexLexer resolves to Any; allow subclassing

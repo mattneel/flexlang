@@ -250,7 +250,7 @@ def test_docs_check_flags_orphaned_generated_page(
     assert docsengine.cmd_docs_build(check_only=True, docs_dir=docs) == 1
     # ... and write mode deletes it.
     monkeypatch.setattr(docsengine, "_mdbook_available", lambda: False)
-    assert docsengine.cmd_docs_build(check_only=False, docs_dir=docs) == 0
+    assert docsengine.cmd_docs_build(check_only=False, docs_dir=docs) == 1
     assert not orphan.exists()
 
 

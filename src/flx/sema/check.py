@@ -1669,6 +1669,19 @@ class Checker:
                     )
                 else:
                     self._err("TYPE006", "sh expects 1 argument (the command)", expr.span)
+                self._require_effects({"Process", "Unsafe"}, expr.span)
+                return self._target_result(expr.span)
+            if callee.name == "exec" and self.in_target:
+                # Build intrinsic: run an argv vector without going through a shell.
+                if len(expr.args) == 1:
+                    self._expect(
+                        ListType(STRING),
+                        self._check_expr(expr.args[0]),
+                        expr.args[0].span,
+                        "argument",
+                    )
+                else:
+                    self._err("TYPE006", "exec expects 1 argument (the argv list)", expr.span)
                 self._require_effects({"Process"}, expr.span)
                 return self._target_result(expr.span)
             if callee.name in self.ctors:  # constructor call, e.g. Ok(x)

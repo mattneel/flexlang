@@ -100,6 +100,29 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="Check the optional native backend toolchain (LLVM/MLIR)")
 
+    deps_cmd = sub.add_parser("deps", help="Lock, vendor, or verify package dependencies")
+    deps_sub = deps_cmd.add_subparsers(dest="deps_command", metavar="<deps-command>")
+    for name, help_text in {
+        "lock": "Write flex.lock with content hashes for path dependencies",
+        "vendor": "Copy locked path dependencies into vendor/ and write flex.lock",
+        "verify": "Verify dependencies against flex.lock",
+    }.items():
+        cmd = deps_sub.add_parser(name, help=help_text)
+        cmd.add_argument(
+            "path",
+            nargs="?",
+            help="optional package directory or package.flx (default: current package)",
+        )
+
+    release_cmd = sub.add_parser("release", help="Release maintenance commands")
+    release_sub = release_cmd.add_subparsers(dest="release_command", metavar="<release-command>")
+    preflight = release_sub.add_parser("preflight", help="Check release readiness before publish")
+    preflight.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="run artifact checks even when the git working tree is dirty",
+    )
+
     docs_cmd = sub.add_parser("docs", help="Check, build, or explain the documentation")
     docs_sub = docs_cmd.add_subparsers(dest="docs_command", metavar="<docs-command>")
     docs_check = docs_sub.add_parser(
@@ -170,6 +193,13 @@ def _run_highlight(path: str, fmt: str, style: str) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    if not __debug__:
+        print(
+            "flx: Python optimized mode (-O) is not supported; "
+            "compiler assertions guard internal invariants",
+            file=sys.stderr,
+        )
+        return 1
     try:
         code = _dispatch(argv)
         # Flush HERE so a broken pipe surfaces as BrokenPipeError inside this
@@ -204,6 +234,24 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "doctor":
         return driver.cmd_doctor()
+    if args.command == "deps":
+        from flx import package as pkg
+
+        if args.deps_command == "lock":
+            return pkg.cmd_deps_lock(args.path)
+        if args.deps_command == "vendor":
+            return pkg.cmd_deps_vendor(args.path)
+        if args.deps_command == "verify":
+            return pkg.cmd_deps_verify(args.path)
+        print("usage: flx deps <lock|vendor|verify>", file=sys.stderr)
+        return 2
+    if args.command == "release":
+        from flx import release
+
+        if args.release_command == "preflight":
+            return release.cmd_preflight(allow_dirty=args.allow_dirty)
+        print("usage: flx release <preflight>", file=sys.stderr)
+        return 2
     if args.command == "docs":
         from flx import docsengine
 
@@ -255,13 +303,18 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
             return driver.cmd_build(None, args.output)
         return build_runner.run_build(args.path, args.explain)
     if args.command == "test":
-        if args.format != "pretty":
-            # Advertised but unimplemented output would silently feed pretty
-            # text to a CI pipeline expecting JSON — refuse loudly instead.
-            print(f"flx test --format {args.format}: not yet implemented", file=sys.stderr)
+        if args.native and args.format != "pretty":
+            print(
+                f"flx test --format {args.format}: only the interpreter supports structured output",
+                file=sys.stderr,
+            )
             return 2
         code = driver.cmd_test(
-            args.path, args.filter, interpret=not args.native, native=args.native
+            args.path,
+            args.filter,
+            interpret=not args.native,
+            native=args.native,
+            fmt=args.format,
         )
         if getattr(args, "docs", False) and args.path:
             from flx import docsengine

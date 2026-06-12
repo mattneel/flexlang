@@ -44,6 +44,13 @@ def test_emit_arithmetic_and_call() -> None:
     assert "func.call @flx_add(" in out
 
 
+def test_emit_mangles_unicode_function_names() -> None:
+    out = _emit("fn café() -> I64 = { 7 }\nfn main() -> I64 = { café() }\n")
+    assert "café" not in out
+    assert "func.func @flx_" in out
+    assert "func.call @flx_" in out
+
+
 def test_emit_while_uses_memref_and_cf() -> None:
     out = _emit("fn f(n: I64) -> I64 = { mut t = 0\n while t < n { t = t + 1 }\n t }")
     assert "memref.alloca() : memref<i64>" in out
@@ -74,6 +81,11 @@ def test_run_hello_exit_code(tmp_path: Path) -> None:
 @native
 def test_run_add_example() -> None:
     assert driver.cmd_run("examples/add.flx") == 42
+
+
+@native
+def test_run_unicode_function_name_native(tmp_path: Path) -> None:
+    assert _run_source(tmp_path, "fn café() -> I64 = { 7 }\nfn main() -> I64 = { café() }\n") == 7
 
 
 @native

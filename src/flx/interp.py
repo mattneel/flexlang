@@ -15,10 +15,14 @@ an ADT value -> :class:`Variant`. Control flow that escapes an expression — ea
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
+import io
+import json
 import math
 import re
 import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -273,6 +277,9 @@ def _print_raw(message: str, end: str = "\n") -> None:
     if message.isascii() and end.isascii():
         print(message, end=end, flush=True)
         return
+    if not hasattr(sys.stdout, "buffer"):
+        print(message, end=end, flush=True)
+        return
     sys.stdout.flush()
     raw = (message + end).encode("utf-8", "surrogateescape")
     sys.stdout.buffer.write(raw)
@@ -433,6 +440,83 @@ class Interpreter:
                 self.in_test = False
         print(f"\n{passed} passed, {failed} failed", flush=True)
         return 0 if failed == 0 else 1
+
+    def run_tests_structured(self, test_filter: str | None, fmt: str) -> int:
+        results = self.test_results(test_filter)
+        failed = sum(1 for r in results if r["status"] == "failed")
+        if fmt == "json":
+            payload = {
+                "summary": {
+                    "total": len(results),
+                    "passed": len(results) - failed,
+                    "failed": failed,
+                },
+                "tests": results,
+            }
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        elif fmt == "junit":
+            suite = ET.Element(
+                "testsuite",
+                {
+                    "name": self.checked.module.name,
+                    "tests": str(len(results)),
+                    "failures": str(failed),
+                },
+            )
+            for result in results:
+                case = ET.SubElement(
+                    suite,
+                    "testcase",
+                    {"classname": str(result["module"]), "name": str(result["name"])},
+                )
+                if result["output"]:
+                    out = ET.SubElement(case, "system-out")
+                    out.text = str(result["output"])
+                if result["status"] == "failed":
+                    fail = ET.SubElement(case, "failure", {"message": str(result["message"])})
+                    fail.text = str(result["message"])
+            print(ET.tostring(suite, encoding="unicode"))
+        else:
+            raise FlexRuntimeError(f"unknown test format {fmt!r}")
+        return 0 if failed == 0 else 1
+
+    def test_results(self, test_filter: str | None) -> list[dict[str, object]]:
+        tests = [
+            t for t in self.checked.module.tests if test_filter is None or test_filter in t.name
+        ]
+        default_module = self.checked.module.name
+        results: list[dict[str, object]] = []
+        for test in tests:
+            module_name = self.checked.file_module.get(test.span.file, default_module)
+            self.in_test = True
+            output = io.StringIO()
+            status = "passed"
+            message = ""
+            try:
+                with contextlib.redirect_stdout(output):
+                    self.exec_block(test.body, _Env())
+            except _TestFail as fail:
+                status = "failed"
+                message = fail.reason.strip()
+            except _Return:
+                status = "failed"
+                message = "explicit failure"
+            except FlexRuntimeError as exc:
+                status = "failed"
+                message = f"runtime error: {exc}"
+            finally:
+                self.in_test = False
+            results.append(
+                {
+                    "module": module_name,
+                    "name": test.name,
+                    "label": f"{module_name} / {test.name}",
+                    "status": status,
+                    "message": message,
+                    "output": output.getvalue(),
+                }
+            )
+        return results
 
     # --- functions / blocks ---------------------------------------------------
 
@@ -1055,5 +1139,13 @@ def run_tests(checked: CheckResult, test_filter: str | None = None) -> int:
     _ensure_recursion_headroom()
     try:
         return Interpreter(checked).run_tests(test_filter)
+    except RecursionError:
+        raise FlexRuntimeError("stack overflow (recursion too deep)") from None
+
+
+def run_tests_structured(checked: CheckResult, test_filter: str | None, fmt: str) -> int:
+    _ensure_recursion_headroom()
+    try:
+        return Interpreter(checked).run_tests_structured(test_filter, fmt)
     except RecursionError:
         raise FlexRuntimeError("stack overflow (recursion too deep)") from None

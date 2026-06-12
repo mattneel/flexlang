@@ -5,6 +5,7 @@ builtin-Option VIS001 cascade, the dead --format flag, and flx test --docs
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -140,16 +141,22 @@ def test_long_byte_panic_message_parity(tmp_path: Path) -> None:
 # --- CLI honesty ------------------------------------------------------------------------------
 
 
-def test_unimplemented_test_format_is_rejected(tmp_path: Path) -> None:
+def test_structured_test_formats_are_implemented(tmp_path: Path) -> None:
     path = _write(tmp_path, 'test "t" { assert_eq(1, 1) }\n')
-    for fmt in ("json", "junit"):
-        proc = subprocess.run(
-            [sys.executable, "-m", "flx", "test", "--format", fmt, path],
-            capture_output=True,
-            text=True,
-        )
-        assert proc.returncode == 2
-        assert "not yet implemented" in proc.stderr
+    js = subprocess.run(
+        [sys.executable, "-m", "flx", "test", "--format", "json", path],
+        capture_output=True,
+        text=True,
+    )
+    assert js.returncode == 0
+    assert json.loads(js.stdout)["summary"] == {"total": 1, "passed": 1, "failed": 0}
+    junit = subprocess.run(
+        [sys.executable, "-m", "flx", "test", "--format", "junit", path],
+        capture_output=True,
+        text=True,
+    )
+    assert junit.returncode == 0
+    assert "<testsuite" in junit.stdout
     ok = subprocess.run(
         [sys.executable, "-m", "flx", "test", "--format", "pretty", path],
         capture_output=True,

@@ -82,6 +82,15 @@ def _resolve_entry(path: str | None) -> tuple[str, tuple[Path, ...]] | None:
     return str(manifest.dir / manifest.entry), roots
 
 
+def _discover_test_files(path: Path) -> list[Path]:
+    """Flex source files under a directory, excluding project/build metadata."""
+    return [
+        file
+        for file in sorted(path.rglob("*.flx"))
+        if file.name not in {pkg.MANIFEST_FILE, "build.flx"}
+    ]
+
+
 def _load(path: str, roots: tuple[Path, ...] = ()) -> ProgramInfo | FlexError:
     try:
         return load_program(path, roots)
@@ -335,7 +344,25 @@ def cmd_test(
     test_filter: str | None = None,
     interpret: bool = False,
     native: bool = False,
+    fmt: str = "pretty",
 ) -> int:
+    if path is not None:
+        candidate = Path(path)
+        if candidate.is_dir():
+            if fmt != "pretty":
+                print("flx test: structured output requires a single .flx file", file=sys.stderr)
+                return 2
+            files = _discover_test_files(candidate)
+            status = 0
+            for file in files:
+                code = cmd_test(str(file), test_filter, interpret=interpret, native=native, fmt=fmt)
+                if code != 0:
+                    status = code
+            if status == 0 and not files:
+                print("running 0 tests\n")
+                print("0 passed, 0 failed")
+            return status
+
     resolved = _resolve_entry(path)
     if resolved is None:
         return 1
@@ -350,11 +377,16 @@ def cmd_test(
         return 1
     if not choice:
         try:
+            if fmt != "pretty":
+                return interp.run_tests_structured(result, test_filter, fmt)
             return interp.run_tests(result, test_filter)
         except interp.FlexRuntimeError as exc:
             sys.stdout.flush()  # emit buffered output before the error (match native)
             print(f"flx: runtime error: {exc}", file=sys.stderr)
             return 1
+    if fmt != "pretty":
+        print("flx test: structured output is only available on the interpreter", file=sys.stderr)
+        return 2
 
     module = result.module
     selected = [
