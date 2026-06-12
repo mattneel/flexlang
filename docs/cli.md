@@ -13,6 +13,8 @@ LLVM/MLIR backend.
 | `flx test [path]` | Discover, compile, and run tests | ✅ |
 | `flx docs check [path]` | Prove doc examples and expected errors | ✅ |
 | `flx docs build [path]` | Render doc declarations into Markdown | ✅ |
+| `flx new <dir>` | Create a runnable package skeleton | ✅ |
+| `flx add <name> <path>` | Add/update a path dependency in `package.flx` | ✅ |
 | `flx deps <lock|vendor|verify>` | Lock, vendor, and verify package dependencies | ✅ |
 | `flx expand <file>` | Show comptime/macro/derive expansion | ✅ |
 | `flx fmt <path...>` | Format Flex source files | ✅ |
@@ -84,6 +86,20 @@ flx fmt --stdout examples/add.flx
 `flx fmt` rewrites `.flx` files into the canonical source style. A directory
 path is expanded recursively. `--check` reports files that would change without
 writing them, and `--stdout` prints one formatted file without modifying it.
+
+## `flx new` / `flx add`
+
+```sh
+flx new hello
+cd hello
+flx test
+flx add Mathlib ../mathlib
+```
+
+`flx new` creates `package.flx` and `main.flx`; the package is immediately
+runnable with no path argument (`flx run`, `flx test`, `flx check`). `flx add`
+loads the current manifest, adds or updates one path dependency, and rewrites
+`package.flx` in the canonical manifest shape.
 
 ## `flx deps`
 

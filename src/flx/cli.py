@@ -118,6 +118,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="write formatted source to stdout instead of modifying the file",
     )
 
+    new_cmd = sub.add_parser("new", help="Create a new Flex package")
+    new_cmd.add_argument("path", help="directory to create")
+    new_cmd.add_argument("--name", help="package name (default: directory name)")
+
+    add_cmd = sub.add_parser("add", help="Add or update a path dependency in package.flx")
+    add_cmd.add_argument("name", help="dependency name")
+    add_cmd.add_argument("path", help="dependency directory, relative to package.flx")
+    add_cmd.add_argument(
+        "--package",
+        dest="package_path",
+        help="package directory or package.flx to edit (default: current package)",
+    )
+
     deps_cmd = sub.add_parser("deps", help="Lock, vendor, or verify package dependencies")
     deps_sub = deps_cmd.add_subparsers(dest="deps_command", metavar="<deps-command>")
     for name, help_text in {
@@ -254,6 +267,14 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
         return driver.cmd_doctor()
     if args.command == "fmt":
         return driver.cmd_fmt(args.paths, check=args.check, stdout=args.stdout)
+    if args.command == "new":
+        from flx import package as pkg
+
+        return pkg.cmd_new(args.path, name=args.name)
+    if args.command == "add":
+        from flx import package as pkg
+
+        return pkg.cmd_add(args.name, args.path, args.package_path)
     if args.command == "deps":
         from flx import package as pkg
 

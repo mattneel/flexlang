@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from flx import driver
+from flx.cli import main as cli_main
 from flx.diagnostics import FlexError
 from flx.package import dependency_roots, load_manifest
 
@@ -247,3 +248,58 @@ def test_ordinary_programs_cannot_see_manifest_types(tmp_path: Path) -> None:
     flx = tmp_path / "prog.flx"
     flx.write_text(src, encoding="utf-8")
     assert driver.cmd_check(str(flx)) == 1  # TYPE014: no record type matches
+
+
+def test_new_creates_runnable_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    app = tmp_path / "hello-app"
+    assert cli_main(["new", str(app)]) == 0
+    assert (app / "package.flx").is_file()
+    assert (app / "main.flx").is_file()
+    manifest = load_manifest(app / "package.flx")
+    assert (manifest.name, manifest.version, manifest.entry) == ("hello-app", "0.1.0", "main.flx")
+
+    monkeypatch.chdir(app)
+    assert cli_main(["check"]) == 0
+    assert cli_main(["test", "--interpret"]) == 0
+    out = capsys.readouterr().out
+    assert "created" in out
+    assert "ok Main / main returns zero" in out
+
+
+def test_new_refuses_nonempty_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "keep.txt").write_text("do not overwrite", encoding="utf-8")
+    assert cli_main(["new", str(app)]) == 1
+    assert "not empty" in capsys.readouterr().err
+
+
+def test_add_dependency_updates_manifest_and_imports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = tmp_path / "app"
+    mathlib = tmp_path / "mathlib"
+    _write(
+        mathlib,
+        {
+            "package.flx": LIB_MANIFEST,
+            "Mathlib.flx": LIB_MODULE,
+        },
+    )
+    assert cli_main(["new", str(app)]) == 0
+    monkeypatch.chdir(app)
+    assert cli_main(["add", "Mathlib", "../mathlib"]) == 0
+    manifest = load_manifest(app / "package.flx")
+    assert len(manifest.dependencies) == 1
+    assert manifest.dependencies[0].name == "Mathlib"
+    assert manifest.dependencies[0].path == "../mathlib"
+
+    (app / "main.flx").write_text(
+        "module Main\nimport Mathlib\nfn main() -> I64 = { square(7) }\n",
+        encoding="utf-8",
+    )
+    assert cli_main(["run", "--quiet-status"]) == 49

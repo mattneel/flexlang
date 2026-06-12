@@ -45,6 +45,17 @@ flx test         # tests it
 flx check        # checks it (and `flx check package.flx` validates the manifest)
 ```
 
+Create the package skeleton directly from the CLI:
+
+```sh
+flx new hello
+cd hello
+flx test
+```
+
+`flx new` writes a canonical `package.flx` plus a tiny `main.flx` with a test,
+so the package is runnable immediately.
+
 ### Dependencies
 
 Dependencies are **path dependencies** today. Each names a directory that
@@ -63,10 +74,14 @@ own transitive imports visible to your code unless you import those modules too.
 Lock and vendor commands make path dependencies reproducible:
 
 ```sh
+flx add Mathlib ../mathlib
 flx deps lock      # write flex.lock with dependency content hashes
 flx deps verify    # verify current dependency trees against flex.lock
 flx deps vendor    # copy dependencies into vendor/ and write vendor paths to flex.lock
 ```
+
+`flx add <name> <path>` updates `package.flx` with a path dependency, replacing
+an existing dependency with the same name.
 
 When `flex.lock` exists, Flex verifies dependency hashes during import-root
 resolution. If a lock entry has a `vendor` path and that directory exists, Flex

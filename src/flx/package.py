@@ -49,6 +49,7 @@ from flx.types import STRING, ListType, RecordType
 MANIFEST_FILE = "package.flx"
 LOCK_FILE = "flex.lock"
 VENDOR_DIR = "vendor"
+DEFAULT_VERSION = "0.1.0"
 _HASH_SKIP_DIRS = {
     ".git",
     ".mypy_cache",
@@ -89,6 +90,49 @@ class PackageManifest:
 
 def _err(code: str, message: str, *, help: str | None = None) -> FlexError:
     return FlexError([Diagnostic(code, message, None, help=help)])
+
+
+def _flex_string(value: str) -> str:
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
+
+
+def _manifest_source(
+    name: str, version: str, entry: str, dependencies: tuple[PackageDep, ...]
+) -> str:
+    if dependencies:
+        dep_lines = [
+            f"      {{ name = {_flex_string(dep.name)}, path = {_flex_string(dep.path)} }}"
+            for dep in dependencies
+        ]
+        deps = "[\n" + ",\n".join(dep_lines) + "\n    ]"
+    else:
+        deps = "[]"
+    return (
+        "module Package\n\n"
+        "fn manifest() -> Manifest = {\n"
+        "  {\n"
+        f"    name = {_flex_string(name)},\n"
+        f"    version = {_flex_string(version)},\n"
+        f"    entry = {_flex_string(entry)},\n"
+        f"    dependencies = {deps}\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+def _main_source() -> str:
+    return (
+        "module Main\n\n"
+        "fn main() -> I64 = { 0 }\n\n"
+        'test "main returns zero" { assert_eq(main(), 0) }\n'
+    )
 
 
 def find_package(start: Path | None = None) -> Path | None:
@@ -355,6 +399,49 @@ def _copy_package(src: Path, dst: Path) -> None:
     shutil.copytree(src, dst, ignore=ignore)
 
 
+def new_package(path: str, *, name: str | None = None) -> Path:
+    root = Path(path)
+    if root.exists() and not root.is_dir():
+        raise _err("PKG009", f"{root} exists and is not a directory")
+    if root.exists() and any(root.iterdir()):
+        raise _err("PKG009", f"{root} is not empty")
+    package_name = name if name is not None else (root.name or "app")
+    if not package_name:
+        raise _err("PKG009", "package name cannot be empty")
+    root.mkdir(parents=True, exist_ok=True)
+    entry = "main.flx"
+    (root / MANIFEST_FILE).write_text(
+        _manifest_source(package_name, DEFAULT_VERSION, entry, ()), encoding="utf-8"
+    )
+    (root / entry).write_text(_main_source(), encoding="utf-8")
+    return root
+
+
+def add_dependency(dep_name: str, dep_path: str, package_path: str | None = None) -> Path:
+    if not dep_name:
+        raise _err("PKG009", "dependency name cannot be empty")
+    if not dep_path:
+        raise _err("PKG009", "dependency path cannot be empty")
+    manifest = _root_manifest(package_path)
+    dep_dir = (manifest.dir / dep_path).resolve()
+    if not dep_dir.is_dir():
+        raise _err("PKG004", f"dependency {dep_name!r}: no such directory {dep_dir}")
+    deps = list(manifest.dependencies)
+    replacement = PackageDep(dep_name, dep_path)
+    for i, dep in enumerate(deps):
+        if dep.name == dep_name:
+            deps[i] = replacement
+            break
+    else:
+        deps.append(replacement)
+    manifest_file = manifest.dir / MANIFEST_FILE
+    manifest_file.write_text(
+        _manifest_source(manifest.name, manifest.version, manifest.entry, tuple(deps)),
+        encoding="utf-8",
+    )
+    return manifest_file
+
+
 def lock_deps(path: str | None = None) -> Path:
     manifest = _root_manifest(path)
     return _write_lock(manifest, _lock_payload(manifest, vendor=False))
@@ -415,4 +502,26 @@ def cmd_deps_verify(path: str | None = None) -> int:
             print(f"error[{diag.code}]: {diag.message}", file=sys.stderr)
         return 1
     print("dependencies verified")
+    return 0
+
+
+def cmd_new(path: str, *, name: str | None = None) -> int:
+    try:
+        root = new_package(path, name=name)
+    except FlexError as err:
+        for diag in err.diagnostics:
+            print(f"error[{diag.code}]: {diag.message}", file=sys.stderr)
+        return 1
+    print(f"created {root}")
+    return 0
+
+
+def cmd_add(dep_name: str, dep_path: str, package_path: str | None = None) -> int:
+    try:
+        manifest = add_dependency(dep_name, dep_path, package_path)
+    except FlexError as err:
+        for diag in err.diagnostics:
+            print(f"error[{diag.code}]: {diag.message}", file=sys.stderr)
+        return 1
+    print(f"added {dep_name} -> {dep_path} in {manifest}")
     return 0
