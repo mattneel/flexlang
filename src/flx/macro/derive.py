@@ -1,8 +1,20 @@
 """`derive(Eq)` / `derive(Show)` code generation.
 
-Generates real `FnDecl`s (field-by-field for records, match-based for ADTs)
-that flow through the normal checker/backend. They appear in `flx expand`.
-Generic types and unsupported field types are reported, not mis-generated.
+Generates real `FnDecl`s that flow through the normal checker/backend (they
+appear in `flx expand`). The generators are TYPE-DRIVEN over the declared
+field/payload type expressions:
+
+* slot-comparable types (scalars, enums, inline-payload ADTs, records of
+  those) compare structurally with `==` — exactly what the backends lower;
+* String compares through the Eq trait (`import Std.Str`);
+* records/ADTs that are NOT structurally comparable compare through THEIR
+  `eq` impl, so nested derives compose;
+* List fields get generated structural helper functions (element-wise loops)
+  — list types cannot carry impls, so derive writes the code instead;
+* String-carrying ADTs get a match-based equality, arm by arm.
+
+Generic types are reported (DER004), not mis-generated; Map fields are
+rejected with the reason (reference semantics).
 """
 
 from __future__ import annotations
@@ -17,18 +29,29 @@ if TYPE_CHECKING:
 
 _SUPPORTED = {"Eq", "Show"}
 
+_SCALARS = {"I64", "F64", "Bool", "Unit"}
+
 
 def run_derives(module: ast.Module, exp: Expander) -> list[ast.Item]:
     out: list[ast.Item] = []
+    gen = _HelperGen(exp)
     for record in module.records:
-        out.extend(_derive_type(record.name, record.type_params, record.span, record.derives, exp))
+        out.extend(
+            _derive_type(record.name, record.type_params, record.span, record.derives, exp, gen)
+        )
     for adt in module.adts:
-        out.extend(_derive_type(adt.name, adt.type_params, adt.span, adt.derives, exp))
+        out.extend(_derive_type(adt.name, adt.type_params, adt.span, adt.derives, exp, gen))
+    out.extend(gen.helpers.values())
     return out
 
 
 def _derive_type(
-    name: str, type_params: list[str], span: Span, derives: list[str], exp: Expander
+    name: str,
+    type_params: list[str],
+    span: Span,
+    derives: list[str],
+    exp: Expander,
+    gen: _HelperGen,
 ) -> list[ast.ImplDecl]:
     out: list[ast.ImplDecl] = []
     for trait in derives:
@@ -36,19 +59,58 @@ def _derive_type(
             raise _err("DER001", f"cannot derive {trait!r} (only Eq, Show)", span)
         if type_params:
             raise _err("DER004", f"cannot derive {trait!r} on a generic type yet", span)
-        method = _derive_eq(name, span, exp) if trait == "Eq" else _derive_show(name, span, exp)
+        method = (
+            _derive_eq(name, span, exp, gen)
+            if trait == "Eq"
+            else _derive_show(name, span, exp, gen)
+        )
         out.append(ast.ImplDecl(trait, name, [method], span))
     return out
 
 
-def _string_field_names(name: str, exp: Expander) -> bool:
+# --- syntactic comparability ----------------------------------------------------
+# Mirrors the checker's _is_comparable/_slot_inline over declared TypeExprs, so
+# the generator can choose structural `==` exactly where the backends lower it.
+
+
+def _payload_inline_syntactic(te: ast.TypeExpr, exp: Expander) -> bool:
+    if te.name in _SCALARS and not te.args:
+        return True
+    adt = exp.ctx.adts.get(te.name)
+    # A payloadless enum rides the slot as its tag.
+    return adt is not None and all(not v.payload for v in adt.variants)
+
+
+def _comparable_syntactic(te: ast.TypeExpr, exp: Expander, visited: frozenset[str]) -> bool:
+    name = te.name
+    if name in _SCALARS and not te.args:
+        return True
+    if name in ("String", "List", "Map", "->"):
+        return False
+    if name in visited:
+        return True  # cycles are rejected elsewhere; don't recurse forever
     record = exp.ctx.records.get(name)
     if record is not None:
-        return any(f.type.name == "String" for f in record.fields)
+        return all(_comparable_syntactic(f.type, exp, visited | {name}) for f in record.fields)
     adt = exp.ctx.adts.get(name)
     if adt is not None:
-        return any(p.name == "String" for v in adt.variants for p in v.payload)
-    return False
+        # Mirrors the checker's _is_comparable: single String payloads compare
+        # by content, so they ride structural equality too.
+        return all(
+            len(v.payload) <= 1
+            and all(
+                _payload_inline_syntactic(p, exp) or (p.name == "String" and not p.args)
+                for p in v.payload
+            )
+            for v in adt.variants
+        )
+    if name in ("Option", "Result"):
+        # Builtins: payloads are exactly the type arguments.
+        return all(
+            _payload_inline_syntactic(a, exp) or (a.name == "String" and not a.args)
+            for a in te.args
+        )
+    return False  # unknown (type params etc.): route through .eq() instead
 
 
 # --- AST builders -------------------------------------------------------------
@@ -62,9 +124,21 @@ def _ty(n: str, sp: Span) -> ast.TypeExpr:
     return ast.TypeExpr(n, [], sp)
 
 
-def _fn(name: str, params: list[tuple[str, str]], ret: str, body: ast.Expr, sp: Span) -> ast.FnDecl:
-    ps = [ast.Param(p, _ty(t, sp), sp) for p, t in params]
-    return ast.FnDecl(name, ps, _ty(ret, sp), [], ast.Block([ast.ExprStmt(body, sp)], sp), sp)
+def _fn(
+    name: str,
+    params: list[tuple[str, ast.TypeExpr]],
+    ret: str,
+    body: list[ast.Stmt],
+    sp: Span,
+) -> ast.FnDecl:
+    ps = [ast.Param(p, t, sp) for p, t in params]
+    return ast.FnDecl(name, ps, _ty(ret, sp), [], ast.Block(body, sp), sp)
+
+
+def _expr_fn(
+    name: str, params: list[tuple[str, ast.TypeExpr]], ret: str, body: ast.Expr, sp: Span
+) -> ast.FnDecl:
+    return _fn(name, params, ret, [ast.ExprStmt(body, sp)], sp)
 
 
 def _concat(parts: list[ast.Expr], sp: Span) -> ast.Expr:
@@ -74,75 +148,267 @@ def _concat(parts: list[ast.Expr], sp: Span) -> ast.Expr:
     return result
 
 
+def _and_all(parts: list[ast.Expr], sp: Span) -> ast.Expr:
+    if not parts:
+        return ast.BoolLit(True, sp)
+    result = parts[0]
+    for part in parts[1:]:
+        result = ast.BinaryExpr("&&", result, part, sp)
+    return result
+
+
+def _call_method(recv: ast.Expr, method: str, args: list[ast.Expr], sp: Span) -> ast.Expr:
+    return ast.CallExpr(ast.MemberExpr(recv, method, sp), args, sp)
+
+
+# --- generated list helpers ------------------------------------------------------
+
+
+def _enc(te: ast.TypeExpr) -> str:
+    """An identifier-safe encoding of a type expression for helper names."""
+    parts = [te.name.lower().replace("->", "fn")]
+    parts.extend(_enc(a) for a in te.args)
+    return "_".join(parts)
+
+
+class _HelperGen:
+    """Structural helpers for List fields, generated once per element type.
+    Derives run on the MERGED module, so one dedupe table covers the program."""
+
+    def __init__(self, exp: Expander) -> None:
+        self.exp = exp
+        self.helpers: dict[str, ast.FnDecl] = {}
+
+    def list_eq(self, elem: ast.TypeExpr, sp: Span) -> str:
+        fname = f"__derive_list_eq_{_enc(elem)}"
+        if fname in self.helpers:
+            return fname
+        self.helpers[fname] = _fn("", [], "Bool", [], sp)  # placeholder breaks recursion
+        list_te = ast.TypeExpr("List", [elem], sp)
+        a, b, i = _name("a", sp), _name("b", sp), _name("i", sp)
+        elem_cmp = _eq_expr(
+            ast.IndexExpr(a, i, sp), ast.IndexExpr(b, i, sp), elem, sp, self.exp, self
+        )
+
+        def len_of(v: ast.Expr) -> ast.Expr:
+            return ast.CallExpr(ast.MemberExpr(_name("List", sp), "len", sp), [v], sp)
+
+        body: list[ast.Stmt] = [
+            ast.ExprStmt(
+                ast.IfExpr(
+                    ast.BinaryExpr("!=", len_of(a), len_of(b), sp),
+                    ast.Block([ast.ReturnStmt(ast.BoolLit(False, sp), sp)], sp),
+                    None,
+                    sp,
+                ),
+                sp,
+            ),
+            ast.MutStmt("i", ast.IntLit(0, sp), sp),
+            ast.WhileStmt(
+                ast.BinaryExpr("<", i, len_of(a), sp),
+                ast.Block(
+                    [
+                        ast.ExprStmt(
+                            ast.IfExpr(
+                                ast.UnaryExpr("!", elem_cmp, sp),
+                                ast.Block([ast.ReturnStmt(ast.BoolLit(False, sp), sp)], sp),
+                                None,
+                                sp,
+                            ),
+                            sp,
+                        ),
+                        ast.AssignStmt("i", ast.BinaryExpr("+", i, ast.IntLit(1, sp), sp), sp),
+                    ],
+                    sp,
+                ),
+                sp,
+            ),
+            ast.ExprStmt(ast.BoolLit(True, sp), sp),
+        ]
+        self.helpers[fname] = _fn(fname, [("a", list_te), ("b", list_te)], "Bool", body, sp)
+        return fname
+
+    def list_show(self, elem: ast.TypeExpr, sp: Span) -> str:
+        fname = f"__derive_list_show_{_enc(elem)}"
+        if fname in self.helpers:
+            return fname
+        self.helpers[fname] = _fn("", [], "String", [], sp)  # placeholder breaks recursion
+        list_te = ast.TypeExpr("List", [elem], sp)
+        xs, i, out = _name("xs", sp), _name("i", sp), _name("out", sp)
+        elem_render = _show_expr(ast.IndexExpr(xs, i, sp), elem, sp, self.exp, self)
+        len_of = ast.CallExpr(ast.MemberExpr(_name("List", sp), "len", sp), [xs], sp)
+        body: list[ast.Stmt] = [
+            ast.MutStmt("out", ast.StringLit("[", sp), sp),
+            ast.MutStmt("i", ast.IntLit(0, sp), sp),
+            ast.WhileStmt(
+                ast.BinaryExpr("<", i, len_of, sp),
+                ast.Block(
+                    [
+                        ast.ExprStmt(
+                            ast.IfExpr(
+                                ast.BinaryExpr(">", i, ast.IntLit(0, sp), sp),
+                                ast.Block(
+                                    [
+                                        ast.AssignStmt(
+                                            "out",
+                                            ast.BinaryExpr("++", out, ast.StringLit(", ", sp), sp),
+                                            sp,
+                                        )
+                                    ],
+                                    sp,
+                                ),
+                                None,
+                                sp,
+                            ),
+                            sp,
+                        ),
+                        ast.AssignStmt("out", ast.BinaryExpr("++", out, elem_render, sp), sp),
+                        ast.AssignStmt("i", ast.BinaryExpr("+", i, ast.IntLit(1, sp), sp), sp),
+                    ],
+                    sp,
+                ),
+                sp,
+            ),
+            ast.ExprStmt(ast.BinaryExpr("++", out, ast.StringLit("]", sp), sp), sp),
+        ]
+        self.helpers[fname] = _fn(fname, [("xs", list_te)], "String", body, sp)
+        return fname
+
+
+# --- per-type comparison / rendering expressions ----------------------------------
+
+
+def _eq_expr(
+    mine: ast.Expr, theirs: ast.Expr, te: ast.TypeExpr, sp: Span, exp: Expander, gen: _HelperGen
+) -> ast.Expr:
+    if te.name == "String":
+        return _call_method(mine, "eq", [theirs], sp)
+    if te.name == "List":
+        helper = gen.list_eq(te.args[0], sp)
+        return ast.CallExpr(_name(helper, sp), [mine, theirs], sp)
+    if te.name == "Map":
+        raise _err(
+            "DER001",
+            "cannot derive Eq over a Map field: maps have reference semantics",
+            sp,
+        )
+    if _comparable_syntactic(te, exp, frozenset()):
+        return ast.BinaryExpr("==", mine, theirs, sp)
+    # A composite that isn't structurally comparable: go through ITS Eq impl
+    # (its own derive, or a hand-written one) — nested derives compose.
+    return _call_method(mine, "eq", [theirs], sp)
+
+
+def _show_expr(
+    value: ast.Expr, te: ast.TypeExpr, sp: Span, exp: Expander, gen: _HelperGen
+) -> ast.Expr:
+    if te.name in ("I64", "F64") and not te.args:
+        return ast.CallExpr(_name("to_str", sp), [value], sp)
+    if te.name == "Bool":
+        then = ast.Block([ast.ExprStmt(ast.StringLit("true", sp), sp)], sp)
+        els = ast.Block([ast.ExprStmt(ast.StringLit("false", sp), sp)], sp)
+        return ast.IfExpr(value, then, els, sp)
+    if te.name == "String":
+        return value
+    if te.name == "List":
+        helper = gen.list_show(te.args[0], sp)
+        return ast.CallExpr(_name(helper, sp), [value], sp)
+    if te.name == "Map":
+        raise _err(
+            "DER001",
+            "cannot derive Show over a Map field: render its contents explicitly "
+            "(Map.keys + Map.get)",
+            sp,
+        )
+    # Any other type renders through ITS Show impl — recursive derives work,
+    # and a type with no Show in scope reports DISP001 at the derive line.
+    return _call_method(value, "show", [], sp)
+
+
 # --- Eq -----------------------------------------------------------------------
 
 
-def _derive_eq(type_name: str, sp: Span, exp: Expander) -> ast.FnDecl:
+def _derive_eq(type_name: str, sp: Span, exp: Expander, gen: _HelperGen) -> ast.FnDecl:
+    self_te = _ty(type_name, sp)
     record = exp.ctx.records.get(type_name)
-    if record is not None and any(f.type.name == "String" for f in record.fields):
-        # Field-wise comparison: `==` for structural fields, the Eq trait for
-        # String fields — so `impl Eq for String` (import Std.Str) must be in
-        # scope, or the use site reports DISP001.
-        comparisons: list[ast.Expr] = []
-        for fld in record.fields:
-            mine: ast.Expr = ast.MemberExpr(_name("self", sp), fld.name, sp)
-            theirs: ast.Expr = ast.MemberExpr(_name("other", sp), fld.name, sp)
-            if fld.type.name == "String":
-                comparisons.append(ast.CallExpr(ast.MemberExpr(mine, "eq", sp), [theirs], sp))
-            else:
-                comparisons.append(ast.BinaryExpr("==", mine, theirs, sp))
-        body: ast.Expr = comparisons[0] if comparisons else ast.BoolLit(True, sp)
-        for nxt in comparisons[1:]:
-            body = ast.BinaryExpr("&&", body, nxt, sp)
-        return _fn("eq", [("self", type_name), ("other", type_name)], "Bool", body, sp)
-    if _string_field_names(type_name, exp):
-        raise _err("DER001", f"cannot derive Eq for {type_name!r}: a variant carries a String", sp)
-    # Delegate to structural equality, which the backend already lowers.
+    if record is not None:
+        comparisons = [
+            _eq_expr(
+                ast.MemberExpr(_name("self", sp), fld.name, sp),
+                ast.MemberExpr(_name("other", sp), fld.name, sp),
+                fld.type,
+                sp,
+                exp,
+                gen,
+            )
+            for fld in record.fields
+        ]
+        return _expr_fn(
+            "eq",
+            [("self", self_te), ("other", self_te)],
+            "Bool",
+            _and_all(comparisons, sp),
+            sp,
+        )
+    adt = exp.ctx.adts.get(type_name)
+    if adt is not None and not _comparable_syntactic(self_te, exp, frozenset()):
+        return _eq_adt(adt, sp, exp, gen)
+    # Structurally comparable (enums, inline payloads): the backends lower
+    # whole-value equality directly.
     body = ast.BinaryExpr("==", _name("self", sp), _name("other", sp), sp)
-    return _fn("eq", [("self", type_name), ("other", type_name)], "Bool", body, sp)
+    return _expr_fn("eq", [("self", self_te), ("other", self_te)], "Bool", body, sp)
+
+
+def _eq_adt(adt: ast.AdtDecl, sp: Span, exp: Expander, gen: _HelperGen) -> ast.FnDecl:
+    """Match-based equality: same variant AND equal payloads, arm by arm —
+    what the DER001 String-payload ban used to make people write by hand."""
+    multi = len(adt.variants) > 1
+    outer_arms: list[ast.MatchArm] = []
+    for variant in adt.variants:
+        n = len(variant.payload)
+        x_binds: list[ast.Pattern] = [ast.BindPattern(f"x{i}", sp) for i in range(n)]
+        y_binds: list[ast.Pattern] = [ast.BindPattern(f"y{i}", sp) for i in range(n)]
+        cmps = [
+            _eq_expr(_name(f"x{i}", sp), _name(f"y{i}", sp), pty, sp, exp, gen)
+            for i, pty in enumerate(variant.payload)
+        ]
+        inner_arms = [
+            ast.MatchArm(ast.CtorPattern(variant.name, y_binds, sp), _and_all(cmps, sp), sp)
+        ]
+        if multi:
+            inner_arms.append(ast.MatchArm(ast.WildcardPattern(sp), ast.BoolLit(False, sp), sp))
+        inner = ast.MatchExpr(_name("other", sp), inner_arms, sp)
+        outer_arms.append(ast.MatchArm(ast.CtorPattern(variant.name, x_binds, sp), inner, sp))
+    match = ast.MatchExpr(_name("self", sp), outer_arms, sp)
+    self_te = _ty(adt.name, sp)
+    return _expr_fn("eq", [("self", self_te), ("other", self_te)], "Bool", match, sp)
 
 
 # --- Show ---------------------------------------------------------------------
 
 
-def _render(value: ast.Expr, type_name: str, sp: Span) -> ast.Expr:
-    if type_name in ("I64", "F64"):
-        return ast.CallExpr(_name("to_str", sp), [value], sp)
-    if type_name == "Bool":
-        then = ast.Block([ast.ExprStmt(ast.StringLit("true", sp), sp)], sp)
-        els = ast.Block([ast.ExprStmt(ast.StringLit("false", sp), sp)], sp)
-        return ast.IfExpr(value, then, els, sp)
-    if type_name == "String":
-        return value
-    # Any other type renders through ITS Show impl — recursive derives work
-    # (the impl being generated resolves its own self-calls), and a payload
-    # with no Show in scope reports DISP001 at the use site instead of
-    # silently printing a placeholder.
-    return ast.CallExpr(ast.MemberExpr(value, "show", sp), [], sp)
-
-
-def _derive_show(type_name: str, sp: Span, exp: Expander) -> ast.FnDecl:
+def _derive_show(type_name: str, sp: Span, exp: Expander, gen: _HelperGen) -> ast.FnDecl:
     record = exp.ctx.records.get(type_name)
     if record is not None:
-        return _show_record(record, sp)
+        return _show_record(record, sp, exp, gen)
     adt = exp.ctx.adts.get(type_name)
     if adt is not None:
-        return _show_adt(adt, sp)
+        return _show_adt(adt, sp, exp, gen)
     raise _err("DER001", f"cannot derive Show for {type_name!r}", sp)
 
 
-def _show_record(record: ast.RecordDecl, sp: Span) -> ast.FnDecl:
+def _show_record(record: ast.RecordDecl, sp: Span, exp: Expander, gen: _HelperGen) -> ast.FnDecl:
     parts: list[ast.Expr] = [ast.StringLit(record.name + " { ", sp)]
     for i, fld in enumerate(record.fields):
         prefix = ("" if i == 0 else ", ") + fld.name + " = "
         access = ast.MemberExpr(_name("self", sp), fld.name, sp)
         parts.append(ast.StringLit(prefix, sp))
-        parts.append(_render(access, fld.type.name, sp))
+        parts.append(_show_expr(access, fld.type, sp, exp, gen))
     parts.append(ast.StringLit(" }", sp))
-    return _fn("show", [("self", record.name)], "String", _concat(parts, sp), sp)
+    return _expr_fn("show", [("self", _ty(record.name, sp))], "String", _concat(parts, sp), sp)
 
 
-def _show_adt(adt: ast.AdtDecl, sp: Span) -> ast.FnDecl:
+def _show_adt(adt: ast.AdtDecl, sp: Span, exp: Expander, gen: _HelperGen) -> ast.FnDecl:
     arms: list[ast.MatchArm] = []
     for variant in adt.variants:
         if variant.payload:
@@ -154,7 +420,7 @@ def _show_adt(adt: ast.AdtDecl, sp: Span) -> ast.FnDecl:
             for i, pty in enumerate(variant.payload):
                 if i:
                     parts.append(ast.StringLit(", ", sp))
-                parts.append(_render(_name(f"x{i}", sp), pty.name, sp))
+                parts.append(_show_expr(_name(f"x{i}", sp), pty, sp, exp, gen))
             parts.append(ast.StringLit(")", sp))
             body = _concat(parts, sp)
         else:
@@ -162,7 +428,7 @@ def _show_adt(adt: ast.AdtDecl, sp: Span) -> ast.FnDecl:
             body = ast.StringLit(variant.name, sp)
         arms.append(ast.MatchArm(bind, body, sp))
     match = ast.MatchExpr(_name("self", sp), arms, sp)
-    return _fn("show", [("self", adt.name)], "String", match, sp)
+    return _expr_fn("show", [("self", _ty(adt.name, sp))], "String", match, sp)
 
 
 def _err(code: str, message: str, span: Span) -> FlexError:

@@ -92,6 +92,26 @@ assert_eq(cmp("b", "a"), 1)
 assert_eq(cmp("same", "same"), 0)
 ```
 
+See also: `str_lt`
+
+## str_lt
+
+```flx
+fn str_lt(a: String, b: String) -> Bool
+```
+
+Lexicographic less-than (the comparator shape sort_with wants).
+
+**Example: orders strings** — ✓ checked by `flx docs check`:
+
+```flx
+assert(str_lt("apple", "pear"))
+assert(!str_lt("pear", "apple"))
+assert(!str_lt("same", "same"))
+```
+
+See also: `cmp`
+
 ## byte_at
 
 ```flx

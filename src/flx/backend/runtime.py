@@ -197,6 +197,122 @@ void __flx_list_set(void *lp, long long i, long long v) {
 long long __flx_list_len(void *lp) {
     return ((FlxList *)lp)->len;
 }
+// Remove and return the LAST element's slot: 1 with *out filled, 0 when empty.
+// The lowering assembles Some/None from the flag; the slot IS the payload.
+long long __flx_list_pop(void *lp, long long *out) {
+    FlxList *l = (FlxList *)lp;
+    if (l->len == 0) {
+        *out = 0;
+        return 0;
+    }
+    l->len--;
+    *out = l->data[l->len];
+    return 1;
+}
+// ADT payload-slot equality with String awareness: when use_str, the slots
+// are boxed FlxStr cells compared by CONTENT; otherwise raw slot bits. The
+// flag keeps boxed dereferences off the non-string arms (a None slot is 0).
+long long __flx_slot_str_eq(long long use_str, long long ls, long long rs) {
+    if (!use_str) return ls == rs;
+    if (ls == 0 || rs == 0) return ls == rs;
+    FlxStr *a = (FlxStr *)ls;
+    FlxStr *b = (FlxStr *)rs;
+    if (a->len != b->len) return 0;
+    return memcmp(a->ptr, b->ptr, (size_t)a->len) == 0;
+}
+// The insertion-ordered map (Map<String, V>): an append-only entries array
+// with tombstones. Set on a live key replaces in place (keeping its position),
+// remove marks dead, re-insert appends — exactly a Python dict's observable
+// order, which is what the interpreter uses. Lookup is a linear scan; a hash
+// index is the roadmap. Values use the SAME i64 slot codec as list elements.
+typedef struct { const char *key; long long keylen; long long slot; int alive; } FlxMapEntry;
+typedef struct { long long len; long long cap; long long used; FlxMapEntry *entries; } FlxMap;
+void *__flx_map_new(void) {
+    FlxMap *m = (FlxMap *)__flx_box((long long)sizeof(FlxMap));
+    m->len = 0;
+    m->cap = 0;
+    m->used = 0;
+    m->entries = NULL;
+    return m;
+}
+static FlxMapEntry *__flx_map_find(FlxMap *m, const char *k, long long klen) {
+    for (long long i = 0; i < m->used; i++) {
+        FlxMapEntry *e = &m->entries[i];
+        if (e->alive && e->keylen == klen && memcmp(e->key, k, (size_t)klen) == 0) {
+            return e;
+        }
+    }
+    return NULL;
+}
+void __flx_map_set(void *mp, const char *k, long long klen, long long slot) {
+    FlxMap *m = (FlxMap *)mp;
+    FlxMapEntry *e = __flx_map_find(m, k, klen);
+    if (e) {
+        e->slot = slot;
+        return;
+    }
+    if (m->used == m->cap) {
+        m->cap = m->cap ? m->cap * 2 : 8;
+        m->entries = (FlxMapEntry *)realloc(m->entries, (size_t)m->cap * sizeof(FlxMapEntry));
+        if (!m->entries) {
+            fflush(stdout);
+            fputs("flx: runtime error: out of memory\\n", stderr);
+            exit(1);
+        }
+    }
+    char *kcopy = (char *)__flx_box(klen + 1);
+    memcpy(kcopy, k, (size_t)klen);
+    kcopy[klen] = 0;
+    m->entries[m->used].key = kcopy;
+    m->entries[m->used].keylen = klen;
+    m->entries[m->used].slot = slot;
+    m->entries[m->used].alive = 1;
+    m->used++;
+    m->len++;
+}
+long long __flx_map_get(void *mp, const char *k, long long klen, long long *out) {
+    FlxMapEntry *e = __flx_map_find((FlxMap *)mp, k, klen);
+    if (!e) {
+        *out = 0;
+        return 0;
+    }
+    *out = e->slot;
+    return 1;
+}
+long long __flx_map_has(void *mp, const char *k, long long klen) {
+    return __flx_map_find((FlxMap *)mp, k, klen) != NULL;
+}
+long long __flx_map_len(void *mp) {
+    return ((FlxMap *)mp)->len;
+}
+void __flx_map_remove(void *mp, const char *k, long long klen) {
+    FlxMap *m = (FlxMap *)mp;
+    FlxMapEntry *e = __flx_map_find(m, k, klen);
+    if (e) {
+        e->alive = 0;
+        m->len--;
+    }
+}
+void *__flx_map_keys(void *mp) {
+    FlxMap *m = (FlxMap *)mp;
+    FlxList *out = (FlxList *)__flx_list_new();
+    for (long long i = 0; i < m->used; i++) {
+        if (!m->entries[i].alive) continue;
+        FlxStr *s = (FlxStr *)__flx_box((long long)sizeof(FlxStr));
+        s->ptr = m->entries[i].key;
+        s->len = m->entries[i].keylen;
+        __flx_list_push(out, (long long)s);
+    }
+    return out;
+}
+void *__flx_map_values(void *mp) {
+    FlxMap *m = (FlxMap *)mp;
+    FlxList *out = (FlxList *)__flx_list_new();
+    for (long long i = 0; i < m->used; i++) {
+        if (m->entries[i].alive) __flx_list_push(out, m->entries[i].slot);
+    }
+    return out;
+}
 // Shortest %g representation that round-trips (the interpreter runs the same
 // loop through Python's C-printf formatting, so the text matches). NaN is
 // canonicalized first: x86 produces sign-set NaNs at runtime, which glibc
@@ -337,6 +453,16 @@ BASE_RUNTIME_DECLS = (
     "func.func private @__flx_list_get(!llvm.ptr, i64) -> i64\n"
     "func.func private @__flx_list_set(!llvm.ptr, i64, i64)\n"
     "func.func private @__flx_list_len(!llvm.ptr) -> i64\n"
+    "func.func private @__flx_list_pop(!llvm.ptr, !llvm.ptr) -> i64\n"
+    "func.func private @__flx_slot_str_eq(i64, i64, i64) -> i64\n"
+    "func.func private @__flx_map_new() -> !llvm.ptr\n"
+    "func.func private @__flx_map_set(!llvm.ptr, !llvm.ptr, i64, i64)\n"
+    "func.func private @__flx_map_get(!llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> i64\n"
+    "func.func private @__flx_map_has(!llvm.ptr, !llvm.ptr, i64) -> i64\n"
+    "func.func private @__flx_map_len(!llvm.ptr) -> i64\n"
+    "func.func private @__flx_map_remove(!llvm.ptr, !llvm.ptr, i64)\n"
+    "func.func private @__flx_map_keys(!llvm.ptr) -> !llvm.ptr\n"
+    "func.func private @__flx_map_values(!llvm.ptr) -> !llvm.ptr\n"
     "func.func private @__flx_byte_at(!llvm.ptr, i64, i64) -> i64\n"
     "func.func private @__flx_substr(!llvm.ptr, i64, i64, i64, !llvm.ptr)\n"
     "func.func private @__flx_from_byte(i64, !llvm.ptr)\n"

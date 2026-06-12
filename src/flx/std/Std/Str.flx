@@ -20,6 +20,9 @@ pub fn cmp(a: String, b: String) -> I64 = {
   if c < 0 { 0 - 1 } else { if c > 0 { 1 } else { 0 } }
 }
 
+// Lexicographic less-than — the comparator shape sort_with wants.
+pub fn str_lt(a: String, b: String) -> Bool = { strcmp(a, b) < 0 }
+
 // Byte access. `byte_at` panics out of bounds (like list indexing); `substr`
 // clamps to the string. Indexing is by BYTE — a multi-byte UTF-8 sequence can
 // split; the bytes stay lossless either way.
@@ -267,6 +270,17 @@ doc cmp {
     assert_eq(cmp("b", "a"), 1)
     assert_eq(cmp("same", "same"), 0)
   }
+  see str_lt
+}
+
+doc str_lt {
+  summary "Lexicographic less-than (the comparator shape sort_with wants)."
+  test "orders strings" {
+    assert(str_lt("apple", "pear"))
+    assert(!str_lt("pear", "apple"))
+    assert(!str_lt("same", "same"))
+  }
+  see cmp
 }
 
 doc byte_at {

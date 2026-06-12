@@ -21,7 +21,19 @@ from dataclasses import dataclass
 from flx.backend.runtime import BASE_RUNTIME_DECLS
 from flx.sema.check import CheckResult
 from flx.syntax import ast
-from flx.types import BOOL, F64, I64, STRING, UNIT, AdtType, FnType, ListType, RecordType, Type
+from flx.types import (
+    BOOL,
+    F64,
+    I64,
+    STRING,
+    UNIT,
+    AdtType,
+    FnType,
+    ListType,
+    MapType,
+    RecordType,
+    Type,
+)
 
 _ARITH_OP = {"+": "addi", "-": "subi", "*": "muli"}
 _BIT_OP = {"&": "andi", "|": "ori", "^": "xori"}
@@ -73,6 +85,8 @@ def mlir_type(ty: Type) -> str:
         return "!llvm.struct<(i32, i64)>"
     if isinstance(ty, ListType):
         return "!llvm.ptr"  # a heap header: {i64 len, i64 cap, i64* data}
+    if isinstance(ty, MapType):
+        return "!llvm.ptr"  # a heap header: FlxMap (insertion-ordered entries)
     if isinstance(ty, FnType):
         params = ", ".join(mlir_type(t) for t in ty.params)
         ret = "()" if ty.ret is UNIT else mlir_type(ty.ret)
@@ -99,7 +113,7 @@ def _payload_inline(ty: Type) -> bool:
         or ty is F64
         or ty is BOOL
         or ty is UNIT
-        or isinstance(ty, ListType)
+        or isinstance(ty, (ListType, MapType))
         or (isinstance(ty, AdtType) and _is_enum(ty))
     )
 
@@ -636,7 +650,7 @@ class FunctionLowerer:
             out = self._fresh()
             self._emit(f"{out} = arith.bitcast {value} : f64 to i64")
             return out
-        if isinstance(ty, ListType):
+        if isinstance(ty, (ListType, MapType)):
             out = self._fresh()
             self._emit(f"{out} = llvm.ptrtoint {value} : !llvm.ptr to i64")
             return out
@@ -652,7 +666,7 @@ class FunctionLowerer:
             out = self._fresh()
             self._emit(f"{out} = arith.bitcast {value} : i64 to f64")
             return out
-        if isinstance(ty, ListType):
+        if isinstance(ty, (ListType, MapType)):
             out = self._fresh()
             self._emit(f"{out} = llvm.inttoptr {value} : i64 to !llvm.ptr")
             return out
@@ -790,11 +804,99 @@ class FunctionLowerer:
             slot = self._encode_elem(value, obj_ty.elem)
             self._emit(f"func.call @__flx_list_push({lst}, {slot}) : (!llvm.ptr, i64) -> ()")
             return None
+        if op == "pop":
+            # The element slot codec IS the Option payload codec, so the popped
+            # slot drops straight into Some's payload slot.
+            return self._option_from_runtime_slot(
+                f"func.call @__flx_list_pop({lst}, {{slot}}) : (!llvm.ptr, !llvm.ptr) -> i64"
+            )
         assert op == "set"
         idx = self._materialize(self.lower_expr(expr.args[1]), expr.args[1])
         value = self._materialize(self.lower_expr(expr.args[2]), expr.args[2])
         slot = self._encode_elem(value, obj_ty.elem)
         self._emit(f"func.call @__flx_list_set({lst}, {idx}, {slot}) : (!llvm.ptr, i64, i64) -> ()")
+        return None
+
+    def _option_from_runtime_slot(self, call_template: str) -> str:
+        """Run a runtime call that fills an i64 slot and returns a found flag,
+        and assemble the Option {i32 tag, i64 slot} from them (None=0, Some=1).
+        `call_template` must contain `{slot}` for the out-pointer SSA name."""
+        one = self._fresh()
+        self._emit(f"{one} = llvm.mlir.constant(1 : i64) : i64")
+        slot_ptr = self._fresh()
+        self._emit(f"{slot_ptr} = llvm.alloca {one} x i64 : (i64) -> !llvm.ptr")
+        zero = self._const("0", "i64")
+        self._emit(f"llvm.store {zero}, {slot_ptr} : i64, !llvm.ptr")
+        found = self._fresh()
+        self._emit(f"{found} = " + call_template.format(slot=slot_ptr))
+        slot = self._fresh()
+        self._emit(f"{slot} = llvm.load {slot_ptr} : !llvm.ptr -> i64")
+        is_some = self._fresh()
+        self._emit(f"{is_some} = arith.cmpi ne, {found}, {zero} : i64")
+        some_tag = self._const("1", "i32")
+        none_tag = self._const("0", "i32")
+        tag = self._fresh()
+        self._emit(f"{tag} = arith.select {is_some}, {some_tag}, {none_tag} : i32")
+        payload = self._fresh()
+        self._emit(f"{payload} = arith.select {is_some}, {slot}, {zero} : i64")
+        opt_mty = "!llvm.struct<(i32, i64)>"
+        undef = self._fresh()
+        self._emit(f"{undef} = llvm.mlir.undef : {opt_mty}")
+        with_tag = self._fresh()
+        self._emit(f"{with_tag} = llvm.insertvalue {tag}, {undef}[0] : {opt_mty}")
+        out = self._fresh()
+        self._emit(f"{out} = llvm.insertvalue {payload}, {with_tag}[1] : {opt_mty}")
+        return out
+
+    def _lower_map_op(self, op: str, expr: ast.CallExpr) -> str | None:
+        if op == "new":
+            out = self._fresh()
+            self._emit(f"{out} = func.call @__flx_map_new() : () -> !llvm.ptr")
+            return out
+        obj_ty = self._ty_of(expr.args[0])
+        assert isinstance(obj_ty, MapType)
+        m = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
+        if op == "len":
+            out = self._fresh()
+            self._emit(f"{out} = func.call @__flx_map_len({m}) : (!llvm.ptr) -> i64")
+            return out
+        if op == "keys":
+            out = self._fresh()
+            self._emit(f"{out} = func.call @__flx_map_keys({m}) : (!llvm.ptr) -> !llvm.ptr")
+            return out
+        if op == "values":
+            out = self._fresh()
+            self._emit(f"{out} = func.call @__flx_map_values({m}) : (!llvm.ptr) -> !llvm.ptr")
+            return out
+        key = self._materialize(self.lower_expr(expr.args[1]), expr.args[1])
+        kptr, klen = self._string_parts(key)
+        if op == "set":
+            value = self._materialize(self.lower_expr(expr.args[2]), expr.args[2])
+            slot = self._encode_elem(value, obj_ty.value)
+            self._emit(
+                f"func.call @__flx_map_set({m}, {kptr}, {klen}, {slot}) : "
+                "(!llvm.ptr, !llvm.ptr, i64, i64) -> ()"
+            )
+            return None
+        if op == "get":
+            return self._option_from_runtime_slot(
+                f"func.call @__flx_map_get({m}, {kptr}, {klen}, {{slot}}) : "
+                "(!llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> i64"
+            )
+        if op == "has":
+            found = self._fresh()
+            self._emit(
+                f"{found} = func.call @__flx_map_has({m}, {kptr}, {klen}) : "
+                "(!llvm.ptr, !llvm.ptr, i64) -> i64"
+            )
+            zero = self._const("0", "i64")
+            out = self._fresh()
+            self._emit(f"{out} = arith.cmpi ne, {found}, {zero} : i64")
+            return out
+        assert op == "remove"
+        self._emit(
+            f"func.call @__flx_map_remove({m}, {kptr}, {klen}) : (!llvm.ptr, !llvm.ptr, i64) -> ()"
+        )
         return None
 
     def _lower_for(self, stmt: ast.ForStmt) -> None:
@@ -990,6 +1092,8 @@ class FunctionLowerer:
                     return out
                 if obj.name == "List":
                     return self._lower_list_op(method, expr)
+                if obj.name == "Map":
+                    return self._lower_map_op(method, expr)
                 if obj.name == "Str" and method == "byte_at":
                     s = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
                     ptr, length = self._string_parts(s)
@@ -1141,6 +1245,23 @@ class FunctionLowerer:
                     self._emit(f"{ok} = arith.xori {equal}, {one} : i1")
                     self._assert_branch(ok, "@__flx_assert_fne_fail", f"{left}", "f64")
                 return None
+            impl_symbol = self.method_targets.get(id(call))
+            if impl_symbol is not None:
+                # An Eq impl carries the comparison (the checker routed it);
+                # failures report generically, like any aggregate.
+                equal = self._fresh()
+                self._emit(
+                    f"{equal} = func.call @flx_{impl_symbol}({left}, {right}) : "
+                    f"({operand_ty}, {operand_ty}) -> i1"
+                )
+                if name == "assert_eq":
+                    ok_cond = equal
+                else:
+                    one = self._const("1", "i1")
+                    ok_cond = self._fresh()
+                    self._emit(f"{ok_cond} = arith.xori {equal}, {one} : i1")
+                self._assert_branch(ok_cond, "@__flx_assert_fail", "", "")
+                return None
             equal = self._emit_equal(left, right, operand_type)
             if name == "assert_eq":
                 ok_cond = equal
@@ -1201,8 +1322,46 @@ class FunctionLowerer:
             self._emit(f"{lslot} = llvm.extractvalue {left}[1] : {mty}")
             rslot = self._fresh()
             self._emit(f"{rslot} = llvm.extractvalue {right}[1] : {mty}")
-            payload_eq = self._fresh()
-            self._emit(f"{payload_eq} = arith.cmpi eq, {lslot}, {rslot} : i64")
+            string_variants = [
+                i
+                for i, v in enumerate(ty.variants)
+                if len(v.payload) == 1 and v.payload[0] is STRING
+            ]
+            if string_variants:
+                # Variants carrying a String compare by CONTENT. The runtime
+                # helper only dereferences the boxed slots when the use-string
+                # flag is set — and the flag requires EQUAL tags too, because
+                # with differing tags the right slot can be a raw inline value
+                # (Word("hi") vs Num(7)) that must never be treated as a
+                # pointer. The payload result is dead when tags differ anyway.
+                ltag = self._fresh()
+                self._emit(f"{ltag} = llvm.extractvalue {left}[0] : {mty}")
+                is_str = None
+                for i in string_variants:
+                    ci = self._const(str(i), "i32")
+                    this = self._fresh()
+                    self._emit(f"{this} = arith.cmpi eq, {ltag}, {ci} : i32")
+                    if is_str is None:
+                        is_str = this
+                    else:
+                        nxt = self._fresh()
+                        self._emit(f"{nxt} = arith.ori {is_str}, {this} : i1")
+                        is_str = nxt
+                str_and_same = self._fresh()
+                self._emit(f"{str_and_same} = arith.andi {is_str}, {tag_eq} : i1")
+                use_str = self._fresh()
+                self._emit(f"{use_str} = arith.extui {str_and_same} : i1 to i64")
+                raw = self._fresh()
+                self._emit(
+                    f"{raw} = func.call @__flx_slot_str_eq({use_str}, {lslot}, {rslot}) : "
+                    "(i64, i64, i64) -> i64"
+                )
+                zero = self._const("0", "i64")
+                payload_eq = self._fresh()
+                self._emit(f"{payload_eq} = arith.cmpi ne, {raw}, {zero} : i64")
+            else:
+                payload_eq = self._fresh()
+                self._emit(f"{payload_eq} = arith.cmpi eq, {lslot}, {rslot} : i64")
             # Variants carrying an F64 compare as FLOATS, not slot bits — bit
             # equality would make Some(0.0) != Some(-0.0) and Some(nan) ==
             # Some(nan), diverging from the interpreter's structural equality.

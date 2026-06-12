@@ -24,6 +24,7 @@ from flx.types import (
     AdtType,
     FnType,
     ListType,
+    MapType,
     PrimType,
     RecordType,
     Type,
@@ -72,6 +73,8 @@ def _type_enc(ty: Type) -> str:
         return f"{len(ty.type_args)}${ty.name}${inner}"
     if isinstance(ty, ListType):
         return f"1$List${_type_enc(ty.elem)}"
+    if isinstance(ty, MapType):
+        return f"1$Map${_type_enc(ty.value)}"  # the key is always String
     if isinstance(ty, (PrimType, RecordType, AdtType)):
         return f"0${ty.name}"
     return "0$?"
@@ -159,9 +162,13 @@ _KNOWN_ABSENT: dict[str, str] = {
     "chr": 'Flex calls it from_byte: import Std.Str, then from_byte(65) is "A" '
     "(from_bytes builds a string from a whole List<I64>)",
     "to_float": "Flex calls it parse_float (import Std.Str) for strings, and to_f64 for I64 values",
-    "sort": "List has no built-in sort yet; insertion sort with List.set is ~15 lines, "
-    "and comparison functions can be passed as values",
-    "sorted": "see `sort` — no built-in sort yet",
+    "sorted": "Flex sorts in place: sort(xs) / sort_by(xs, key) / sort_with(xs, lt) "
+    "(import Std.List)",
+    "dict": "Flex calls it Map: let m: Map<String, I64> = Map.new(), then "
+    "Map.set(m, k, v) and Map.get(m, k) — no import needed",
+    "hashmap": "Flex calls it Map (see `dict`)",
+    "HashMap": "Flex calls it Map (see `dict`)",
+    "pop": "pop is a built-in list operation: List.pop(xs) returns Some(last) or None when empty",
     "format": "there are no format strings yet; build output with `++`, to_str, and "
     "Std.Str's to_str_fixed/pad_left/pad_right",
     "printf": "there is no printf; use println (import Std.IO) with `++`, to_str, "
@@ -192,7 +199,7 @@ _NEEDS_IMPORT: dict[str, str] = (
         ),
         "Std.Str",
     )
-    | dict.fromkeys(("map", "filter", "fold", "range"), "Std.List")
+    | dict.fromkeys(("map", "filter", "fold", "range", "sort", "sort_by", "sort_with"), "Std.List")
     | dict.fromkeys(("sqrt", "abs", "min", "max", "floor", "ceil"), "Std.Math")
 )
 
@@ -998,13 +1005,13 @@ class Checker:
                 "type name 'I32' is reserved (the FFI boundary type)",
                 span,
             )
-        elif name in PRIMITIVES or name == "List" or name in _BUILTIN_ADTS:
+        elif name in PRIMITIVES or name in ("List", "Map") or name in _BUILTIN_ADTS:
             self._err(
                 "TYPE002",
                 f"cannot redefine the builtin type {name!r}",
                 span,
-                help="primitives, List, Result, and Option are part of the prelude; "
-                "pick another name",
+                help="primitives, List, Map, Result, and Option are part of the "
+                "prelude; pick another name",
             )
 
     def _validate_type_expr(self, te: ast.TypeExpr, params: set[str], *, allow_self: bool) -> None:
@@ -1014,7 +1021,7 @@ class Checker:
         known = (
             name in params
             or name in PRIMITIVES
-            or name == "List"
+            or name in ("List", "Map")
             or name == "->"
             or name in self.record_types
             or name in self.adt_templates
@@ -1028,6 +1035,8 @@ class Checker:
             arity = None  # any param count; args are [params..., ret]
         elif name == "List":
             arity = 1
+        elif name == "Map":
+            arity = 2
         elif name in self.adt_templates:
             arity = len(self.adt_templates[name][0])
         elif name in PRIMITIVES or name in self.record_types or name in params:
@@ -1631,6 +1640,8 @@ class Checker:
             )
             if head == "List" and not shadowed:
                 return self._infer_list_op(callee.name, expr)
+            if head == "Map" and not shadowed:
+                return self._infer_map_op(callee.name, expr, expected)
             if (head in _EFFECT_MODULES or head in ("Str", "Env")) and not shadowed:
                 # A user type or binding named Str/Env/Log/... wins over the
                 # intrinsic module (qualified ctors and locals stay reachable).
@@ -1676,7 +1687,7 @@ class Checker:
         """The built-in growable-list operations, generic over the element type
         (so typed here, not in the monomorphic intrinsics table). Lists have
         reference semantics; mutating one needs no effect, like `mut`."""
-        arity = {"len": 1, "push": 2, "set": 3}.get(op)
+        arity = {"len": 1, "push": 2, "set": 3, "pop": 1}.get(op)
         if arity is None:
             for arg in call.args:
                 self._check_expr(arg)
@@ -1684,7 +1695,7 @@ class Checker:
                 "TYPE010",
                 f"unknown operation List.{op}",
                 call.span,
-                help="the list operations are List.len, List.push, and List.set",
+                help="the list operations are List.len, List.push, List.set, and List.pop",
             )
             return ERROR
         if len(call.args) != arity:
@@ -1705,6 +1716,9 @@ class Checker:
             return ERROR
         if op == "len":
             return I64
+        if op == "pop":
+            # Remove and return the LAST element: Some(last), or None when empty.
+            return self._instantiate("Option", [obj.elem], call.span)
         if op == "push":
             value = self._check_expr(call.args[1], obj.elem)
             self._expect(obj.elem, value, call.args[1].span, "pushed value")
@@ -1714,6 +1728,79 @@ class Checker:
         value = self._check_expr(call.args[2], obj.elem)
         self._expect(obj.elem, value, call.args[2].span, "assigned element")
         return UNIT
+
+    def _infer_map_op(self, op: str, call: ast.CallExpr, expected: Type | None) -> Type:
+        """The built-in Map<String, V> operations, generic over the value type
+        (so typed here, like the list ops). Maps have reference semantics and
+        insertion order; mutating one needs no effect, like `mut`."""
+        arity = {
+            "new": 0,
+            "set": 3,
+            "get": 2,
+            "has": 2,
+            "len": 1,
+            "remove": 2,
+            "keys": 1,
+            "values": 1,
+        }.get(op)
+        if arity is None:
+            for arg in call.args:
+                self._check_expr(arg)
+            self._err(
+                "TYPE010",
+                f"unknown operation Map.{op}",
+                call.span,
+                help="the map operations are Map.new, Map.set, Map.get, Map.has, "
+                "Map.len, Map.remove, Map.keys, and Map.values",
+            )
+            return ERROR
+        if len(call.args) != arity:
+            for arg in call.args:
+                self._check_expr(arg)
+            self._err("TYPE005", f"Map.{op} expects {arity} argument(s)", call.span)
+            return ERROR
+        if op == "new":
+            # Like an empty list literal, an empty map needs its type from
+            # context: an annotation or the parameter it's passed to.
+            if isinstance(expected, MapType):
+                return expected
+            self._err(
+                "TYPE023",
+                "cannot infer the value type of an empty map here",
+                call.span,
+                help="annotate the binding: let m: Map<String, I64> = Map.new()",
+            )
+            return ERROR
+        obj = self._check_expr(call.args[0])
+        if not isinstance(obj, MapType):
+            if obj is not ERROR:
+                self._err(
+                    "TYPE003",
+                    f"Map.{op} operates on a Map, found {obj}",
+                    call.args[0].span,
+                )
+            for arg in call.args[1:]:
+                self._check_expr(arg)
+            return ERROR
+        if op in ("set", "get", "has", "remove"):
+            key = self._check_expr(call.args[1])
+            self._expect(STRING, key, call.args[1].span, "map key")
+        if op == "set":
+            value = self._check_expr(call.args[2], obj.value)
+            self._expect(obj.value, value, call.args[2].span, "map value")
+            return UNIT
+        if op == "get":
+            return self._instantiate("Option", [obj.value], call.span)
+        if op == "has":
+            return BOOL
+        if op == "len":
+            return I64
+        if op == "remove":
+            return UNIT
+        if op == "keys":
+            return ListType(STRING)
+        assert op == "values"
+        return ListType(obj.value)
 
     def _require_effects(self, effects: set[str], span: Span) -> None:
         site = "target" if self.in_target else ("test" if self.in_test else "function")
@@ -1795,6 +1882,10 @@ class Checker:
             return
         if isinstance(at, ListType) and pe.name == "List" and len(pe.args) == 1:
             self._unify_typeexpr(pe.args[0], at.elem, params, subst)
+            return
+        if isinstance(at, MapType) and pe.name == "Map" and len(pe.args) == 2:
+            self._unify_typeexpr(pe.args[0], STRING, params, subst)
+            self._unify_typeexpr(pe.args[1], at.value, params, subst)
             return
         if isinstance(at, FnType) and pe.name == "->" and len(pe.args) == len(at.params) + 1:
             for sub_pe, sub_at in zip(pe.args, [*at.params, at.ret], strict=True):
@@ -2029,10 +2120,27 @@ class Checker:
                 elif a is STRING and ("Eq", "String") in self.impls:
                     pass  # compared through the Eq trait (import Std.Str)
                 elif not _is_comparable(a):
-                    help_text = "import Std.Str to compare strings" if a is STRING else None
-                    self._err(
-                        "TYPE019", f"{name} is not supported for {a}", call.span, help=help_text
-                    )
+                    key = _type_key(a)
+                    if key != "?" and ("Eq", key) in self.impls:
+                        # Not structurally comparable, but the type carries an
+                        # Eq impl (derive(Eq) or hand-written): both backends
+                        # dispatch the assertion through it.
+                        self.method_targets[id(call)] = self.impls[("Eq", key)]["eq"]
+                    else:
+                        help_text = None
+                        if a is STRING:
+                            help_text = "import Std.Str to compare strings"
+                        elif isinstance(a, (RecordType, AdtType)):
+                            help_text = (
+                                f"derive(Eq) on {key!r} enables {name} "
+                                "(import Std.Str if it carries strings)"
+                            )
+                        self._err(
+                            "TYPE019",
+                            f"{name} is not supported for {a}",
+                            call.span,
+                            help=help_text,
+                        )
         elif name in ("fail", "panic"):
             for arg in call.args:
                 self._check_expr(arg)
@@ -2110,6 +2218,33 @@ class Checker:
                 )
                 return ERROR
             return ListType(elem)
+        if type_expr.name == "Map":
+            if len(type_expr.args) != 2:
+                self._err(
+                    "TYPE013",
+                    "Map expects exactly 2 type arguments: Map<String, V>",
+                    type_expr.span,
+                )
+                return ERROR
+            key = self._resolve_type(type_expr.args[0])
+            if key is not STRING and key is not ERROR:
+                self._err(
+                    "TYPE003",
+                    f"Map keys are String (for now), found {key}",
+                    type_expr.args[0].span,
+                    help="render other key types with to_str",
+                )
+                return ERROR
+            value = self._resolve_type(type_expr.args[1])
+            if isinstance(value, FnType):
+                self._err(
+                    "TYPE025",
+                    "function values cannot be stored in maps yet",
+                    type_expr.span,
+                    help="pass functions as arguments; storing them is the roadmap",
+                )
+                return ERROR
+            return MapType(value)
         if type_expr.name in self.record_types and not type_expr.args:
             self._check_visible(type_expr.name, type_expr.span)
             return self.record_types[type_expr.name]
@@ -2233,13 +2368,18 @@ def _is_comparable(ty: Type) -> bool:
     """Whether `==`/`!=`/assert_eq can be lowered for this type (no strings yet).
     ADTs qualify only when every payload is slot-inline: a boxed payload would
     compare as a pointer natively, which is not structural equality."""
-    if ty is STRING or isinstance(ty, (ListType, FnType)):
+    if ty is STRING or isinstance(ty, (ListType, MapType, FnType)):
         return False
     if isinstance(ty, RecordType):
         return all(_is_comparable(t) for _, t in ty.fields)
     if isinstance(ty, AdtType):
+        # String payloads compare by CONTENT (a runtime helper natively, str
+        # equality in the interpreter) — Option<String> equality is what every
+        # Map.get/read_line call site wants. Other boxed payloads would
+        # compare as pointers, so they stay out.
         return all(
-            len(v.payload) <= 1 and all(_slot_inline(t) for t in v.payload) for v in ty.variants
+            len(v.payload) <= 1 and all(_slot_inline(t) or t is STRING for t in v.payload)
+            for v in ty.variants
         )
     return True
 

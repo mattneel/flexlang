@@ -213,12 +213,27 @@ def test_try_on_string_result(tmp_path: Path) -> None:
 
 
 def test_eq_on_boxed_payload_rejected() -> None:
-    # A boxed payload would compare as a pointer natively; the checker says no.
+    # A boxed RECORD payload would compare as a pointer natively; the checker
+    # says no. (Single String payloads compare by CONTENT since M8.)
     diags = _diag(
+        "type P = { x: I64 }\n"
+        "type E = | Wrap(P) | Nil\n"
+        "fn main() -> I64 = {\n"
+        "  let a = Wrap({ x = 1 })\n"
+        "  if a == a { 0 } else { 1 }\n}\n"
+    )
+    assert any(d.code == "TYPE019" for d in diags)
+
+
+def test_eq_on_string_payload_compares_content(tmp_path: Path) -> None:
+    # M8: single String payloads ride structural equality, by content.
+    src = (
         "type E = | Msg(String) | Nil\n"
         'fn main() -> I64 = { if Msg("a") == Msg("a") { 0 } else { 1 } }\n'
     )
-    assert any(d.code == "TYPE019" for d in diags)
+    flx = tmp_path / "main.flx"
+    flx.write_text(src, encoding="utf-8")
+    assert driver.cmd_run(str(flx), interpret=True) == 0
 
 
 # --- match ergonomics --------------------------------------------------------------

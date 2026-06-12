@@ -699,6 +699,8 @@ class Interpreter:
                 return _wrap(_time.monotonic_ns() // 1_000_000)
             if isinstance(obj, ast.NameExpr) and obj.name == "List" and not shadowed:
                 return self._list_op(callee.name, expr, env)
+            if isinstance(obj, ast.NameExpr) and obj.name == "Map" and not shadowed:
+                return self._map_op(callee.name, expr, env)
             if isinstance(obj, ast.NameExpr) and obj.name == "Str" and not shadowed:
                 return self._str_op(callee.name, expr, env)
             if (
@@ -754,6 +756,8 @@ class Interpreter:
         if op == "push":
             xs.append(self.eval(expr.args[1], env))
             return None
+        if op == "pop":
+            return Variant("Some", xs.pop()) if xs else Variant("None")
         if op == "set":
             i = self.eval(expr.args[1], env)
             assert isinstance(i, int)
@@ -762,6 +766,34 @@ class Interpreter:
             xs[i] = self.eval(expr.args[2], env)
             return None
         raise FlexRuntimeError(f"cannot interpret List.{op}")
+
+    def _map_op(self, op: str, expr: ast.CallExpr, env: _Env) -> object:
+        # Python dicts ARE insertion-ordered maps, matching the native
+        # entries-array semantics move for move: set on a live key keeps its
+        # position, remove deletes, re-insert goes to the end.
+        if op == "new":
+            return {}
+        m = self.eval(expr.args[0], env)
+        assert isinstance(m, dict)
+        if op == "len":
+            return len(m)
+        if op == "keys":
+            return list(m.keys())
+        if op == "values":
+            return list(m.values())
+        key = self.eval(expr.args[1], env)
+        assert isinstance(key, str)
+        if op == "set":
+            m[key] = self.eval(expr.args[2], env)
+            return None
+        if op == "get":
+            return Variant("Some", m[key]) if key in m else Variant("None")
+        if op == "has":
+            return key in m
+        if op == "remove":
+            m.pop(key, None)
+            return None
+        raise FlexRuntimeError(f"cannot interpret Map.{op}")
 
     def _str_op(self, op: str, expr: ast.CallExpr, env: _Env) -> object:
         if op == "from_byte":
@@ -870,7 +902,14 @@ class Interpreter:
         if name in ("assert_eq", "assert_ne"):
             a = self.eval(expr.args[0], env)
             b = self.eval(expr.args[1], env)
-            equal = _struct_eq(a, b)
+            symbol = self.method_targets.get(id(expr))
+            if symbol is not None:
+                # The checker routed this assertion through an Eq impl (a type
+                # that isn't structurally comparable); both backends dispatch it.
+                fn = self.functions[symbol]
+                equal = bool(self.call(fn, [a, b]))
+            else:
+                equal = _struct_eq(a, b)
             if name == "assert_eq" and not equal:
                 raise _TestFail(self._eq_reason("assert_eq", a, b))
             if name == "assert_ne" and equal:

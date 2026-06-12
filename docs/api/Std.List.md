@@ -8,9 +8,20 @@ Helpers over the built-in growable `List<T>`.
 
 Lists themselves are built into the language: `[1, 2, 3]` literals, `xs[i]`
 indexing (panics out of bounds), `List.push(xs, v)`, `List.len(xs)`,
-`List.set(xs, i, v)`, and `for x in xs { ... }` need no import. Lists have
-REFERENCE semantics: `let ys = xs` aliases, it does not copy. This module
-adds the derived helpers.
+`List.set(xs, i, v)`, `List.pop(xs)` (`Some(last)`, or `None` when empty),
+and `for x in xs { ... }` need no import. Lists have REFERENCE semantics:
+`let ys = xs` aliases, it does not copy. This module adds the derived
+helpers.
+
+**Example: pop is the honest inverse of push** — ✓ checked by `flx docs check`:
+
+```flx
+mut xs = [1, 2]
+assert_eq(List.pop(xs), Some(2))
+assert_eq(List.pop(xs), Some(1))
+assert_eq(List.pop(xs), None)
+assert_eq(List.len(xs), 0)
+```
 
 *since 0.0.1 · status: implemented*
 
@@ -89,3 +100,68 @@ assert_eq(fold([5, 3, 8, 1], 9999, min), 1)
 ```flx
 assert_eq(fold(range(1, 11), 0, max), 10)
 ```
+
+## sort_with
+
+```flx
+fn sort_with<T>(xs: List<T>, lt: (T, T) -> Bool) -> Unit
+```
+
+Sort in place by a less-than comparator. Stable.
+
+**Example: sorts strings lexicographically** — ✓ checked by `flx docs check`:
+
+```flx
+mut words = ["pear", "apple", "fig"]
+sort_with(words, str_lt)
+assert_eq(words[0], "apple")
+assert_eq(words[1], "fig")
+assert_eq(words[2], "pear")
+```
+
+See also: `sort_by`
+
+## sort_by
+
+```flx
+fn sort_by<T>(xs: List<T>, key: (T) -> I64) -> Unit
+```
+
+Sort in place, ascending by an I64 key function. Stable.
+
+Stable: elements with equal keys keep their relative order. Insertion sort
+— O(n^2), honest and deterministic on both backends.
+
+**Example: sorts strings by length, stably** — ✓ checked by `flx docs check`:
+
+```flx
+mut words = ["ccc", "a", "bb", "x"]
+sort_by(words, length)
+assert_eq(words[0], "a")
+assert_eq(words[1], "x")
+assert_eq(words[2], "bb")
+assert_eq(words[3], "ccc")
+```
+
+See also: `sort_with`, `Std.Str`
+
+## sort
+
+```flx
+fn sort(xs: List<I64>) -> Unit
+```
+
+Sort a List<I64> in place, ascending.
+
+**Example: sorts numbers** — ✓ checked by `flx docs check`:
+
+```flx
+mut xs = [3, 1, 2, -5]
+sort(xs)
+assert_eq(xs[0], -5)
+assert_eq(xs[1], 1)
+assert_eq(xs[2], 2)
+assert_eq(xs[3], 3)
+```
+
+See also: `sort_by`, `sort_with`

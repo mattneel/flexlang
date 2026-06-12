@@ -23,7 +23,7 @@ from typing import Any, cast
 from flx.diagnostics import Diagnostic, FlexError
 from flx.sema.check import CheckResult, check, spec_symbol
 from flx.syntax import ast
-from flx.types import AdtType, ListType, PrimType, RecordType, Type
+from flx.types import AdtType, ListType, MapType, PrimType, RecordType, Type
 
 # A generous ceiling: real programs need a handful of specializations. A runaway
 # count means polymorphic recursion (a generic calling itself at an ever-growing
@@ -86,6 +86,8 @@ def _type_to_typeexpr(ty: Type) -> ast.TypeExpr:
         return ast.TypeExpr(ty.name, [_type_to_typeexpr(a) for a in ty.type_args])
     if isinstance(ty, ListType):
         return ast.TypeExpr("List", [_type_to_typeexpr(ty.elem)])
+    if isinstance(ty, MapType):
+        return ast.TypeExpr("Map", [ast.TypeExpr("String"), _type_to_typeexpr(ty.value)])
     if isinstance(ty, (PrimType, RecordType)):
         return ast.TypeExpr(ty.name)
     raise FlexError([Diagnostic("MONO002", f"cannot monomorphize a generic over type {ty}", None)])

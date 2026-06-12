@@ -86,13 +86,25 @@ class AdtType(Type):
 
 @dataclass(frozen=True)
 class ListType(Type):
-    """A homogeneous list, `List<T>`. Interpreter-only for now (manifests and
-    build scripts run interpreted); the native backend rejects it cleanly."""
+    """A homogeneous list, `List<T>` — a heap container with reference
+    semantics, lowered on both backends."""
 
     elem: Type
 
     def __str__(self) -> str:
         return f"List<{self.elem}>"
+
+
+@dataclass(frozen=True)
+class MapType(Type):
+    """An insertion-ordered map with String keys, `Map<String, V>` — keys are
+    String for now, so only the value type varies. Reference semantics, like
+    List. Structural equality on the value type (like ListType)."""
+
+    value: Type
+
+    def __str__(self) -> str:
+        return f"Map<String, {self.value}>"
 
 
 @dataclass(frozen=True)

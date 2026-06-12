@@ -40,6 +40,55 @@ pub fn fold<T, A>(xs: List<T>, init: A, f: (A, T) -> A) -> A = {
   acc
 }
 
+// Sorting: stable in-place insertion sort (deterministic on both backends by
+// construction — it is the same Flex code). O(n^2); fine for the small lists
+// programs actually sort, honest about the rest.
+
+pub fn sort_with<T>(xs: List<T>, lt: (T, T) -> Bool) -> Unit = {
+  mut i = 1
+  while i < List.len(xs) {
+    let x = xs[i]
+    mut j = i
+    mut placing = true
+    while placing {
+      if j > 0 {
+        let prev = xs[j - 1]
+        if lt(x, prev) {
+          List.set(xs, j, prev)
+          j = j - 1
+        } else { placing = false }
+      } else { placing = false }
+    }
+    List.set(xs, j, x)
+    i = i + 1
+  }
+}
+
+pub fn sort_by<T>(xs: List<T>, key: (T) -> I64) -> Unit = {
+  mut i = 1
+  while i < List.len(xs) {
+    let x = xs[i]
+    let kx = key(x)
+    mut j = i
+    mut placing = true
+    while placing {
+      if j > 0 {
+        let prev = xs[j - 1]
+        if kx < key(prev) {
+          List.set(xs, j, prev)
+          j = j - 1
+        } else { placing = false }
+      } else { placing = false }
+    }
+    List.set(xs, j, x)
+    i = i + 1
+  }
+}
+
+fn ident_i64(n: I64) -> I64 = { n }
+
+pub fn sort(xs: List<I64>) -> Unit = { sort_by(xs, ident_i64) }
+
 // --- documentation ---------------------------------------------------------------
 
 doc module {
@@ -47,10 +96,18 @@ doc module {
   text """
   Lists themselves are built into the language: `[1, 2, 3]` literals, `xs[i]`
   indexing (panics out of bounds), `List.push(xs, v)`, `List.len(xs)`,
-  `List.set(xs, i, v)`, and `for x in xs { ... }` need no import. Lists have
-  REFERENCE semantics: `let ys = xs` aliases, it does not copy. This module
-  adds the derived helpers.
+  `List.set(xs, i, v)`, `List.pop(xs)` (`Some(last)`, or `None` when empty),
+  and `for x in xs { ... }` need no import. Lists have REFERENCE semantics:
+  `let ys = xs` aliases, it does not copy. This module adds the derived
+  helpers.
   """
+  test "pop is the honest inverse of push" {
+    mut xs = [1, 2]
+    assert_eq(List.pop(xs), Some(2))
+    assert_eq(List.pop(xs), Some(1))
+    assert_eq(List.pop(xs), None)
+    assert_eq(List.len(xs), 0)
+  }
   since "0.0.1"
   status implemented
 }
@@ -99,4 +156,48 @@ doc fold {
   test "folds max to find the largest" {
     assert_eq(fold(range(1, 11), 0, max), 10)
   }
+}
+
+doc sort {
+  summary "Sort a List<I64> in place, ascending."
+  test "sorts numbers" {
+    mut xs = [3, 1, 2, -5]
+    sort(xs)
+    assert_eq(xs[0], -5)
+    assert_eq(xs[1], 1)
+    assert_eq(xs[2], 2)
+    assert_eq(xs[3], 3)
+  }
+  see sort_by
+  see sort_with
+}
+
+doc sort_by {
+  summary "Sort in place, ascending by an I64 key function. Stable."
+  text """
+  Stable: elements with equal keys keep their relative order. Insertion sort
+  — O(n^2), honest and deterministic on both backends.
+  """
+  test "sorts strings by length, stably" {
+    mut words = ["ccc", "a", "bb", "x"]
+    sort_by(words, length)
+    assert_eq(words[0], "a")
+    assert_eq(words[1], "x")
+    assert_eq(words[2], "bb")
+    assert_eq(words[3], "ccc")
+  }
+  see sort_with
+  see Std.Str
+}
+
+doc sort_with {
+  summary "Sort in place by a less-than comparator. Stable."
+  test "sorts strings lexicographically" {
+    mut words = ["pear", "apple", "fig"]
+    sort_with(words, str_lt)
+    assert_eq(words[0], "apple")
+    assert_eq(words[1], "fig")
+    assert_eq(words[2], "pear")
+  }
+  see sort_by
 }

@@ -60,8 +60,9 @@ def test_derive_eq_on_string_record_needs_string_eq() -> None:
     )
 
 
-def test_derive_eq_on_string_adt_payload_rejected() -> None:
-    assert "DER001" in _codes("derive(Eq) type W = | Tag(String) | Empty")
+def test_derive_eq_on_string_adt_payload_works() -> None:
+    # The DER001 ban fell in M8: single String payloads compare by content.
+    check(expand(parse("derive(Eq) type W = | Tag(String) | Empty\nfn main() -> I64 = { 0 }")))
 
 
 def test_derive_show_multi_payload_accepted() -> None:

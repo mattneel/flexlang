@@ -21,6 +21,7 @@
   - [Std.Env](api/Std.Env.md)
   - [Std.IO](api/Std.IO.md)
   - [Std.List](api/Std.List.md)
+  - [Std.Map](api/Std.Map.md)
   - [Std.Math](api/Std.Math.md)
   - [Std.Proc](api/Std.Proc.md)
   - [Std.Str](api/Std.Str.md)

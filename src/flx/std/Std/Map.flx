@@ -1,0 +1,63 @@
+module Std.Map
+
+// Maps are built into the language — this module exists to DOCUMENT them
+// (its examples are executed by `flx docs check` on both backends). No
+// import is needed to use Map.
+
+doc module {
+  summary "The built-in insertion-ordered map, `Map<String, V>`."
+  text """
+  `Map<String, V>` maps String keys to values of one type. Keys are String
+  for now — render other key types with `to_str`. No import is needed:
+  `Map.new`, `Map.set`, `Map.get`, `Map.has`, `Map.len`, `Map.remove`,
+  `Map.keys`, and `Map.values` are built in, like the `List` operations.
+
+  Maps have REFERENCE semantics (`let n = m` aliases, like lists) and
+  mutation needs no effect, like `mut`. Iteration order is INSERTION order,
+  identically on both backends: setting an existing key keeps its position,
+  removing deletes it, and re-inserting puts it at the end.
+
+  `Map.get` returns an `Option<V>` — a missing key is `None`, never a
+  sentinel value. Lookup is a linear scan today (a hash index is the
+  roadmap), so keep maps to thousands of keys, not millions.
+  """
+  test "the shape of a word count" {
+    let counts: Map<String, I64> = Map.new()
+    for word in split("the cat and the hat", " ") {
+      let so_far = match Map.get(counts, word) { Some(n) => n  None => 0 }
+      Map.set(counts, word, so_far + 1)
+    }
+    assert_eq(Map.get(counts, "the"), Some(2))
+    assert_eq(Map.get(counts, "cat"), Some(1))
+    assert_eq(Map.get(counts, "dog"), None)
+    assert_eq(Map.len(counts), 4)
+  }
+  test "insertion order is the contract" {
+    let m: Map<String, I64> = Map.new()
+    Map.set(m, "a", 1)
+    Map.set(m, "b", 2)
+    Map.set(m, "c", 3)
+    Map.set(m, "a", 11)      // replacing keeps the position
+    Map.remove(m, "b")
+    Map.set(m, "b", 22)      // re-inserting goes to the end
+    let ks = Map.keys(m)
+    assert_eq(ks[0], "a")
+    assert_eq(ks[1], "c")
+    assert_eq(ks[2], "b")
+    let vs = Map.values(m)
+    assert_eq(vs[0], 11)
+    assert_eq(vs[2], 22)
+  }
+  test "has, remove, and aliasing" {
+    let m: Map<String, String> = Map.new()
+    Map.set(m, "k", "v")
+    assert(Map.has(m, "k"))
+    let alias = m
+    Map.remove(alias, "k")   // reference semantics: one map, two names
+    assert(!Map.has(m, "k"))
+    assert_eq(Map.len(m), 0)
+  }
+  since "0.0.1"
+  status implemented
+  see Std.List
+}
