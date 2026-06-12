@@ -237,6 +237,11 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
             return driver.cmd_build(None, args.output)
         return build_runner.run_build(args.path, args.explain)
     if args.command == "test":
+        if args.format != "pretty":
+            # Advertised but unimplemented output would silently feed pretty
+            # text to a CI pipeline expecting JSON — refuse loudly instead.
+            print(f"flx test --format {args.format}: not yet implemented", file=sys.stderr)
+            return 2
         code = driver.cmd_test(
             args.path, args.filter, interpret=not args.native, native=args.native
         )

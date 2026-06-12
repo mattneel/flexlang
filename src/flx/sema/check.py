@@ -347,6 +347,8 @@ class Checker:
         # Which modules declared each extern: every declaring module may use it
         # (a private extern redeclared in two modules is usable from both).
         self.extern_decl_modules: dict[str, set[str]] = {}
+        # Duplicate fn declarations (by id): TYPE002 reported, bodies skipped.
+        self._dup_fn_decls: set[int] = set()
 
     # --- entry ----------------------------------------------------------------
 
@@ -459,7 +461,13 @@ class Checker:
 
         for fn in self.module.functions:
             if fn.name in self.functions or fn.name in self.generic_fns:
+                # TYPE002 reported; the FIRST signature stays authoritative and
+                # this body is never checked against it — a duplicate's body is
+                # consistent with its OWN declaration, and false "wrong return
+                # type"/"missing effect" errors would only obscure the collision.
                 self._err_duplicate("function", fn.name, fn.span)
+                self._dup_fn_decls.add(id(fn))
+                continue
             self.current_module = self._module_of(fn.span)  # for signature visibility
             if fn.type_params:
                 # A template: type params are unresolved here. Its concrete
@@ -486,7 +494,7 @@ class Checker:
         self._register_targets()
 
         for fn in self.module.functions:
-            if fn.name in self.generic_fns:
+            if fn.name in self.generic_fns or id(fn) in self._dup_fn_decls:
                 continue
             self._check_fn(fn)
         for impl_fn in self._impl_fns:
@@ -744,6 +752,10 @@ class Checker:
         substituting a caller's type argument into a template's module) — the
         caller already passed visibility at the call site, so they're exempt."""
         if span is None:
+            return
+        if name in _BUILTIN_ADTS:
+            # Option/Result are global. A user redefinition is TYPE002-rejected;
+            # it must not also make stdlib signatures "private to" the user.
             return
         if not self._name_visible(name):
             self._err(
@@ -1319,6 +1331,27 @@ class Checker:
         # `Type.Variant` path access to a (payloadless) constructor, e.g.
         # MathError.DivideByZero.
         if isinstance(expr.obj, ast.NameExpr) and expr.obj.name in self.adt_templates:
+            adt_name = expr.obj.name
+            owner = self.ctors.get(expr.name)
+            if owner is None or owner[0] != adt_name:
+                # Not that type's variant: a clean diagnostic, never a KeyError
+                # ICE — and when the type's name shadows an intrinsic module
+                # (a user `type Fs` breaks Std.IO's own `Fs.read_line()`),
+                # say exactly that.
+                help_text = None
+                if (adt_name, expr.name) in _INTRINSICS:
+                    help_text = (
+                        f"a type named {adt_name!r} shadows the {adt_name} intrinsic "
+                        f"module, so {adt_name}.{expr.name} no longer resolves; "
+                        "rename the type"
+                    )
+                self._err(
+                    "TYPE010",
+                    f"type {adt_name!r} has no variant {expr.name!r}",
+                    expr.span,
+                    help=help_text,
+                )
+                return ERROR
             return self._infer_ctor(expr.name, [], None, expr.span)
         obj_ty = self._check_expr(expr.obj)
         if isinstance(obj_ty, RecordType):

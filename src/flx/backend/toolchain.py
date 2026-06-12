@@ -13,6 +13,7 @@ import functools
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from flx.diagnostics import Diagnostic, FlexError
@@ -122,6 +123,11 @@ def build_executable(mlir_text: str, c_source: str, out_path: Path, workdir: Pat
 
 
 def run_executable(path: Path, args: tuple[str, ...] = ()) -> int:
+    # The child shares our stdout/stderr fds: anything still in Python's text
+    # buffers must land first, or redirected output interleaves out of
+    # execution order (docs check runs interp then native in one process).
+    sys.stdout.flush()
+    sys.stderr.flush()
     code = subprocess.run([str(path), *args]).returncode
     # A signal death (e.g. an extern abort()) comes back negative from Python;
     # report it as a shell would (128 + signal), which is also what the

@@ -256,6 +256,54 @@ def test_unknown_escape_message_names_xnn() -> None:
     assert any("\\xNN" in d.message for d in exc.value.diagnostics)
 
 
+# --- raw bytes in test names and reports ---------------------------------------------------
+
+HOSTILE_NAMES = """\
+module Hostile
+import Std.Str
+
+test "label with \\xe9 raw byte" { assert_eq(1, 1) }
+
+test "failing \\xff label" { assert_eq(from_byte(0xFF), "\\xfe") }
+"""
+
+
+def test_surrogate_test_labels_interp(tmp_path: Path) -> None:
+    # Labels and failure reports carry the raw bytes, not U+FFFD mojibake.
+    path = _write(tmp_path, HOSTILE_NAMES)
+    code, out = _test_cmd(path)
+    assert code == 1
+    assert b"ok Hostile / label with \xe9 raw byte" in out
+    assert b"fail Hostile / failing \xff label" in out
+    assert b'actual "\xff", expected "\xfe"' in out
+    assert "�".encode() not in out  # no U+FFFD replacement mojibake
+
+
+@native
+def test_surrogate_test_labels_parity(tmp_path: Path) -> None:
+    # The native harness embeds labels as octal-escaped C strings; the interp
+    # writes raw bytes. Same bytes out.
+    path = _write(tmp_path, HOSTILE_NAMES)
+    assert _test_cmd(path, "interp") == _test_cmd(path, "native")
+
+
+def test_surrogate_doc_test_name_synthesizes(tmp_path: Path) -> None:
+    # A doc test named with \xNN must survive synthesis (the synthesized file
+    # is written as UTF-8; surrogates must re-escape, not crash).
+    src = (
+        "module Hostile\nimport Std.Str\n"
+        "pub fn one() -> I64 = { 1 }\n"
+        'doc one { test "name with \\xff byte" { assert_eq(one(), 1) } }\n'
+        "fn main() -> I64 = { 0 }\n"
+    )
+    path = _write(tmp_path, src)
+    proc = subprocess.run(
+        [sys.executable, "-m", "flx", "test", "--docs", path], capture_output=True
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert b"Traceback" not in proc.stderr
+
+
 # --- the discoverability hints -----------------------------------------------------------
 
 

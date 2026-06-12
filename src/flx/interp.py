@@ -240,6 +240,19 @@ def _read_line() -> str | None:
     return buf.decode("utf-8", "surrogateescape")
 
 
+def _print_raw(message: str, end: str = "\n") -> None:
+    """print() with native-identical bytes: non-ASCII output (surrogate-escaped
+    bytes especially) is written raw to the stdout buffer — Python's text-mode
+    encoder is locale-dependent and may replace rather than raise."""
+    if message.isascii() and end.isascii():
+        print(message, end=end, flush=True)
+        return
+    sys.stdout.flush()
+    raw = (message + end).encode("utf-8", "surrogateescape")
+    sys.stdout.buffer.write(raw)
+    sys.stdout.buffer.flush()
+
+
 def _checked_byte(b: object) -> int:
     """Validate a string byte for from_byte/from_bytes: 1..255 (byte 0 is the
     NUL terminator and cannot be carried). The message matches the native
@@ -306,31 +319,34 @@ class Interpreter:
             # Imported tests report under their own module, not the entry's.
             module_name = self.checked.file_module.get(test.span.file, default_module)
             self.in_test = True
+            # Labels and failure reports go through _print_raw: a test name (or
+            # an asserted string) can carry raw bytes, which native printf
+            # emits verbatim — the interpreter must match byte-for-byte.
             try:
                 self.exec_block(test.body, _Env())
-                print(f"ok {module_name} / {test.name}")
+                _print_raw(f"ok {module_name} / {test.name}")
                 passed += 1
             except _TestFail as fail:
                 if fail.reason:
-                    print(fail.reason)
-                print(f"fail {module_name} / {test.name}")
+                    _print_raw(fail.reason)
+                _print_raw(f"fail {module_name} / {test.name}")
                 failed += 1
             except _Return:
                 # a `?` propagated an Err/None out of the test body: native lowers
                 # this to an explicit-failure call, so match its output exactly.
                 print("  explicit failure")
-                print(f"fail {module_name} / {test.name}")
+                _print_raw(f"fail {module_name} / {test.name}")
                 failed += 1
             except FlexRuntimeError as exc:
                 # A panic (index out of bounds, division by zero) fails the ONE
                 # test it happened in; the rest of the suite still runs. The
                 # native harness recovers identically via setjmp/longjmp.
-                print(f"  runtime error: {exc}")
-                print(f"fail {module_name} / {test.name}")
+                _print_raw(f"  runtime error: {exc}")
+                _print_raw(f"fail {module_name} / {test.name}")
                 failed += 1
             finally:
                 self.in_test = False
-        print(f"\n{passed} passed, {failed} failed")
+        print(f"\n{passed} passed, {failed} failed", flush=True)
         return 0 if failed == 0 else 1
 
     # --- functions / blocks ---------------------------------------------------
@@ -612,15 +628,7 @@ class Interpreter:
             if isinstance(obj, ast.NameExpr) and obj.name == "Log" and not shadowed:
                 message = str(self.eval(expr.args[0], env))
                 end = "" if callee.name == "print" else "\n"  # flx_print vs flx_log
-                try:
-                    print(message, end=end, flush=True)
-                except UnicodeEncodeError:
-                    # Bytes that came from C via surrogateescape: write them raw,
-                    # exactly as native flx_log/flx_print would.
-                    sys.stdout.flush()
-                    raw = message.encode("utf-8", "surrogateescape") + end.encode()
-                    sys.stdout.buffer.write(raw)
-                    sys.stdout.buffer.flush()
+                _print_raw(message, end)
                 return None
             if (
                 isinstance(obj, ast.NameExpr)

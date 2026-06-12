@@ -59,23 +59,19 @@ void __flx_fail_msg(const char *p, long long n) {
 
 
 def _c_string(text: str) -> str:
-    """Escape ``text`` for use inside a C double-quoted string literal."""
+    """Escape ``text`` for use inside a C double-quoted string literal,
+    byte-wise: non-ASCII (including surrogate-escaped bytes from \\xNN test
+    names) becomes bounded octal escapes, so the generated C stays pure ASCII
+    and printf emits exactly the bytes the interpreter prints."""
     out = []
-    for ch in text:
-        if ch == "\\":
-            out.append("\\\\")
-        elif ch == '"':
-            out.append('\\"')
-        elif ch == "\n":
-            out.append("\\n")
-        elif ch == "\t":
-            out.append("\\t")
-        elif ch == "\r":
-            out.append("\\r")
-        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
-            out.append(f"\\{ord(ch):03o}")
+    named = {0x5C: "\\\\", 0x22: '\\"', 0x0A: "\\n", 0x09: "\\t", 0x0D: "\\r"}
+    for b in text.encode("utf-8", "surrogateescape"):
+        if b in named:
+            out.append(named[b])
+        elif 0x20 <= b < 0x7F:
+            out.append(chr(b))
         else:
-            out.append(ch)
+            out.append(f"\\{b:03o}")
     return "".join(out)
 
 

@@ -76,13 +76,18 @@ def collect(files: list[Path] | None = None) -> list[DocUnit]:
 def _flx_str(value: str) -> str:
     """Render a string VALUE back into Flex string-literal syntax. Doc test
     names are parsed values; embedding them verbatim into a synthesized
-    program would let a backslash or newline break the lexer."""
+    program would let a backslash or newline break the lexer — and a
+    surrogate-escaped byte (from an \\xNN escape in the name) cannot even be
+    written to a UTF-8 file, so those become \\xNN again."""
     escaped = (
         value.replace("\\", "\\\\")
         .replace('"', '\\"')
         .replace("\n", "\\n")
         .replace("\t", "\\t")
         .replace("\r", "\\r")
+    )
+    escaped = "".join(
+        f"\\x{ord(ch) - 0xDC00:02x}" if 0xDC80 <= ord(ch) <= 0xDCFF else ch for ch in escaped
     )
     return f'"{escaped}"'
 
@@ -166,10 +171,11 @@ def _copy_module_closure(file: Path, module_name: str, tmp: Path) -> set[str]:
 
 
 def _run_module_doc_tests(
-    module_name: str, file: Path, tests: list[tuple[str, ast.DocTest]], native: bool
+    module_name: str, file: Path, tests: list[tuple[str, ast.DocTest]], mode: str
 ) -> int:
-    """Synthesize and execute one module's doc examples. A non-stdlib module
-    is copied (with its import closure) beside the synthesized program so its
+    """Synthesize and execute one module's doc examples on the backend(s)
+    `mode` names ("interp", "native", or "both"). A non-stdlib module is
+    copied (with its import closure) beside the synthesized program so its
     own helpers resolve."""
     from flx import driver
 
@@ -187,8 +193,10 @@ def _run_module_doc_tests(
         path = str(Path(tmp) / "doc_run.flx")
         Path(path).write_text(source, encoding="utf-8")
         print(f"== doc tests: {module_name} ({len(tests)} examples)")
-        backends = [("interpreter", dict(interpret=True))]
-        if native:
+        backends = []
+        if mode in ("interp", "both"):
+            backends.append(("interpreter", dict(interpret=True)))
+        if mode in ("native", "both"):
             backends.append(("native", dict(native=True)))
         for label, kwargs in backends:
             code = driver.cmd_test(path, **kwargs)  # type: ignore[arg-type]
@@ -243,7 +251,7 @@ def cmd_docs_check(native: bool = False) -> int:
 
     # DOC002: every runnable doc example passes, as a real test program.
     for module_name, (file, tests) in sorted(_doc_tests(units).items()):
-        failures += _run_module_doc_tests(module_name, file, tests, native)
+        failures += _run_module_doc_tests(module_name, file, tests, "both" if native else "interp")
 
     # DOC003: every documented diagnostic example fails with exactly that code.
     failures += _check_error_examples(_error_tests(units))
@@ -310,7 +318,9 @@ def run_file_docs(path: str, native: bool = False) -> int:
         return 0
     code = 0
     for module_name, (file, tests) in sorted(grouped.items()):
-        rc = _run_module_doc_tests(module_name, file, tests, native)
+        # `flx test --docs --native` means native, like `flx test --native` —
+        # the dual interp+native proof is `flx docs check --both`'s job.
+        rc = _run_module_doc_tests(module_name, file, tests, "native" if native else "interp")
         code = code or rc
     if _check_error_examples(error_tests):
         code = code or 1

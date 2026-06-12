@@ -246,7 +246,7 @@ void __flx_substr(const char *p, long long n, long long start, long long count, 
 // 1..255: byte 0 is the NUL terminator and cannot be carried by a string.
 static void __flx_byte_check(long long b) {
     if (b < 1 || b > 255) {
-        char msg[64];
+        char msg[96]; /* 47 static chars + up to 20 digits w/ sign + NUL */
         snprintf(msg, sizeof msg, "byte %lld is outside 1..255 (strings are NUL-terminated)", b);
         __flx_runtime_fail(msg);
     }
