@@ -159,6 +159,7 @@ The MVP should compile a small subset of Flex to native code and run first-class
 * `.flx` files
 * `flx parse`
 * `flx check`
+* `flx fmt`
 * `flx test`
 * `flx emit-mlir`
 * `flx run`
@@ -1633,6 +1634,16 @@ flx explain-cost examples/users.flx
 ```
 
 MVP may stub this.
+
+### 18.12 `flx fmt`
+
+Format Flex source files and enforce canonical style in CI.
+
+```sh
+flx fmt src
+flx fmt --check src examples
+flx fmt --stdout examples/add.flx
+```
 
 ---
 

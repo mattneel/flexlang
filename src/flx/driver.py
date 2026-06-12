@@ -206,6 +206,67 @@ def cmd_expand(path: str) -> int:
     return 0
 
 
+def _discover_fmt_files(paths: list[str]) -> tuple[list[Path], bool]:
+    files: list[Path] = []
+    ok = True
+    for raw in paths:
+        path = Path(raw)
+        if path.is_dir():
+            files.extend(sorted(p for p in path.rglob("*.flx") if p.is_file()))
+        elif path.is_file():
+            files.append(path)
+        else:
+            print(f"flx fmt: cannot find {raw}", file=sys.stderr)
+            ok = False
+    return files, ok
+
+
+def cmd_fmt(paths: list[str], *, check: bool = False, stdout: bool = False) -> int:
+    files, ok = _discover_fmt_files(paths)
+    if not ok:
+        return 1
+    if not files:
+        print("flx fmt: no .flx files found", file=sys.stderr)
+        return 1
+    if stdout and (check or len(files) != 1):
+        print(
+            "flx fmt: --stdout requires exactly one file and cannot be combined with --check",
+            file=sys.stderr,
+        )
+        return 2
+
+    from flx.syntax.formatter import format_source
+
+    changed = False
+    for file in files:
+        source = _read(str(file))
+        if source is None:
+            return 1
+        try:
+            formatted = format_source(source, str(file))
+        except FlexError as err:
+            _report(err, {str(file): source})
+            return 1
+        except RecursionError:
+            print(f"flx fmt: {file}: input is too deeply nested", file=sys.stderr)
+            return 1
+        if stdout:
+            sys.stdout.write(formatted)
+            return 0
+        if formatted == source:
+            continue
+        changed = True
+        if check:
+            print(f"flx fmt: would reformat {file}", file=sys.stderr)
+        else:
+            try:
+                file.write_text(formatted, encoding="utf-8")
+            except OSError as exc:
+                print(f"flx fmt: {file}: {exc}", file=sys.stderr)
+                return 1
+    return 1 if check and changed else 0
+
+
 def cmd_check(path: str | None = None) -> int:
     if path is not None and Path(path).name == pkg.MANIFEST_FILE:
         try:

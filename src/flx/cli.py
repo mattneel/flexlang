@@ -105,6 +105,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="Check the optional native backend toolchain (LLVM/MLIR)")
 
+    fmt_cmd = sub.add_parser("fmt", help="Format Flex source files")
+    fmt_cmd.add_argument("paths", nargs="+", help="source file or directory paths")
+    fmt_cmd.add_argument(
+        "--check",
+        action="store_true",
+        help="verify files are already formatted without writing changes",
+    )
+    fmt_cmd.add_argument(
+        "--stdout",
+        action="store_true",
+        help="write formatted source to stdout instead of modifying the file",
+    )
+
     deps_cmd = sub.add_parser("deps", help="Lock, vendor, or verify package dependencies")
     deps_sub = deps_cmd.add_subparsers(dest="deps_command", metavar="<deps-command>")
     for name, help_text in {
@@ -239,6 +252,8 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "doctor":
         return driver.cmd_doctor()
+    if args.command == "fmt":
+        return driver.cmd_fmt(args.paths, check=args.check, stdout=args.stdout)
     if args.command == "deps":
         from flx import package as pkg
 

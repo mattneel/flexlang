@@ -113,6 +113,7 @@ flx emit-mlir examples/add.flx     # textual MLIR (func/arith/cf/memref)
 flx run       examples/add.flx     # interpret and run (exit code 42)
 flx run --native examples/add.flx  # compile through LLVM 22 and run
 flx test      examples/add.flx     # run first-class tests
+flx fmt       examples/add.flx     # rewrite source in canonical style
 ```
 
 ```console

@@ -15,6 +15,7 @@ LLVM/MLIR backend.
 | `flx docs build [path]` | Render doc declarations into Markdown | ✅ |
 | `flx deps <lock|vendor|verify>` | Lock, vendor, and verify package dependencies | ✅ |
 | `flx expand <file>` | Show comptime/macro/derive expansion | ✅ |
+| `flx fmt <path...>` | Format Flex source files | ✅ |
 | `flx highlight <file>` | Syntax-highlight `.flx` | ✅ |
 | `flx build <file> -o <bin>` | Build a native executable | working |
 | `flx release preflight` | Check release readiness before publish | ✅ |
@@ -71,6 +72,18 @@ package dependency roots found beside it.
 `--format pretty` is the default. `json` and `junit` are available on the
 interpreter backend for CI consumers that need machine-readable test reports.
 The native test harness currently emits pretty output only.
+
+## `flx fmt`
+
+```sh
+flx fmt src
+flx fmt --check src examples
+flx fmt --stdout examples/add.flx
+```
+
+`flx fmt` rewrites `.flx` files into the canonical source style. A directory
+path is expanded recursively. `--check` reports files that would change without
+writing them, and `--stdout` prints one formatted file without modifying it.
 
 ## `flx deps`
 
