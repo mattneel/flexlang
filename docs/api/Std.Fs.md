@@ -55,3 +55,22 @@ match write_text("todo.txt", "buy milk\n") {
 ```
 
 *since 0.0.1 · status: implemented*
+
+## append_text
+
+```flx
+fn append_text(path: String, contents: String) -> Result<Unit, String> uses { Fs }
+```
+
+Append a whole string to a text file.
+
+**Sketch: append a log line** — illustration only, not checked:
+
+```flx
+match append_text("app.log", "started\n") {
+  Ok(_) => {}
+  Err(reason) => { reason }
+}
+```
+
+*since 0.0.1 · status: implemented*

@@ -1,7 +1,8 @@
 # Examples
 
 These are the real files under [`examples/`](https://github.com/mattneel/flexlang/tree/main/examples),
-included verbatim and highlighted by the Flex lexer.
+included verbatim and highlighted by the Flex lexer. Wheels include the same
+top-level `examples/` tree so source-blind installs can run these commands too.
 
 ## Hello integer
 

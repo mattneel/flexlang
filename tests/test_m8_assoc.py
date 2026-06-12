@@ -391,9 +391,16 @@ def test_derive_eq_without_std_str_still_diagnoses() -> None:
     assert any(d.code == "DISP001" for d in diags)
 
 
-def test_derive_map_field_is_explained() -> None:
-    diags = _diag("derive(Eq) type C = { m: Map<String, I64> }\nfn main() -> I64 = { 0 }\n")
-    assert any("reference semantics" in d.message for d in diags)
+def test_derive_map_field_compares_contents() -> None:
+    check_and_monomorphize(
+        expand(
+            parse(
+                "derive(Eq) type C = { m: Map<String, I64> }\n"
+                "fn same(a: C, b: C) -> Bool = { a.eq(b) }\n"
+                "fn main() -> I64 = { 0 }\n"
+            )
+        )
+    )
 
 
 def test_assert_eq_hint_names_derive() -> None:

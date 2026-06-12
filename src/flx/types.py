@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TypeGuard
 
 
 class Type:
@@ -161,14 +162,14 @@ INT_INFO: dict[str, tuple[int, bool]] = {
 }
 
 
-def is_int_type(ty: Type | None) -> bool:
+def is_int_type(ty: Type | None) -> TypeGuard[PrimType]:
     return isinstance(ty, PrimType) and ty.name in INT_INFO
 
 
 def int_bounds(ty: Type) -> tuple[int, int]:
     if not is_int_type(ty):
         raise TypeError(f"{ty} is not an integer type")
-    width, signed = INT_INFO[ty.name]  # type: ignore[union-attr]
+    width, signed = INT_INFO[ty.name]
     if signed:
         return (-(1 << (width - 1)), (1 << (width - 1)) - 1)
     return (0, (1 << width) - 1)

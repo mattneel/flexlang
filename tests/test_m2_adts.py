@@ -212,17 +212,19 @@ def test_try_on_string_result(tmp_path: Path) -> None:
     )
 
 
-def test_eq_on_boxed_payload_rejected() -> None:
-    # A boxed RECORD payload would compare as a pointer natively; the checker
-    # says no. (Single String payloads compare by CONTENT since M8.)
-    diags = _diag(
+def test_eq_on_boxed_payload_compares_content(tmp_path: Path) -> None:
+    # Boxed payloads compare structurally now, not by native pointer identity.
+    _both_backends(
+        tmp_path,
         "type P = { x: I64 }\n"
         "type E = | Wrap(P) | Nil\n"
         "fn main() -> I64 = {\n"
         "  let a = Wrap({ x = 1 })\n"
-        "  if a == a { 0 } else { 1 }\n}\n"
+        "  let b = Wrap({ x = 1 })\n"
+        "  let c = Wrap({ x = 2 })\n"
+        "  if a == b && a != c { 0 } else { 1 }\n}\n",
+        0,
     )
-    assert any(d.code == "TYPE019" for d in diags)
 
 
 def test_eq_on_string_payload_compares_content(tmp_path: Path) -> None:

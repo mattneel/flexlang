@@ -28,12 +28,13 @@ from flx.types import (
     F64,
     I64,
     STRING,
-    UNIT,
     U64,
+    UNIT,
     AdtType,
     FnType,
     ListType,
     MapType,
+    PrimType,
     RecordType,
     Type,
     is_int_type,
@@ -222,6 +223,12 @@ class FunctionLowerer:
 
     def _ty_of(self, expr: ast.Expr) -> Type:
         return self.types[id(expr)]
+
+    def _show_impl_symbol(self, ty: Type) -> str | None:
+        if not isinstance(ty, (PrimType, RecordType, AdtType)):
+            return None
+        symbol = f"t$Show$0${ty.name}$show"
+        return symbol if symbol in self.functions else None
 
     def _materialize(self, value: str | None, expr: ast.Expr) -> str:
         """A value for `expr` where one is demanded (stored, passed, compared).
@@ -565,7 +572,9 @@ class FunctionLowerer:
         self._emit(f"{payload} = llvm.load {slot} : !llvm.ptr -> {str_mty}")
         return self._result_from_string_flag(ok, payload, ok_has_payload=True)
 
-    def _lower_write_text(self, expr: ast.CallExpr) -> str:
+    def _lower_write_text(
+        self, expr: ast.CallExpr, runtime_symbol: str = "@__flx_write_text"
+    ) -> str:
         path = self._materialize(self.lower_expr(expr.args[0]), expr.args[0])
         text = self._materialize(self.lower_expr(expr.args[1]), expr.args[1])
         pptr, plen = self._string_parts(path)
@@ -577,7 +586,7 @@ class FunctionLowerer:
         self._emit(f"{slot} = llvm.alloca {one} x {str_mty} : (i64) -> !llvm.ptr")
         ok = self._fresh()
         self._emit(
-            f"{ok} = func.call @__flx_write_text({pptr}, {plen}, {tptr}, {tlen}, {slot}) : "
+            f"{ok} = func.call {runtime_symbol}({pptr}, {plen}, {tptr}, {tlen}, {slot}) : "
             "(!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr) -> i64"
         )
         err = self._fresh()
@@ -1234,6 +1243,8 @@ class FunctionLowerer:
                     return self._lower_read_text(expr)
                 if obj.name == "Fs" and method == "write_text":
                     return self._lower_write_text(expr)
+                if obj.name == "Fs" and method == "append_text":
+                    return self._lower_write_text(expr, "@__flx_append_text")
                 if obj.name == "Time" and method == "monotonic_ms":
                     out = self._fresh()
                     self._emit(f"{out} = func.call @__flx_monotonic_ms() : () -> i64")
@@ -1501,12 +1512,71 @@ class FunctionLowerer:
         self._emit(f"{out} = arith.extui {value} : i1 to i64")
         return out
 
+    def _emit_payload_equal(self, lslot: str, rslot: str, payload: tuple[Type, ...]) -> str:
+        conj: str | None = None
+        for i, pty in enumerate(payload):
+            left = self._decode_payload_field(lslot, payload, i)
+            right = self._decode_payload_field(rslot, payload, i)
+            equal = self._emit_equal(left, right, pty)
+            if conj is None:
+                conj = equal
+            else:
+                nxt = self._fresh()
+                self._emit(f"{nxt} = arith.andi {conj}, {equal} : i1")
+                conj = nxt
+        return conj if conj is not None else self._const("1", "i1")
+
+    def _emit_adt_equal(self, left: str, right: str, ty: AdtType, mty: str) -> str:
+        tag_eq = self._cmp_field(left, right, mty, 0, "i32")
+        result_slot = self._alloc_slot("i1")
+        self._store_slot(result_slot, "i1", self._const("0", "i1"))
+        same_lbl, exit_lbl = self._label(), self._label()
+        self._terminator(f"cf.cond_br {tag_eq}, {same_lbl}, {exit_lbl}")
+        self._start_block(same_lbl)
+
+        ltag = self._fresh()
+        self._emit(f"{ltag} = llvm.extractvalue {left}[0] : {mty}")
+        lslot = self._fresh()
+        self._emit(f"{lslot} = llvm.extractvalue {left}[1] : {mty}")
+        rslot = self._fresh()
+        self._emit(f"{rslot} = llvm.extractvalue {right}[1] : {mty}")
+
+        for i, variant in enumerate(ty.variants):
+            variant_lbl = self._label()
+            next_lbl = self._label()
+            tag = self._const(str(i), "i32")
+            is_variant = self._fresh()
+            self._emit(f"{is_variant} = arith.cmpi eq, {ltag}, {tag} : i32")
+            self._terminator(f"cf.cond_br {is_variant}, {variant_lbl}, {next_lbl}")
+            self._start_block(variant_lbl)
+            payload_eq = self._emit_payload_equal(lslot, rslot, variant.payload)
+            self._store_slot(result_slot, "i1", payload_eq)
+            self._terminator(f"cf.br {exit_lbl}")
+            self._start_block(next_lbl)
+
+        self._store_slot(result_slot, "i1", self._const("0", "i1"))
+        self._terminator(f"cf.br {exit_lbl}")
+        self._start_block(exit_lbl)
+        return self._load_slot(result_slot, "i1")
+
     def _emit_equal(self, left: str, right: str, ty: Type) -> str:
-        """Structural equality producing an i1 (scalars, ADTs, and records)."""
+        """Structural equality producing an i1."""
         mty = mlir_type(ty)
         if ty is F64:
             out = self._fresh()
             self._emit(f"{out} = arith.cmpf oeq, {left}, {right} : f64")
+            return out
+        if ty is STRING:
+            lptr, llen = self._string_parts(left)
+            rptr, rlen = self._string_parts(right)
+            raw = self._fresh()
+            self._emit(
+                f"{raw} = func.call @__flx_str_eq({lptr}, {llen}, {rptr}, {rlen}) : "
+                "(!llvm.ptr, i64, !llvm.ptr, i64) -> i64"
+            )
+            zero = self._const("0", "i64")
+            out = self._fresh()
+            self._emit(f"{out} = arith.cmpi ne, {raw}, {zero} : i64")
             return out
         if isinstance(ty, ListType):
             return self._emit_list_equal(left, right, ty)
@@ -1517,78 +1587,7 @@ class FunctionLowerer:
             self._emit(f"{out} = arith.cmpi eq, {left}, {right} : {mty}")
             return out
         if isinstance(ty, AdtType):
-            tag_eq = self._cmp_field(left, right, mty, 0, "i32")
-            lslot = self._fresh()
-            self._emit(f"{lslot} = llvm.extractvalue {left}[1] : {mty}")
-            rslot = self._fresh()
-            self._emit(f"{rslot} = llvm.extractvalue {right}[1] : {mty}")
-            string_variants = [
-                i
-                for i, v in enumerate(ty.variants)
-                if len(v.payload) == 1 and v.payload[0] is STRING
-            ]
-            if string_variants:
-                # Variants carrying a String compare by CONTENT. The runtime
-                # helper only dereferences the boxed slots when the use-string
-                # flag is set — and the flag requires EQUAL tags too, because
-                # with differing tags the right slot can be a raw inline value
-                # (Word("hi") vs Num(7)) that must never be treated as a
-                # pointer. The payload result is dead when tags differ anyway.
-                ltag = self._fresh()
-                self._emit(f"{ltag} = llvm.extractvalue {left}[0] : {mty}")
-                is_str = None
-                for i in string_variants:
-                    ci = self._const(str(i), "i32")
-                    this = self._fresh()
-                    self._emit(f"{this} = arith.cmpi eq, {ltag}, {ci} : i32")
-                    if is_str is None:
-                        is_str = this
-                    else:
-                        nxt = self._fresh()
-                        self._emit(f"{nxt} = arith.ori {is_str}, {this} : i1")
-                        is_str = nxt
-                str_and_same = self._fresh()
-                self._emit(f"{str_and_same} = arith.andi {is_str}, {tag_eq} : i1")
-                use_str = self._fresh()
-                self._emit(f"{use_str} = arith.extui {str_and_same} : i1 to i64")
-                raw = self._fresh()
-                self._emit(
-                    f"{raw} = func.call @__flx_slot_str_eq({use_str}, {lslot}, {rslot}) : "
-                    "(i64, i64, i64) -> i64"
-                )
-                zero = self._const("0", "i64")
-                payload_eq = self._fresh()
-                self._emit(f"{payload_eq} = arith.cmpi ne, {raw}, {zero} : i64")
-            else:
-                payload_eq = self._fresh()
-                self._emit(f"{payload_eq} = arith.cmpi eq, {lslot}, {rslot} : i64")
-            # Variants carrying an F64 compare as FLOATS, not slot bits — bit
-            # equality would make Some(0.0) != Some(-0.0) and Some(nan) ==
-            # Some(nan), diverging from the interpreter's structural equality.
-            float_variants = [
-                i for i, v in enumerate(ty.variants) if len(v.payload) == 1 and v.payload[0] is F64
-            ]
-            if float_variants:
-                lf = self._fresh()
-                self._emit(f"{lf} = arith.bitcast {lslot} : i64 to f64")
-                rf = self._fresh()
-                self._emit(f"{rf} = arith.bitcast {rslot} : i64 to f64")
-                feq = self._fresh()
-                self._emit(f"{feq} = arith.cmpf oeq, {lf}, {rf} : f64")
-                ltag = self._fresh()
-                self._emit(f"{ltag} = llvm.extractvalue {left}[0] : {mty}")
-                for i in float_variants:
-                    # When tags differ tag_eq already kills the AND, so picking
-                    # the comparison by the LEFT tag is sound.
-                    ci = self._const(str(i), "i32")
-                    is_float_arm = self._fresh()
-                    self._emit(f"{is_float_arm} = arith.cmpi eq, {ltag}, {ci} : i32")
-                    nxt = self._fresh()
-                    self._emit(f"{nxt} = arith.select {is_float_arm}, {feq}, {payload_eq} : i1")
-                    payload_eq = nxt
-            out = self._fresh()
-            self._emit(f"{out} = arith.andi {tag_eq}, {payload_eq} : i1")
-            return out
+            return self._emit_adt_equal(left, right, ty, mty)
         if isinstance(ty, RecordType):
             conj: str | None = None
             for i, (_, fty) in enumerate(ty.fields):
@@ -1681,6 +1680,11 @@ class FunctionLowerer:
             return self._emit_list_show(value, ty)
         if isinstance(ty, MapType):
             return self._emit_map_show(value, ty)
+        symbol = self._show_impl_symbol(ty)
+        if symbol is not None:
+            shown = self._emit_call(_flex_symbol(symbol), [value], self.functions[symbol])
+            assert shown is not None
+            return shown
         raise BackendError(f"cannot show values of type {ty}")
 
     def _emit_list_show(self, value: str, ty: ListType) -> str:

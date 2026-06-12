@@ -20,6 +20,7 @@
 - [API Reference](api/index.md)
   - [Std.Arg](api/Std.Arg.md)
   - [Std.Bytes](api/Std.Bytes.md)
+  - [Std.Csv](api/Std.Csv.md)
   - [Std.Env](api/Std.Env.md)
   - [Std.Fs](api/Std.Fs.md)
   - [Std.IO](api/Std.IO.md)

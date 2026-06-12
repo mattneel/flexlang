@@ -74,6 +74,13 @@ def test_sdist_has_explicit_release_boundary() -> None:
     assert "ADVERSARIAL_REVIEW.md" in sdist["exclude"]
 
 
+def test_wheel_exposes_examples_for_source_blind_docs_kits() -> None:
+    hatch = _toml("pyproject.toml")["tool"]["hatch"]["build"]["targets"]
+    wheel = hatch["wheel"]
+
+    assert wheel["force-include"]["examples"] == "examples"
+
+
 def test_mise_docs_task_regenerates_generated_pages() -> None:
     mise = _toml("mise.toml")
 

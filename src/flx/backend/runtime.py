@@ -243,6 +243,28 @@ long long __flx_write_text(const char *p, long long n, const char *q, long long 
     err->len = 0;
     return 1;
 }
+long long __flx_append_text(const char *p, long long n, const char *q, long long m, FlxStr *err) {
+    char *path = __flx_path_copy(p, n);
+    FILE *f = fopen(path, "ab");
+    if (!f) {
+        __flx_copy_cstr(strerror(errno), err);
+        return 0;
+    }
+    size_t len = __flx_byte_len(m);
+    size_t wrote = fwrite(q, 1, len, f);
+    if (wrote != len || ferror(f)) {
+        __flx_copy_cstr(strerror(errno), err);
+        fclose(f);
+        return 0;
+    }
+    if (fclose(f) != 0) {
+        __flx_copy_cstr(strerror(errno), err);
+        return 0;
+    }
+    err->ptr = "";
+    err->len = 0;
+    return 1;
+}
 // Monotonic wall clock in milliseconds (Time.monotonic_ms).
 long long __flx_monotonic_ms(void) {
     struct timespec ts;
@@ -338,6 +360,12 @@ long long __flx_list_pop(void *lp, long long *out) {
     *out = l->data[l->len];
     return 1;
 }
+long long __flx_str_eq(const char *lp, long long ln, const char *rp, long long rn) {
+    size_t llen = __flx_byte_len(ln);
+    size_t rlen = __flx_byte_len(rn);
+    if (llen != rlen) return 0;
+    return memcmp(lp, rp, llen) == 0;
+}
 // ADT payload-slot equality with String awareness: when use_str, the slots
 // are boxed FlxStr cells compared by CONTENT; otherwise raw slot bits. The
 // flag keeps boxed dereferences off the non-string arms (a None slot is 0).
@@ -346,8 +374,7 @@ long long __flx_slot_str_eq(long long use_str, long long ls, long long rs) {
     if (ls == 0 || rs == 0) return ls == rs;
     FlxStr *a = (FlxStr *)ls;
     FlxStr *b = (FlxStr *)rs;
-    if (a->len != b->len) return 0;
-    return memcmp(a->ptr, b->ptr, (size_t)a->len) == 0;
+    return __flx_str_eq(a->ptr, a->len, b->ptr, b->len);
 }
 // The insertion-ordered map (Map<String, V>): an append-only entries array
 // with tombstones. Set on a live key replaces in place (keeping its position),
@@ -676,6 +703,7 @@ BASE_RUNTIME_DECLS = (
     "func.func private @__flx_read_line_opt(!llvm.ptr) -> i64\n"
     "func.func private @__flx_read_text(!llvm.ptr, i64, !llvm.ptr) -> i64\n"
     "func.func private @__flx_write_text(!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr) -> i64\n"
+    "func.func private @__flx_append_text(!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr) -> i64\n"
     "func.func private @__flx_monotonic_ms() -> i64\n"
     "func.func private @__flx_int_to_str(i64, !llvm.ptr)\n"
     "func.func private @__flx_str_concat(!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr)\n"
@@ -687,6 +715,7 @@ BASE_RUNTIME_DECLS = (
     "func.func private @__flx_list_set(!llvm.ptr, i64, i64)\n"
     "func.func private @__flx_list_len(!llvm.ptr) -> i64\n"
     "func.func private @__flx_list_pop(!llvm.ptr, !llvm.ptr) -> i64\n"
+    "func.func private @__flx_str_eq(!llvm.ptr, i64, !llvm.ptr, i64) -> i64\n"
     "func.func private @__flx_slot_str_eq(i64, i64, i64) -> i64\n"
     "func.func private @__flx_map_new() -> !llvm.ptr\n"
     "func.func private @__flx_map_set(!llvm.ptr, !llvm.ptr, i64, i64)\n"

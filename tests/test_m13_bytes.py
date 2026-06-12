@@ -38,7 +38,9 @@ def _test_cmd(path: Path, backend: str = "interp") -> tuple[int, bytes]:
 
 
 def _check(src_path: Path) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run([sys.executable, "-m", "flx", "check", str(src_path)], capture_output=True)
+    return subprocess.run(
+        [sys.executable, "-m", "flx", "check", str(src_path)], capture_output=True
+    )
 
 
 BYTES = """\

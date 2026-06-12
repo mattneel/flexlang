@@ -91,10 +91,12 @@ type) pins `Chain<I64>`.
 
 ## Equality on ADTs
 
-`==` and `assert_eq` work on ADTs whose payloads are machine-word scalars
-(`I64`, `Bool`, payloadless enums). Variants carrying strings, records, other
-ADTs, or multi-field payloads do not compare structurally with `==` — match on
-them instead, or write an `impl Eq`:
+`==` and `assert_eq` work on ADTs when every payload type is comparable:
+scalars, strings, records of comparable fields, lists, maps, and nested ADTs.
+String payloads compare by content even without importing `Std.Str`; direct
+string equality still needs the trait import. If a payload carries a
+non-comparable value such as `Bytes` or a function, match on it explicitly or
+write an `impl Eq`:
 
 ```text
 error[TYPE019]: assert_eq is not supported for E

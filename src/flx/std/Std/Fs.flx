@@ -12,6 +12,10 @@ pub fn write_text(path: String, contents: String) -> Result<Unit, String> uses {
   Fs.write_text(path, contents)
 }
 
+pub fn append_text(path: String, contents: String) -> Result<Unit, String> uses { Fs } = {
+  Fs.append_text(path, contents)
+}
+
 // --- documentation ---------------------------------------------------------------
 
 doc module {
@@ -47,6 +51,18 @@ doc write_text {
   summary "Write a whole string to a file, replacing existing contents."
   snippet "write a todo file" {
     match write_text("todo.txt", "buy milk\n") {
+      Ok(_) => {}
+      Err(reason) => { reason }
+    }
+  }
+  since "0.0.1"
+  status implemented
+}
+
+doc append_text {
+  summary "Append a whole string to a text file."
+  snippet "append a log line" {
+    match append_text("app.log", "started\n") {
       Ok(_) => {}
       Err(reason) => { reason }
     }

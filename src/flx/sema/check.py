@@ -24,11 +24,11 @@ from flx.types import (
     PRIMITIVES,
     REGION,
     STRING,
-    UNIT,
     U8,
     U16,
     U32,
     U64,
+    UNIT,
     AdtType,
     FnType,
     ListType,
@@ -224,6 +224,10 @@ _NEEDS_IMPORT: dict[str, str] = (
             "to_hex",
             "to_unsigned",
             "to_str_fixed",
+            "is_ascii_alpha",
+            "is_ascii_digit",
+            "is_ascii_alnum",
+            "lower_ascii",
             "repeat",
             "pad_left",
             "pad_right",
@@ -231,9 +235,10 @@ _NEEDS_IMPORT: dict[str, str] = (
         "Std.Str",
     )
     | dict.fromkeys(("map", "filter", "fold", "range", "sort", "sort_by", "sort_with"), "Std.List")
-    | dict.fromkeys(("read_text", "write_text"), "Std.Fs")
+    | dict.fromkeys(("read_text", "write_text", "append_text"), "Std.Fs")
     | dict.fromkeys(("all", "count", "at", "has_flag", "value_after"), "Std.Arg")
     | dict.fromkeys(("sqrt", "abs", "min", "max", "floor", "ceil"), "Std.Math")
+    | dict.fromkeys(("parse_csv_line",), "Std.Csv")
 )
 
 # Build-only intrinsics under `flx.` (available when the module declares targets).
@@ -274,6 +279,7 @@ _INTRINSICS: dict[tuple[str, str], tuple[str, tuple[Type, ...], Type | _Instanti
     ("Fs", "read_line"): ("Fs", (), _OPTION_OF_STRING),
     ("Fs", "read_text"): ("Fs", (STRING,), _RESULT_STRING_STRING),
     ("Fs", "write_text"): ("Fs", (STRING, STRING), _RESULT_UNIT_STRING),
+    ("Fs", "append_text"): ("Fs", (STRING, STRING), _RESULT_UNIT_STRING),
     ("Time", "monotonic_ms"): ("Time", (), I64),
     # Strings are byte strings: byte_at/substr index BYTES (UTF-8 sequences can
     # split; surrogateescape keeps the bytes lossless). Pure ("" = no effect).
@@ -1657,7 +1663,7 @@ class Checker:
         if op in _EQUALITY:
             if not _same(left, right):
                 self._err("TYPE003", f"cannot compare {left} with {right}", expr.span)
-            elif not _is_comparable(left):
+            elif not self._is_comparable_type(left):
                 help_text = "import Std.Str and compare with .eq()" if left is STRING else None
                 self._err(
                     "TYPE019", f"`{op}` is not supported for {left}", expr.span, help=help_text
@@ -1681,7 +1687,11 @@ class Checker:
     def _literal_int_value(self, expr: ast.Expr) -> int | None:
         if isinstance(expr, ast.IntLit):
             return expr.value
-        if isinstance(expr, ast.UnaryExpr) and expr.op == "-" and isinstance(expr.operand, ast.IntLit):
+        if (
+            isinstance(expr, ast.UnaryExpr)
+            and expr.op == "-"
+            and isinstance(expr.operand, ast.IntLit)
+        ):
             return -expr.operand.value
         return None
 
@@ -1834,14 +1844,14 @@ class Checker:
                 return BOOL
             other = self._check_expr(call.args[0], recv_ty)
             self._expect(recv_ty, other, call.args[0].span, "argument")
-            if not _is_comparable(recv_ty):
+            if not self._is_comparable_type(recv_ty):
                 self._err("TYPE019", f"eq is not supported for {recv_ty}", call.span)
             return BOOL
         if len(call.args) != 0:
             for arg in call.args:
                 self._check_expr(arg)
             self._err("TYPE005", "container show expects 0 arguments", call.span)
-        if not _is_showable(recv_ty):
+        if not self._is_showable_type(recv_ty):
             self._err("TYPE019", f"show is not supported for {recv_ty}", call.span)
         return STRING
 
@@ -2307,7 +2317,7 @@ class Checker:
                     self._err("TYPE003", f"cannot compare {a} with {b}", call.span)
                 elif a is STRING and ("Eq", "String") in self.impls:
                     pass  # compared through the Eq trait (import Std.Str)
-                elif not _is_comparable(a):
+                elif not self._is_comparable_type(a):
                     key = _type_key(a)
                     if key != "?" and ("Eq", key) in self.impls:
                         # Not structurally comparable, but the type carries an
@@ -2378,6 +2388,43 @@ class Checker:
         return then_ty
 
     # --- helpers --------------------------------------------------------------
+
+    def _is_comparable_type(self, ty: Type, seen: frozenset[Type] = frozenset()) -> bool:
+        """Whether equality can be lowered in this module.
+
+        String equality is intentionally import-scoped: `Std.Str` provides the
+        `Eq String` impl used by native lowering. Containers and records compose
+        through this check so `List<String>` and records with string fields work
+        after that import, but fail with the existing hint otherwise.
+        """
+        if ty is STRING:
+            return ("Eq", "String") in self.impls
+        if ty is BYTES or isinstance(ty, FnType):
+            return False
+        if isinstance(ty, ListType):
+            return self._is_comparable_type(ty.elem, seen)
+        if isinstance(ty, MapType):
+            return self._is_comparable_type(ty.value, seen)
+        if ty in seen:
+            return False
+        if isinstance(ty, RecordType):
+            return all(self._is_comparable_type(t, seen | {ty}) for _, t in ty.fields)
+        if isinstance(ty, AdtType):
+            return all(
+                all(t is STRING or self._is_comparable_type(t, seen | {ty}) for t in v.payload)
+                for v in ty.variants
+            )
+        return True
+
+    def _is_showable_type(self, ty: Type) -> bool:
+        if is_int_type(ty) or ty in (F64, BOOL, UNIT, STRING):
+            return True
+        if isinstance(ty, ListType):
+            return self._is_showable_type(ty.elem)
+        if isinstance(ty, MapType):
+            return self._is_showable_type(ty.value)
+        key = _type_key(ty)
+        return key != "?" and ("Show", key) in self.impls
 
     def _resolve_type(self, type_expr: ast.TypeExpr) -> Type:
         if type_expr.name == "Self" and not type_expr.args:

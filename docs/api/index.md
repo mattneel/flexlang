@@ -6,6 +6,7 @@
 
 - [Std.Arg](Std.Arg.md)
 - [Std.Bytes](Std.Bytes.md)
+- [Std.Csv](Std.Csv.md)
 - [Std.Env](Std.Env.md)
 - [Std.Fs](Std.Fs.md)
 - [Std.IO](Std.IO.md)

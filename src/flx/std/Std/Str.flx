@@ -55,6 +55,33 @@ fn is_space_byte(b: I64) -> Bool = {
   b == 32 || b == 9 || b == 10 || b == 13
 }
 
+pub fn is_ascii_alpha(b: I64) -> Bool = {
+  (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+}
+
+pub fn is_ascii_digit(b: I64) -> Bool = {
+  b >= 48 && b <= 57
+}
+
+pub fn is_ascii_alnum(b: I64) -> Bool = {
+  is_ascii_alpha(b) || is_ascii_digit(b)
+}
+
+pub fn lower_ascii(s: String) -> String = {
+  mut out = ""
+  mut i = 0
+  while i < length(s) {
+    let b = byte_at(s, i)
+    if b >= 65 && b <= 90 {
+      out = out ++ from_byte(b + 32)
+    } else {
+      out = out ++ char_at(s, i)
+    }
+    i = i + 1
+  }
+  out
+}
+
 // Trim ASCII whitespace: space, tab, LF, CR.
 pub fn trim(s: String) -> String = {
   let n = length(s)
@@ -331,6 +358,40 @@ doc str_lt {
     assert(!str_lt("same", "same"))
   }
   see cmp
+}
+
+doc is_ascii_alpha {
+  summary "True for ASCII A-Z or a-z bytes."
+  test "classifies letters" {
+    assert(is_ascii_alpha(65))
+    assert(is_ascii_alpha(122))
+    assert(!is_ascii_alpha(48))
+  }
+}
+
+doc is_ascii_digit {
+  summary "True for ASCII digit bytes."
+  test "classifies digits" {
+    assert(is_ascii_digit(48))
+    assert(is_ascii_digit(57))
+    assert(!is_ascii_digit(65))
+  }
+}
+
+doc is_ascii_alnum {
+  summary "True for ASCII letter or digit bytes."
+  test "classifies alphanumeric bytes" {
+    assert(is_ascii_alnum(65))
+    assert(is_ascii_alnum(57))
+    assert(!is_ascii_alnum(45))
+  }
+}
+
+doc lower_ascii {
+  summary "Lowercase ASCII A-Z bytes, leaving other bytes unchanged."
+  test "lowercases only ASCII letters" {
+    assert_eq(lower_ascii("A_Z 09!"), "a_z 09!")
+  }
 }
 
 doc byte_at {

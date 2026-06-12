@@ -63,6 +63,11 @@ def _build_parser() -> argparse.ArgumentParser:
                 help="compile and run through the native LLVM backend (needs MLIR/LLVM 22)",
             )
             cmd.add_argument(
+                "--quiet-status",
+                action="store_true",
+                help="suppress the flx status line for nonzero program exits",
+            )
+            cmd.add_argument(
                 "args",
                 nargs=argparse.REMAINDER,
                 help="arguments for the program (Env.argv); put flx flags before the file",
@@ -285,6 +290,7 @@ def _dispatch(argv: Sequence[str] | None = None) -> int:
             interpret=not args.native,
             native=args.native,
             args=tuple(prog_args),
+            announce=not args.quiet_status,
         )
     if args.command == "build":
         # An explicit .flx file (or path) compiles a native executable. A bare

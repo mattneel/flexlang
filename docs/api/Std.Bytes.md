@@ -4,11 +4,29 @@
 
 *Generated from the `doc` declarations in `Bytes.flx` by `flx docs build`. Examples are executed by `flx docs check`.*
 
+Raw byte-buffer helpers.
+
+`Bytes` is for binary data, including byte 0. Unlike `String`, it has no text
+encoding contract and no equality operator; inspect bytes explicitly or render
+them with `bytes_to_hex`.
+
+*since 0.0.1 · status: implemented*
+
 ## bytes_len
 
 ```flx
 fn bytes_len(bs: Bytes) -> I64
 ```
+
+The number of bytes in a buffer.
+
+**Example: counts binary bytes** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(bytes_len(<<0x41, 0, 255, "PNG">>), 6)
+```
+
+*since 0.0.1 · status: implemented*
 
 ## bytes_at
 
@@ -16,8 +34,31 @@ fn bytes_len(bs: Bytes) -> I64
 fn bytes_at(bs: Bytes, i: I64) -> U8
 ```
 
+The byte at index i as U8; panics if out of bounds.
+
+**Example: indexes bytes** — ✓ checked by `flx docs check`:
+
+```flx
+let bs = <<0x41, 0, 255>>
+assert_eq(bytes_at(bs, 0), 65)
+assert_eq(bytes_at(bs, 1), 0)
+assert_eq(bytes_at(bs, 2), 255)
+```
+
+*since 0.0.1 · status: implemented*
+
 ## bytes_to_hex
 
 ```flx
 fn bytes_to_hex(bs: Bytes) -> String
 ```
+
+Lowercase hexadecimal for the whole byte buffer.
+
+**Example: renders bytes** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(bytes_to_hex(<<0x41, 0, 255, "PNG">>), "4100ff504e47")
+```
+
+*since 0.0.1 · status: implemented*

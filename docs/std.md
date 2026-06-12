@@ -32,9 +32,10 @@ an effect-free function is EFFECT001, exactly like any other call.
 | Module | What | Effects |
 |---|---|---|
 | `Std.Math` | `abs`, `min`, `max`, `clamp`, `sign`, `pow` (64-bit wrapping integer math) | pure |
-| `Std.Str` | `length` (bytes), `is_empty`, `eq`, `ne`, `cmp`, `str_lt`, `byte_at`, `substr`, `char_at`, `split`, `parse_int`, `parse_float`, `to_str_fixed`, `from_byte`, `from_bytes`, `to_bytes`, `trim`, `to_hex`, `to_unsigned`, `repeat`, `pad_left`, `pad_right`, plus `impl Eq for String` and `impl Show for String` | pure |
+| `Std.Str` | `length` (bytes), `is_empty`, `eq`, `ne`, `cmp`, `str_lt`, `byte_at`, `substr`, `char_at`, ASCII classifiers/case helpers, `split`, `parse_int`, `parse_float`, `to_str_fixed`, `from_byte`, `from_bytes`, `to_bytes`, `trim`, `to_hex`, `to_unsigned`, `repeat`, `pad_left`, `pad_right`, plus `impl Eq for String` and `impl Show for String` | pure |
+| `Std.Csv` | `parse_csv_line(row)` for one CSV record with quoted fields and doubled quotes | pure |
 | `Std.IO` | `print` (no newline), `println`, `eprintln`, `read_line` (one stdin line as `Option<String>`; `None` at EOF) | `Log` / `Fs` |
-| `Std.Fs` | `read_text(path)`, `write_text(path, contents)` for narrow text-file CLIs | `Fs` |
+| `Std.Fs` | `read_text(path)`, `write_text(path, contents)`, `append_text(path, contents)` for narrow text-file CLIs | `Fs` |
 | `Std.Arg` | `all`, `count`, `at`, `has_flag`, `value_after` over `Env.argv()` | `Process` |
 | `Std.List` | `range(a, b)`, `map`, `filter`, `fold`, `sort`, `sort_by`, `sort_with` — the built-in list ops (`List.push`/`len`/`set`/`pop`, `xs[i]`, `for-in`) need no import | pure |
 | `Std.Map` | `entries(m)` plus docs for the built-in `Map<String, V>` (`Map.new`/`set`/`get`/`has`/`len`/`remove`/`keys`/`values` need no import; insertion-ordered, `get` returns `Option<V>`) | pure |

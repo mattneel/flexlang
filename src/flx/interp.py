@@ -31,7 +31,19 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 from flx.syntax import ast
-from flx.types import INT_INFO
+from flx.types import (
+    F64,
+    INT_INFO,
+    STRING,
+    UNIT,
+    AdtType,
+    ListType,
+    MapType,
+    PrimType,
+    RecordType,
+    Type,
+    is_int_type,
+)
 
 if TYPE_CHECKING:
     from flx.sema.check import CheckResult
@@ -94,6 +106,10 @@ def _wrap(value: int) -> int:
     the native `arith` overflow behavior."""
     value &= _I64_MASK
     return value - (1 << 64) if value & _I64_SIGN else value
+
+
+def _os_error_message(exc: OSError) -> str:
+    return exc.strerror or str(exc)
 
 
 def _int_bounds_name(name: str) -> tuple[int, int]:
@@ -399,6 +415,7 @@ class Interpreter:
         self.checked = checked
         self.args = args  # program arguments for Env.argv (user args, no argv[0])
         self.functions = {fn.name: fn for fn in checked.module.functions}
+        self.types = checked.expr_types
         self.constructors = checked.constructors
         self.method_targets = checked.method_targets
         # Variants of payloadless enums lower to a scalar tag natively, so the
@@ -419,6 +436,28 @@ class Interpreter:
         # already loaded in this process (libc and friends).
         self.extern_fns = checked.extern_fns
         self._extern_cache: dict[str, object] = {}
+
+    def _show_impl_symbol(self, ty: Type) -> str | None:
+        if not isinstance(ty, (PrimType, RecordType, AdtType)):
+            return None
+        symbol = f"t$Show$0${ty.name}$show"
+        return symbol if symbol in self.functions else None
+
+    def _show_typed(self, value: object, ty: Type) -> str:
+        if is_int_type(ty) or ty in (F64, STRING, UNIT):
+            return _show_value(value)
+        if isinstance(ty, ListType) and isinstance(value, list):
+            return "[" + ", ".join(self._show_typed(v, ty.elem) for v in value) + "]"
+        if isinstance(ty, MapType) and isinstance(value, dict):
+            return (
+                "{"
+                + ", ".join(f"{k}: {self._show_typed(v, ty.value)}" for k, v in value.items())
+                + "}"
+            )
+        symbol = self._show_impl_symbol(ty)
+        if symbol is not None:
+            return str(self.call(self.functions[symbol], [value]))
+        return _show_value(value)
 
     # --- entry points ---------------------------------------------------------
 
@@ -843,6 +882,9 @@ class Interpreter:
             if callee.name == "show":
                 obj_value = self.eval(callee.obj, env)
                 if isinstance(obj_value, (list, dict)):
+                    obj_ty = self.types.get(id(callee.obj))
+                    if obj_ty is not None:
+                        return self._show_typed(obj_value, obj_ty)
                     return _show_value(obj_value)
             obj = callee.obj
             # A user type or binding named Log/Str/Env/... shadows the intrinsic
@@ -874,7 +916,7 @@ class Interpreter:
                             )
                         return Variant("Ok", raw.decode("utf-8", "surrogateescape"))
                     except OSError as exc:
-                        return Variant("Err", str(exc))
+                        return Variant("Err", _os_error_message(exc))
                 if callee.name == "write_text":
                     path = str(self.eval(expr.args[0], env))
                     text = str(self.eval(expr.args[1], env))
@@ -882,7 +924,16 @@ class Interpreter:
                         Path(path).write_bytes(text.encode("utf-8", "surrogateescape"))
                         return Variant("Ok", None)
                     except OSError as exc:
-                        return Variant("Err", str(exc))
+                        return Variant("Err", _os_error_message(exc))
+                if callee.name == "append_text":
+                    path = str(self.eval(expr.args[0], env))
+                    text = str(self.eval(expr.args[1], env))
+                    try:
+                        with Path(path).open("ab") as out:
+                            out.write(text.encode("utf-8", "surrogateescape"))
+                        return Variant("Ok", None)
+                    except OSError as exc:
+                        return Variant("Err", _os_error_message(exc))
             if (
                 isinstance(obj, ast.NameExpr)
                 and obj.name == "Time"

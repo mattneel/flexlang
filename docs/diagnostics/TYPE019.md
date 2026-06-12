@@ -4,17 +4,15 @@
 
 Equality is not defined for this type.
 
-`==` and `assert_eq` work on scalars, records of comparables, and ADTs
-whose variants carry at most one machine-word or String payload (String
-payloads compare by CONTENT, so `Some("a") == Some("a")` holds). Strings
-themselves compare via `import Std.Str` (the Eq trait). Lists and Maps
-compare structurally when their element/value type is structurally
-comparable; they still have reference semantics for mutation. For records
-and ADTs beyond those shapes, `derive(Eq)` generates the comparison and
-enables `assert_eq`.
+`==` and `assert_eq` work on scalars, records of comparable fields, ADTs of
+comparable payloads, and Lists/Maps whose element/value type is comparable.
+ADT String payloads compare by content without an import, so `Some("a") ==
+Some("a")` holds. Direct String equality and containers/records carrying
+String need `import Std.Str` for the Eq trait. Bytes and functions do not
+compare structurally.
 
-**Example: lists of non-comparable elements do not compare with ==** — expected to fail with `TYPE019` (proven by `flx docs check`):
+**Example: bytes do not compare with ==** — expected to fail with `TYPE019` (proven by `flx docs check`):
 
 ```flx
-fn main() -> I64 = { if ["a"] == ["a"] { 0 } else { 1 } }
+fn main() -> I64 = { if <<0x01>> == <<0x01>> { 0 } else { 1 } }
 ```

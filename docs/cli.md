@@ -40,6 +40,7 @@ flx highlight examples/add.flx --format html > add.html
 ```sh
 flx run tool.flx alpha beta
 flx run --native tool.flx alpha beta
+flx run --quiet-status tool.flx
 flx run              # with package.flx: run the manifest entry
 ```
 
@@ -47,6 +48,10 @@ Everything after the file is passed to the program as `Env.argv()` user
 arguments; argv[0] is excluded so interpreter and native binaries agree. Put
 `flx` flags before the file. A leading `--` after the file is stripped, so
 `flx run tool.flx -- --flag` passes `--flag`.
+
+By default, a nonzero `main` return prints `flx: exited with code N` after the
+program exits. Pass `--quiet-status` to preserve the exit code while suppressing
+that driver status line.
 
 ## `flx test`
 

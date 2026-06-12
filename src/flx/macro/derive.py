@@ -11,10 +11,11 @@ field/payload type expressions:
   `eq` impl, so nested derives compose;
 * List fields get generated structural helper functions (element-wise loops)
   — list types cannot carry impls, so derive writes the code instead;
+* Map fields compare through `m.eq(other)` when the value type is comparable;
 * String-carrying ADTs get a match-based equality, arm by arm.
 
 Generic types are reported (DER004), not mis-generated; Map fields are
-rejected with the reason (reference semantics).
+compared structurally by key/value content, while assignment still aliases.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
 
 _SUPPORTED = {"Eq", "Show"}
 
-_SCALARS = {"I64", "F64", "Bool", "Unit"}
+_SCALARS = {"I8", "U8", "I16", "U16", "I32", "U32", "I64", "U64", "F64", "Bool", "Unit"}
 
 
 def run_derives(module: ast.Module, exp: Expander) -> list[ast.Item]:
@@ -370,11 +371,7 @@ def _eq_expr(
         helper = gen.list_eq(te.args[0], sp)
         return ast.CallExpr(_name(helper, sp), [mine, theirs], sp)
     if te.name == "Map":
-        raise _err(
-            "DER001",
-            "cannot derive Eq over a Map field: maps have reference semantics",
-            sp,
-        )
+        return _call_method(mine, "eq", [theirs], sp)
     if _comparable_syntactic(te, exp, frozenset()):
         return ast.BinaryExpr("==", mine, theirs, sp)
     if te.name in ("Option", "Result") and te.args:

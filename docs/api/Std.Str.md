@@ -236,6 +236,68 @@ assert_eq(bs[1], 255)
 
 See also: `from_bytes`
 
+## is_ascii_alpha
+
+```flx
+fn is_ascii_alpha(b: I64) -> Bool
+```
+
+True for ASCII A-Z or a-z bytes.
+
+**Example: classifies letters** — ✓ checked by `flx docs check`:
+
+```flx
+assert(is_ascii_alpha(65))
+assert(is_ascii_alpha(122))
+assert(!is_ascii_alpha(48))
+```
+
+## is_ascii_digit
+
+```flx
+fn is_ascii_digit(b: I64) -> Bool
+```
+
+True for ASCII digit bytes.
+
+**Example: classifies digits** — ✓ checked by `flx docs check`:
+
+```flx
+assert(is_ascii_digit(48))
+assert(is_ascii_digit(57))
+assert(!is_ascii_digit(65))
+```
+
+## is_ascii_alnum
+
+```flx
+fn is_ascii_alnum(b: I64) -> Bool
+```
+
+True for ASCII letter or digit bytes.
+
+**Example: classifies alphanumeric bytes** — ✓ checked by `flx docs check`:
+
+```flx
+assert(is_ascii_alnum(65))
+assert(is_ascii_alnum(57))
+assert(!is_ascii_alnum(45))
+```
+
+## lower_ascii
+
+```flx
+fn lower_ascii(s: String) -> String
+```
+
+Lowercase ASCII A-Z bytes, leaving other bytes unchanged.
+
+**Example: lowercases only ASCII letters** — ✓ checked by `flx docs check`:
+
+```flx
+assert_eq(lower_ascii("A_Z 09!"), "a_z 09!")
+```
+
 ## trim
 
 ```flx

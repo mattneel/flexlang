@@ -55,6 +55,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/flx"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"examples" = "examples"
+
 [tool.hatch.build.targets.sdist]
 include = [
     "LICENSE",
