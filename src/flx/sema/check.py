@@ -722,8 +722,7 @@ class Checker:
                 f"method {method.name!r} does not match the trait signature",
                 method.span,
                 help=(
-                    f"generic impl methods for {impl_name} must declare "
-                    f"<{', '.join(impl_params)}>"
+                    f"generic impl methods for {impl_name} must declare <{', '.join(impl_params)}>"
                 ),
             )
             return
@@ -870,8 +869,7 @@ class Checker:
         if len(call.args) != expected_args:
             self._err(
                 "TYPE005",
-                f"method {callee.name!r} expects {expected_args} argument(s), "
-                f"got {len(call.args)}",
+                f"method {callee.name!r} expects {expected_args} argument(s), got {len(call.args)}",
                 call.span,
             )
             return ERROR

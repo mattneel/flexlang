@@ -268,9 +268,7 @@ def test_new_creates_runnable_package(
     assert "ok Main / main returns zero" in out
 
 
-def test_new_refuses_nonempty_directory(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_new_refuses_nonempty_directory(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     app = tmp_path / "app"
     app.mkdir()
     (app / "keep.txt").write_text("do not overwrite", encoding="utf-8")

@@ -161,10 +161,7 @@ def _type_params_in(te: ast.TypeExpr, params: set[str]) -> set[str]:
 def _method_type_params(
     all_params: list[str], bound_params: set[str], bound: str, sp: Span
 ) -> list[ast.TypeParam]:
-    return [
-        ast.TypeParam(name, [bound] if name in bound_params else [], sp)
-        for name in all_params
-    ]
+    return [ast.TypeParam(name, [bound] if name in bound_params else [], sp) for name in all_params]
 
 
 def _decl_type_params_for_trait(
@@ -563,9 +560,7 @@ def _derive_eq(
         else []
     )
     method_params = _decl_type_params_for_trait(type_params, "Eq", field_types, sp)
-    return _expr_fn(
-        "eq", [("self", self_te), ("other", self_te)], "Bool", body, sp, method_params
-    )
+    return _expr_fn("eq", [("self", self_te), ("other", self_te)], "Bool", body, sp, method_params)
 
 
 def _eq_adt(
@@ -599,9 +594,7 @@ def _eq_adt(
     match = ast.MatchExpr(_name("self", sp), outer_arms, sp)
     field_types = [pty for variant in adt.variants for pty in variant.payload]
     method_params = _decl_type_params_for_trait(type_params, "Eq", field_types, sp)
-    return _expr_fn(
-        "eq", [("self", self_te), ("other", self_te)], "Bool", match, sp, method_params
-    )
+    return _expr_fn("eq", [("self", self_te), ("other", self_te)], "Bool", match, sp, method_params)
 
 
 # --- Show ---------------------------------------------------------------------
@@ -639,9 +632,7 @@ def _show_record(
     method_params = _decl_type_params_for_trait(
         type_params, "Show", [fld.type for fld in record.fields], sp
     )
-    return _expr_fn(
-        "show", [("self", self_te)], "String", _concat(parts, sp), sp, method_params
-    )
+    return _expr_fn("show", [("self", self_te)], "String", _concat(parts, sp), sp, method_params)
 
 
 def _show_adt(

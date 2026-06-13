@@ -36,9 +36,7 @@ def test_fmt_writes_file(tmp_path: Path) -> None:
     assert path.read_text(encoding="utf-8") == FORMATTED
 
 
-def test_fmt_check_reports_unformatted(
-    tmp_path: Path, capsys
-) -> None:
+def test_fmt_check_reports_unformatted(tmp_path: Path, capsys) -> None:
     path = tmp_path / "main.flx"
     path.write_text(MESSY, encoding="utf-8")
 

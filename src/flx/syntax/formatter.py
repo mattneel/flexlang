@@ -320,8 +320,7 @@ class _Formatter:
             return self._maybe_paren(text, _POSTFIX_PREC, parent_prec)
         if isinstance(expr, ast.IndexExpr):
             text = (
-                f"{self._expr(expr.obj, indent, _POSTFIX_PREC)}"
-                f"[{self._expr(expr.index, indent)}]"
+                f"{self._expr(expr.obj, indent, _POSTFIX_PREC)}[{self._expr(expr.index, indent)}]"
             )
             return self._maybe_paren(text, _POSTFIX_PREC, parent_prec)
         if isinstance(expr, ast.UnaryExpr):
@@ -396,9 +395,7 @@ class _Formatter:
         for arm in expr.arms:
             body = self._expr(arm.body, indent + 1)
             body_lines = body.splitlines()
-            lines.append(
-                f"{self._ind(indent + 1)}{self._pattern(arm.pattern)} => {body_lines[0]}"
-            )
+            lines.append(f"{self._ind(indent + 1)}{self._pattern(arm.pattern)} => {body_lines[0]}")
             lines.extend(body_lines[1:])
         lines.append(f"{self._ind(indent)}}}")
         return "\n".join(lines)
